@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Typography scales via the --ui-font-scale tokens, never the root font size, so rem layout holds."""
+
+import re
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+SRC = REPO / "studio/frontend/src"
+INDEX_CSS = (SRC / "index.css").read_text(encoding = "utf-8")
+STORE = (SRC / "features/settings/stores/appearance-custom-store.ts").read_text(encoding = "utf-8")
+SELECT = (SRC / "components/ui/select.tsx").read_text(encoding = "utf-8")
+UTILS = (SRC / "lib/utils.ts").read_text(encoding = "utf-8")
+
+# Raw fontSize props are allowed only where a scaled .recharts-text rule overrides them.
+FONTSIZE_PROP_ALLOWED_DIRS = (
+    "features/studio/sections/charts",
+    "features/studio/sections/training-section.tsx",
+)
+
+FONTSIZE_STYLE_ALLOWLIST = {
+    # Offscreen textarea; 12pt+ suppresses the iOS focus zoom. Never rendered.
+    "lib/copy-to-clipboard.ts",
+}
+
+# Sizes a container query's em breakpoint, not text (--ui-space-scale derives
+# from --ui-font-scale); children reset to the 1rem they would inherit.
+CSS_FONTSIZE_LAYOUT_RULES = {
+    (".browser-panel", "font-size: calc(1rem * var(--ui-space-scale, 1));"),
+    (".browser-panel > *", "font-size: 1rem;"),
+}
+
+
+def _css_selector_before(text, pos):
+    head = re.sub(r"/\*.*?\*/", "", text[:pos].rsplit("{", 1)[0], flags = re.S)
+    return re.split(r"[{};]", head)[-1].strip()
+
+
+def _frontend_sources():
+    for path in sorted(SRC.rglob("*")):
+        if path.suffix in {".ts", ".tsx", ".css"}:
+            yield path
+
+
+def _rel(path):
+    """Forward-slash path relative to the source root, so allowlist entries also match on Windows."""
+    return path.relative_to(SRC).as_posix()
+
+
+def test_preference_writes_a_scale_not_the_root_font_size():
+    assert 'setVar("--ui-font-scale"' in STORE
+    assert 'el.setAttribute("data-ui-font-size"' in STORE
+    assert 'style.removeProperty("font-size")' in STORE
+    assert "style.fontSize" not in STORE
+
+
+def test_css_default_scale_matches_the_store_default():
+    """Derives the CSS default scale from the store's px default so the two cannot drift apart."""
+    rng = re.search(r"UI_FONT_SIZE_RANGE = \{ min: (\d+), max: (\d+), default: (\d+) \}", STORE)
+    assert rng is not None
+    base = re.search(r"const UI_FONT_SIZE_CSS_BASE = (\d+);", STORE)
+    assert base is not None
+    assert "c.uiFontSize ?? UI_FONT_SIZE_RANGE.default" in STORE
+    assert "effectiveUiFontSize !== UI_FONT_SIZE_RANGE.default" in STORE
+    assert "effectiveUiFontSize / UI_FONT_SIZE_CSS_BASE" in STORE
+    scale = int(rng.group(3)) / int(base.group(1))
+    # The default lives in index.css's fallback for --ui-font-scale, derived from the stored scale.
+    assert (
+        f"--ui-font-scale: calc(var(--ui-font-size-scale, {scale:g}) * var(--ui-interface-scale, 1));"
+    ) in INDEX_CSS
+    # One setter call: the default branch's `setVar("--ui-font-size-scale", null)` does not count.
+    assert re.search(
+        r'setVar\(\s*"--ui-font-size-scale",\s*String\(effectiveUiFontSize / UI_FONT_SIZE_CSS_BASE\),?\s*\)',
+        STORE,
+    ), "a custom font size no longer writes --ui-font-size-scale"
+
+
+def test_named_text_tokens_scale():
+    for token, rem in (
+        ("--text-xs", "0.75rem"),
+        ("--text-sm", "0.875rem"),
+        ("--text-base", "1rem"),
+        ("--text-lg", "1.125rem"),
+    ):
+        assert f"{token}: calc({rem} * var(--ui-font-scale, 1));" in INDEX_CSS
+
+
+def test_numeric_leading_scales_with_the_preference():
+    for n, rem in ((3, "0.75rem"), (5, "1.25rem"), (6, "1.5rem")):
+        assert f"--leading-{n}: calc({rem} * var(--ui-font-scale, 1));" in INDEX_CSS
+
+
+def test_ui_token_families_exist():
+    assert "--text-ui-11: calc(0.6875rem * var(--ui-font-scale, 1));" in INDEX_CSS
+    assert "--text-ui-10p5: calc(0.65625rem * var(--ui-font-scale, 1));" in INDEX_CSS
+    assert "--leading-ui-17: calc(1.0625rem * var(--ui-font-scale, 1));" in INDEX_CSS
+
+
+def test_explicit_code_font_size_is_never_multiplied():
+    match = re.search(r"html\[data-code-font-size\][^{]*\{([^}]*)\}", INDEX_CSS)
+    assert match is not None
+    body = match.group(1)
+    assert "var(--custom-code-font-size)" in body
+    assert "--ui-font-scale" not in body
+
+
+def test_radix_select_viewport_owns_the_scroll_state():
+    viewport = SELECT[SELECT.index("SelectPrimitive.Viewport") :]
+    assert "overflow-y-auto" in viewport.split("</SelectPrimitive.Viewport>")[0]
+    # The rounded surface itself must not scroll (WebKit squares its corners).
+    content_cls = re.search(
+        r"SelectPrimitive\.Content[\s\S]*?className=\{cn\(\s*\"([^\"]+)\"", SELECT
+    )
+    assert content_cls is not None
+    assert "overflow-hidden" in content_cls.group(1)
+    assert "overflow-y-auto" not in content_cls.group(1)
+
+
+def test_cn_knows_the_ui_typography_tokens():
+    """Stock tailwind-merge classifies text-ui-* as a text color and deletes
+    it whenever a real color class follows in the same cn() call, so the
+    element falls back to the unscaled inherited font size."""
+    assert "extendTailwindMerge" in UTILS
+    assert '"font-size": [{ text: [isUiToken] }]' in UTILS
+    assert "leading: [{ leading: [isUiToken] }]" in UTILS
+    assert "/^ui-\\d+(p5)?$/.test(value)" in UTILS
+
+
+def test_icons_follow_the_ui_font_size_itself():
+    """Icons scale at the same linear rate as text via --ui-icon-size, not at half rate above 16px."""
+    assert "--ui-icon-size: calc(1rem * var(--ui-font-scale, 1));" in INDEX_CSS
+    assert "--icon-size: var(--ui-icon-size);" in INDEX_CSS
+    assert "& svg.size-4 { width: var(--ui-icon-size); height: var(--ui-icon-size); }" in INDEX_CSS
+    assert "font-size: calc(13px * var(--ui-font-scale, 1)) !important;" in INDEX_CSS
+    assert "font-size: calc(12px * var(--ui-font-scale, 1)) !important;" in INDEX_CSS
+    assert "width: var(--ui-icon-size) !important;" in INDEX_CSS
+    assert "svg:not(.unsloth-tick) {" in INDEX_CSS
+    assert "& svg.size-6 { width: calc(1.5rem * var(--ui-font-scale, 1));" in INDEX_CSS
+    for scope in (
+        "[data-slot='dropdown-menu-content']",
+        "[data-slot='select-content']",
+        "[data-slot='select-trigger']",
+        "[data-slot='combobox-content']",
+        "[data-sonner-toast]",
+        ".aui-root",
+    ):
+        assert scope in INDEX_CSS
+
+
+def test_no_raw_pixel_text_utilities():
+    offenders = []
+    for path in _frontend_sources():
+        text = path.read_text(encoding = "utf-8")
+        for m in re.finditer(r"(?<![\w-])(?:text|leading)-\[[0-9.]+px\]", text):
+            offenders.append(f"{_rel(path)}: {m.group(0)}")
+    assert offenders == [], (
+        "Raw px text utilities ignore the UI font size preference; use the "
+        f"text-ui-* / leading-ui-* tokens in index.css instead: {offenders[:10]}"
+    )
+
+
+def test_css_font_sizes_reference_the_scale():
+    offenders = []
+    for path in _frontend_sources():
+        if path.suffix != ".css":
+            continue
+        text = path.read_text(encoding = "utf-8")
+        for m in re.finditer(r"(font-size|line-height):[^;{}]*;", text):
+            decl = m.group(0)
+            if re.search(r"[0-9.]+(px|rem)", decl) is None:
+                continue
+            if "--ui-font-scale" in decl:
+                continue
+            if "1px" in decl:
+                continue  # library layout tricks (KaTeX-style), not text
+            selector = _css_selector_before(text, m.start())
+            if (selector, decl.strip()) in CSS_FONTSIZE_LAYOUT_RULES:
+                continue
+            offenders.append(f"{_rel(path)}: {decl.strip()[:80]}")
+    assert offenders == [], (
+        "CSS typography must multiply by var(--ui-font-scale, 1) or be "
+        f"allowlisted here with a reason: {offenders[:10]}"
+    )
+
+
+def test_inline_font_size_styles_reference_the_scale():
+    offenders = []
+    for path in _frontend_sources():
+        rel = _rel(path)
+        if rel in FONTSIZE_STYLE_ALLOWLIST:
+            continue
+        text = path.read_text(encoding = "utf-8")
+        for m in re.finditer(r"fontSize:\s*([\"'][^\"']+[\"']|[0-9.]+)", text):
+            value = m.group(1)
+            if "--ui-font-scale" in value:
+                continue
+            if value.replace(".", "").isdigit() and any(
+                rel.startswith(d) for d in FONTSIZE_PROP_ALLOWED_DIRS
+            ):
+                continue  # covered by the .recharts-text override
+            offenders.append(f"{rel}: fontSize {value}")
+        for m in re.finditer(r"fontSize=\{?([0-9.]+)\}?", text):
+            if not any(rel.startswith(d) for d in FONTSIZE_PROP_ALLOWED_DIRS):
+                offenders.append(f"{rel}: fontSize={m.group(1)}")
+    assert offenders == [], (
+        "Inline font sizes must scale with var(--ui-font-scale, 1) or be "
+        f"documented in the allowlist: {offenders[:10]}"
+    )

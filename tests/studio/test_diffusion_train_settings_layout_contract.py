@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Uses a container query, not a viewport breakpoint, since the panel is a fraction of the window."""
+
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[2]
+PANEL_TSX = REPO / "studio/frontend/src/features/images/train/diffusion-train-panel.tsx"
+
+
+def _source() -> str:
+    return PANEL_TSX.read_text(encoding = "utf-8")
+
+
+def test_settings_cell_cannot_outgrow_its_grid_column():
+    assert 'const fieldClass = "grid grid-cols-1 min-w-0 gap-2";' in _source()
+
+
+def test_settings_columns_key_off_the_pane_width_not_the_viewport():
+    source = _source()
+
+    assert '<div className="@container flex flex-col gap-6">' in source
+    # 324px fits two 150px cells plus the 24px gutter, 498px fits three.
+    assert source.count("@min-[324px]:grid-cols-2 @min-[498px]:grid-cols-3") == 3
+    assert "lg:grid-cols-3" not in source
+
+
+def test_field_label_ellipses_instead_of_cutting_mid_glyph():
+    # Label is flex and text-overflow does nothing on a flex container, so pair with block.
+    assert '<Label className="block min-w-0 truncate text-xs">{children}</Label>' in _source()

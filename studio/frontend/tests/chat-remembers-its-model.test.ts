@@ -1,0 +1,745 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+// Every thread row has carried modelId since long before this notice, so the model a chat
+// was started on is already known for chats that already exist. What was missing was
+// offering it back. The rules below are the ones that keep the offer from becoming a
+// nuisance: it never loads anything on its own, and it stays quiet whenever it could not
+// be honoured.
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  atDefaultUiScale,
+  installLocalStorageFake,
+  readText,
+  registerBundlerResolver,
+} from "./helpers/kit.ts";
+
+registerBundlerResolver();
+const { store } = installLocalStorageFake();
+const {
+  chatModelIsResident,
+  chatModelSelectableId,
+  chatModelSwitchMeta,
+  createChatModelHistoryReader,
+  resolveChatModelSwitchTarget,
+} = await import("../src/features/chat/components/chat-model-notice-switch.ts");
+const { modelDisplayName } = await import(
+  "../src/features/hub/lib/model-identity.ts"
+);
+const { chatLocalModelOptions } = await import(
+  "../src/features/chat/local-model-options.ts"
+);
+const {
+  DEFAULT_PER_MODEL_CONFIG,
+  resolveInitialConfig,
+  resolveResidentInitialConfig,
+  savePerModelConfig,
+} = await import("../src/features/model-picker/model-config/per-model-config.ts");
+const { shouldPersistResolvedQueuedModel } = await import(
+  "../src/features/chat/utils/queued-chat-run-settings.ts"
+);
+const { wantsDownloadManagerStaging } = await import(
+  "../src/features/chat/utils/model-download-staging.ts"
+);
+
+const notice = atDefaultUiScale(readText("../src/features/chat/components/chat-model-notice.tsx"));
+const page = atDefaultUiScale(readText("../src/features/chat/chat-page.tsx"));
+const runtimeProvider = atDefaultUiScale(readText("../src/features/chat/runtime-provider.tsx"));
+const adapter = atDefaultUiScale(readText("../src/features/chat/api/chat-adapter.ts"));
+const chatApi = atDefaultUiScale(readText("../src/features/chat/api/chat-api.ts"));
+const types = atDefaultUiScale(readText("../src/features/chat/types.ts"));
+const thread = atDefaultUiScale(readText("../src/components/assistant-ui/thread.tsx"));
+const researchPanel = readText(
+  "../src/features/chat/components/research-activity-panel.tsx",
+);
+const switchSource = readText(
+  "../src/features/chat/components/chat-model-notice-switch.ts",
+);
+
+/** The selection handleCheckpointChange builds from the meta, mirrored field for field. */
+function switchBackSelection(
+  target: { modelId: string; ggufVariant?: string | null },
+  rows: Parameters<typeof chatModelSwitchMeta>[1] = [],
+) {
+  const meta = chatModelSwitchMeta(target, rows);
+  return {
+    id: target.modelId,
+    source: meta?.source,
+    isLora: meta?.isLora,
+    ggufVariant: meta?.ggufVariant,
+    isDownloaded: meta?.isDownloaded,
+    isGguf: meta?.isGguf,
+  };
+}
+
+function slice(source: string, from: string, to: string): string {
+  const start = source.indexOf(from);
+  assert.ok(start !== -1, `not found: ${from}`);
+  const end = source.indexOf(to, start + from.length);
+  assert.ok(end !== -1, `not found: ${to}`);
+  return source.slice(start, end);
+}
+
+// Source assertions: the notice reaches external-providers, which does not resolve in a
+// bare node test. The sibling thread-scoped suites do the same for the same reason.
+
+test("the notice never switches a model on its own", () => {
+  // Opening a chat must not evict what is resident: a local load is multi-gigabyte.
+  assert.doesNotMatch(notice, /loadModel|setCheckpoint/);
+  // The only way out of it is the button.
+  assert.match(notice, /onClick=\{\(\) => onSwitch\(switchTarget\)\}/);
+});
+
+test("the notice stays quiet when it has nothing to offer", () => {
+  const body = notice.slice(notice.indexOf("export function ChatModelNotice"));
+  // no stamp, already on the pick (including snapshot vs repo id), or a model that has since gone away
+  assert.match(body, /if \(!createdModel\) return null;/);
+  assert.match(
+    body,
+    /chatModelIsResident\(createdModel, checkpoint, activeGgufVariant\)/,
+  );
+  assert.match(
+    body,
+    /chatModelSelectableId\(\s*createdModel\.modelId,\s*selectableModelIds,?\s*\)/,
+  );
+});
+
+test("switching chats does not show the outgoing chat's model", () => {
+  // The read is async, so a stale value would sit over the incoming chat until it lands.
+  // Clearing it inside the effect is not enough: the effect is passive, so the first
+  // render for the incoming chat commits with the outgoing chat's model already on
+  // screen. The answer is keyed by the chat it was read for, so a foreign value cannot
+  // be returned at all rather than being returned briefly.
+  const hook = notice.slice(
+    notice.indexOf("export function useChatCreatedModel"),
+    notice.indexOf("type ChatModelNoticeProps"),
+  );
+  assert.match(
+    hook,
+    /return read && read\.threadId === threadId \? read\.model : null;/,
+  );
+  assert.match(hook, /detail\?\.thread/);
+  assert.match(hook, /reader\.applyUpdate\(updatedThread\)/);
+  assert.match(hook, /reader\.applyInitial\(thread\)/);
+  assert.match(hook, /reader\.dispose\(\)/);
+  assert.match(
+    hook,
+    /addEventListener\(CHAT_HISTORY_UPDATED_EVENT, onHistoryUpdated\)/,
+  );
+  assert.match(
+    hook,
+    /removeEventListener\(CHAT_HISTORY_UPDATED_EVENT, onHistoryUpdated\)/,
+  );
+  assert.match(
+    chatApi,
+    /notifyChatHistoryUpdated\(\{ thread: savedThread \}\)/,
+  );
+  assert.match(chatApi, /notifyChatHistoryUpdated\(\{ thread \}\)/);
+});
+
+test("a thread update wins over an older initial model read", () => {
+  const seen: unknown[] = [];
+  const reader = createChatModelHistoryReader("thread-1", (model) => {
+    seen.push(model);
+  });
+  reader.applyUpdate({
+    id: "thread-1",
+    modelId: "resolved-model",
+    modelGgufVariant: "Q6_K",
+  });
+  reader.applyInitial({
+    id: "thread-1",
+    modelId: "interim-model",
+    modelGgufVariant: "Q8_0",
+  });
+  reader.applyUpdate({ id: "another-thread", modelId: "unrelated-model" });
+  assert.deepEqual(seen, [{ modelId: "resolved-model", ggufVariant: "Q6_K" }]);
+  reader.dispose();
+  reader.applyUpdate({ id: "thread-1", modelId: "late-model" });
+  assert.equal(seen.length, 1);
+});
+
+test("the notice is wired to the picker's own handler, not a private path", () => {
+  // handleCheckpointChange carries the confirmations, VRAM checks and external
+  // handling; a second switch path would drift from it. The wrapper only
+  // resolves the row metadata the picker also supplies, then calls it.
+  assert.match(page, /onSwitch=\{handleSwitchBackToChatModel\}/);
+  const wrapper = slice(
+    page,
+    "const handleSwitchBackToChatModel",
+    "const inventoryRefreshStartedRef",
+  );
+  assert.match(wrapper, /handleCheckpointChange\(/);
+  assert.match(wrapper, /chatModelSwitchMeta\(target, loraModels\)/);
+  assert.match(page, /selectableModelIds=\{selectableModelIds\}/);
+  // Offered only for a real saved chat, in the single-chat view.
+  assert.match(page, /view\.mode === "single" && \(\s*<ChatModelNotice/);
+});
+
+test("only models that can actually be selected are offered", () => {
+  const set = page.slice(page.indexOf("const selectableModelIds = useMemo"));
+  for (const source of ["models", "loraModels", "externalModels"]) {
+    assert.ok(
+      set.slice(0, 400).includes(`...${source}.map`),
+      `${source} is missing from the selectable set`,
+    );
+  }
+});
+
+const HUB = "/home/u/.cache/huggingface/hub";
+const REPO_ID = "unsloth/Repo-GGUF";
+const SNAPSHOT_A = `${HUB}/models--unsloth--Repo-GGUF/snapshots/aaa1111`;
+const SNAPSHOT_B = `${HUB}/models--unsloth--Repo-GGUF/snapshots/bbb2222`;
+
+test("Switch Back resolves a snapshot-path chat to the live picker row", () => {
+  assert.equal(
+    chatModelSelectableId(SNAPSHOT_A, new Set([SNAPSHOT_A, REPO_ID])),
+    SNAPSHOT_A,
+  );
+  assert.equal(chatModelSelectableId(SNAPSHOT_A, new Set([REPO_ID])), REPO_ID);
+  assert.equal(
+    chatModelSelectableId(SNAPSHOT_A, new Set([SNAPSHOT_B])),
+    SNAPSHOT_B,
+  );
+  assert.equal(
+    chatModelSelectableId(SNAPSHOT_A, new Set(["unsloth/Other-GGUF"])),
+    null,
+  );
+  assert.equal(
+    chatModelSelectableId(
+      SNAPSHOT_A,
+      new Set([`${HUB}/models--unsloth--Other-GGUF/snapshots/ccc3333`]),
+    ),
+    null,
+  );
+  // a plain local file collapses to a bare stem, which is no repo
+  assert.equal(
+    chatModelSelectableId(
+      "/srv/models/a/Repo-Q4_K_M.gguf",
+      new Set(["Repo-Q4_K_M"]),
+    ),
+    null,
+  );
+});
+
+test("a snapshot-path chat is already on its repo-id checkpoint", () => {
+  const created = { modelId: SNAPSHOT_A, ggufVariant: "Q4_K_M" };
+  assert.equal(chatModelIsResident(created, REPO_ID, "Q4_K_M"), true);
+  assert.equal(chatModelIsResident(created, SNAPSHOT_B, "Q4_K_M"), true);
+  assert.equal(
+    chatModelIsResident(
+      { modelId: REPO_ID, ggufVariant: "Q4_K_M" },
+      SNAPSHOT_A,
+      "Q4_K_M",
+    ),
+    true,
+  );
+  assert.equal(chatModelIsResident(created, REPO_ID, "Q8_0"), false);
+  assert.equal(
+    chatModelIsResident(created, "unsloth/Other-GGUF", "Q4_K_M"),
+    false,
+  );
+});
+
+test("external and ollama-manifest ids never alias across case", () => {
+  for (const [upper, lower] of [
+    [
+      `external::vendor::${encodeURIComponent("Vendor/Qwen3.8-27B")}`,
+      `external::vendor::${encodeURIComponent("vendor/qwen3.8-27b")}`,
+    ],
+    [
+      `ollama-manifest:${encodeURIComponent("/home/u/.ollama/manifests/Llama")}`,
+      `ollama-manifest:${encodeURIComponent("/home/u/.ollama/manifests/llama")}`,
+    ],
+  ]) {
+    assert.equal(chatModelIsResident({ modelId: upper }, upper, null), true);
+    assert.equal(chatModelIsResident({ modelId: upper }, lower, null), false);
+    assert.equal(chatModelSelectableId(upper, new Set([lower])), null);
+    assert.equal(chatModelSelectableId(upper, new Set([upper])), upper);
+  }
+});
+
+test("a snapshot-path chat is labelled by its repo name, not the revision sha", () => {
+  assert.equal(modelDisplayName(SNAPSHOT_A), "Repo-GGUF");
+  assert.equal(modelDisplayName("org/model.gguf"), "model.gguf");
+  const body = notice.slice(notice.indexOf("export function ChatModelNotice"));
+  assert.match(body, /externalModelLabel\(createdModel\.modelId\)/);
+  assert.match(body, /modelDisplayName\(createdModel\.modelId\)/);
+});
+
+test("the original-model control sits beside the picker in the chat header", () => {
+  const header = slice(page, "chat-header-fade", "{/* One provider shared");
+  assert.match(header, /<ModelSelector[\s\S]*<ChatModelNotice/);
+  assert.match(
+    header,
+    /\{view\.mode === "single" && \(\s*<ChatModelNotice\s+active=\{active\}/,
+  );
+  // Hide the portaled UI after the hook runs, keeping the saved model and subscription off-route.
+  assert.match(
+    notice,
+    /const createdModel = useChatCreatedModel\(threadId\);[\s\S]*?if \(!active\) return null;/,
+  );
+  // A chat change must dismiss a portaled popover along with its old model details.
+  assert.match(notice, /<Popover key=\{threadId\}>/);
+});
+
+test("the conversation and research panel reserve only the chat header", () => {
+  // The original-model control lives inside the header, so it needs no extra row.
+  for (const source of [page, notice, thread, researchPanel]) {
+    assert.doesNotMatch(source, /--studio-chat-notice-height/);
+  }
+  assert.match(
+    thread,
+    /\[--thread-header-offset:calc\(var\(--studio-content-top-inset,0px\)-var\(--studio-chat-scroller-top,0px\)\+var\(--studio-chat-header-height,48px\)\)\] mt-\[var\(--studio-chat-scroller-top,0px\)\] pt-\[var\(--thread-header-offset\)\]/,
+  );
+  const fade = slice(page, "chat-header-fade", '"');
+  assert.match(
+    fade,
+    /top-\[calc\(var\(--studio-content-top-inset,0px\)\+var\(--studio-chat-header-height,48px\)\)\]/,
+  );
+  const style = slice(researchPanel, 'variant === "panel"', ": undefined");
+  assert.match(
+    style,
+    /marginTop:\s*"calc\(var\(--studio-content-top-inset, 0px\) \+ var\(--studio-chat-header-height, 48px\)\)"/,
+  );
+  assert.match(
+    style,
+    /height:\s*"calc\(100% - var\(--studio-content-top-inset, 0px\) - var\(--studio-chat-header-height, 48px\)\)"/,
+  );
+});
+
+test("a chat started as New Chat gets the notice once its row exists", () => {
+  // ?new=<nonce> carries no thread in the URL and keeps none after the first send, so
+  // the notice saw nothing until the chat was reopened. The store's id is only this
+  // chat's after ThreadNewChatSwitch has blanked the previous one, hence the latch.
+  const gate = slice(
+    page,
+    "const newChatBlankedRef",
+    "const newChatThreadId =",
+  );
+  assert.match(
+    gate,
+    /activeThreadId === null \|\| isAssistantLocalThreadId\(activeThreadId\)/,
+  );
+  assert.match(gate, /newChatBlankedRef\.current = search\.new;/);
+
+  const derived = slice(page, "const newChatThreadId =", "\n  const");
+  assert.match(derived, /newChatBlankedRef\.current === search\.new/);
+  // The latched id is only ever the persisted one, so an unsent chat still offers nothing.
+  assert.match(derived, /\? persistedActiveThreadId/);
+  assert.match(derived, /: null/);
+
+  const notice = slice(page, "<ChatModelNotice", "/>");
+  assert.match(
+    notice,
+    /threadId=\{view\.threadId \?\? newChatThreadId \?\? undefined\}/,
+  );
+});
+
+test("a chat thread keeps the GGUF variant it started on", () => {
+  assert.match(types, /modelGgufVariant\?: string \| null;/);
+  const creator = slice(
+    runtimeProvider,
+    "export async function ensureThreadRecord",
+    "function createStudioDbAdapter",
+  );
+  assert.match(creator, /modelGgufVariantAtInit/);
+  assert.match(creator, /modelGgufVariant: modelGgufVariantAtInit/);
+  const initialize = slice(
+    runtimeProvider,
+    "initialize(threadId",
+    "async rename",
+  );
+  assert.match(initialize, /runtimeStateAtInit\.activeGgufVariant/);
+  assert.match(initialize, /modelGgufVariant: modelGgufVariantAtInit/);
+});
+
+test("a queued empty-model send backfills its resolved GGUF variant", () => {
+  const persistence = slice(
+    adapter,
+    "const persistResolvedQueuedModel",
+    "if (queuedRunSettings)",
+  );
+  assert.match(persistence, /modelGgufVariant: string \| null/);
+  assert.match(persistence, /modelGgufVariant,/);
+  assert.match(persistence, /shouldPersistResolvedQueuedModel/);
+  assert.match(adapter, /activeGgufVariant: state\.activeGgufVariant/);
+  assert.match(adapter, /activeGgufVariant: status\.gguf_variant \?\? null/);
+  assert.match(
+    adapter,
+    /queuedEmptyModelRuntime !== null[\s\S]{0,100}queuedEmptyModelRuntime\.activeGgufVariant[\s\S]{0,80}liveRuntime\.activeGgufVariant/,
+  );
+  assert.match(adapter, /params\.checkpoint,\s*runtime\.activeGgufVariant/);
+  const queuedSettings = readText(
+    "../src/features/chat/utils/queued-chat-run-settings.ts",
+  );
+  assert.match(queuedSettings, /"activeGgufVariant"/);
+  assert.match(
+    thread,
+    /modelGgufVariant: runSettingsAtQueueStart\.activeGgufVariant/,
+  );
+});
+
+test("queued model backfill changes only a fresh empty thread row", () => {
+  assert.equal(shouldPersistResolvedQueuedModel({ modelId: "" }), true);
+  assert.equal(
+    shouldPersistResolvedQueuedModel({ modelId: "original-model" }),
+    false,
+  );
+  assert.equal(shouldPersistResolvedQueuedModel(undefined), false);
+  // The caller has already returned on a queued checkpoint four lines earlier.
+  assert.match(
+    slice(
+      adapter,
+      "const persistResolvedQueuedModel",
+      "if (queuedRunSettings)",
+    ),
+    /queuedRunSettings\.params\.checkpoint \|\|/,
+  );
+});
+
+// The switch back is the picker's handler, so it has to arrive carrying what the picker
+// itself would have put on it. A local or fine-tuned row is in neither /api/models/list
+// nor the external ids, so with the bare id selectModel resolves isGguf false and the
+// /load request loses n_parallel, n_batch, n_ubatch and llama_extra_args and sizes the
+// context down the transformers path.
+
+test("switching back to a single-file local GGUF still loads as a GGUF", () => {
+  const meta = chatModelSwitchMeta({ modelId: "/models/qwen3-4b-q4.gguf" }, [
+    {
+      id: "/models/qwen3-4b-q4.gguf",
+      name: "qwen3-4b-q4",
+      source: "local",
+      isGguf: true,
+      isDirectGguf: true,
+    },
+  ]);
+  assert.deepEqual(meta, {
+    source: "local",
+    isLora: false,
+    isDownloaded: true,
+    isGguf: true,
+  });
+});
+
+test("a single .gguf file carries its format out of the local inventory", () => {
+  // chatLocalModelOptions is where the format is either kept or lost; the resolver
+  // above has nothing else to read it from.
+  const [option] = chatLocalModelOptions([
+    {
+      id: "/models/qwen3-4b-q4.gguf",
+      display_name: "qwen3-4b-q4",
+      path: "/models/qwen3-4b-q4.GGUF",
+      source: "custom",
+      model_format: "gguf",
+    },
+  ]);
+  assert.equal(option.isGguf, true);
+});
+
+test("a saved GGUF variant is carried back exactly", () => {
+  store.clear();
+  const modelId = "/models/Qwen3-4B-GGUF";
+  assert.deepEqual(
+    chatModelSwitchMeta({ modelId, ggufVariant: "Q6_K" }, [
+      {
+        id: modelId,
+        name: "Qwen3-4B-GGUF",
+        source: "local",
+        isGguf: true,
+      },
+    ]),
+    {
+      source: "local",
+      isLora: false,
+      isDownloaded: true,
+      isGguf: true,
+      ggufVariant: "Q6_K",
+    },
+  );
+  assert.deepEqual(
+    chatModelSwitchMeta(
+      { modelId: "unsloth/Qwen3-4B-GGUF", ggufVariant: "Q8_0" },
+      [],
+    ),
+    { ggufVariant: "Q8_0" },
+  );
+});
+
+test("switching back to a hub GGUF loads it instead of staging a download", () => {
+  store.clear();
+  // stageOrLoad routes a pick with source "hub" and no isDownloaded through the download
+  // manager. Two of requestStart's outcomes, conflict and busy, toast and return without
+  // loading, so a switch back that lands there silently does nothing.
+  const selection = switchBackSelection({
+    modelId: "unsloth/Qwen3-4B-GGUF",
+    ggufVariant: "Q8_0",
+  });
+  assert.equal(wantsDownloadManagerStaging(selection), false);
+  // and the variant, the one thing no resolver can recover, still travels
+  assert.equal(selection.ggufVariant, "Q8_0");
+  // A pick the picker itself marks as a hub row still stages, so nothing else moved.
+  assert.equal(
+    wantsDownloadManagerStaging({
+      id: "unsloth/Qwen3-4B-GGUF",
+      source: "hub",
+      ggufVariant: "Q8_0",
+    }),
+    true,
+  );
+  // The selection mapping above and the predicate under test are the page's own.
+  const built = slice(
+    page,
+    "const selection = {",
+    "await stageOrLoad(selection);",
+  );
+  for (const field of [
+    "source: meta?.source",
+    "isLora: meta?.isLora",
+    "ggufVariant: meta?.ggufVariant",
+    "isGguf: meta?.isGguf",
+  ]) {
+    assert.ok(built.includes(field), `selection lost ${field}`);
+  }
+  assert.match(
+    built,
+    /isDownloaded: meta\?\.isDownloaded \|\| isSameLoadedModel/,
+  );
+  assert.match(
+    page,
+    /const wantManagerStaging = wantsDownloadManagerStaging\(selection\);/,
+  );
+
+  const stage = slice(
+    page,
+    "const stageOrLoad = useCallback",
+    "if (store.modelLoading)",
+  );
+  assert.match(
+    stage,
+    /const wantManagerStaging = wantsDownloadManagerStaging\(selection\);[\s\S]*if \(wantManagerStaging\) \{[\s\S]*dismissStartToastsForModelSelection\(\)/,
+  );
+});
+
+test("a history update that leaves the model alone is not re-emitted", () => {
+  // Every CHAT_HISTORY_UPDATED_EVENT for the thread reaches applyUpdate, renames and
+  // archives included, and a fresh object each time re-renders the notice for nothing.
+  const seen: unknown[] = [];
+  const reader = createChatModelHistoryReader("thread-1", (model) => {
+    seen.push(model);
+  });
+  reader.applyInitial({
+    id: "thread-1",
+    modelId: "model-a",
+    modelGgufVariant: "Q6_K",
+  });
+  reader.applyUpdate({
+    id: "thread-1",
+    modelId: "model-a",
+    modelGgufVariant: "Q6_K",
+  });
+  reader.applyUpdate({
+    id: "thread-1",
+    modelId: "model-a",
+    modelGgufVariant: "Q6_K",
+  });
+  assert.equal(seen.length, 1);
+  reader.applyUpdate({
+    id: "thread-1",
+    modelId: "model-a",
+    modelGgufVariant: "Q8_0",
+  });
+  assert.equal(seen.length, 2);
+  reader.dispose();
+});
+
+test("a legacy GGUF directory recovers its sole saved variant and context", () => {
+  store.clear();
+  const modelId = String.raw`N:\AI Models\Qwen\Qwen3.6-40B-Q6_K`;
+  assert.ok(
+    savePerModelConfig(modelId, "Q6_K", {
+      ...DEFAULT_PER_MODEL_CONFIG,
+      customContextLength: 32768,
+    }),
+  );
+  const [option] = chatLocalModelOptions([
+    {
+      id: modelId,
+      display_name: "Qwen3.6-40B-Q6_K",
+      path: modelId,
+      source: "custom",
+      model_format: "gguf",
+    },
+  ]);
+  assert.equal(option.isDirectGguf, undefined);
+  const target = resolveChatModelSwitchTarget({ modelId });
+  assert.equal(target.ggufVariant?.toLowerCase(), "q6_k");
+  const meta = chatModelSwitchMeta(target, [option]);
+  assert.equal(meta?.isGguf, true);
+  assert.equal(meta?.ggufVariant?.toLowerCase(), "q6_k");
+  // The variant is the key the saved 32768 is filed under; stageOrLoad does the lookup.
+  assert.equal(
+    resolveInitialConfig(modelId, target.ggufVariant ?? undefined).config
+      .customContextLength,
+    32768,
+  );
+});
+
+test("a legacy GGUF directory does not guess between saved variants", () => {
+  store.clear();
+  const modelId = "/models/Qwen3-4B-GGUF";
+  for (const variant of ["Q4_K_M", "Q8_0"]) {
+    assert.ok(
+      savePerModelConfig(modelId, variant, {
+        ...DEFAULT_PER_MODEL_CONFIG,
+        customContextLength: 32768,
+      }),
+    );
+  }
+  const [option] = chatLocalModelOptions([
+    {
+      id: modelId,
+      display_name: "Qwen3-4B-GGUF",
+      path: modelId,
+      source: "models_dir",
+      model_format: "gguf",
+    },
+  ]);
+  const meta = chatModelSwitchMeta({ modelId }, [option]);
+  assert.equal(meta?.isGguf, false);
+  assert.equal(meta?.ggufVariant, undefined);
+  assert.equal(meta?.config, undefined);
+});
+
+test("a legacy GGUF directory does not infer a quant from config alone", () => {
+  store.clear();
+  const modelId = "/models/Qwen3-4B-GGUF";
+  assert.ok(
+    savePerModelConfig(modelId, "Q6_K", {
+      ...DEFAULT_PER_MODEL_CONFIG,
+      customContextLength: 32768,
+    }),
+  );
+  assert.equal(
+    resolveChatModelSwitchTarget({ modelId }).ggufVariant,
+    undefined,
+  );
+});
+
+test("the switch back leaves the remembered config to stageOrLoad", () => {
+  store.clear();
+  const modelId = "/models/qwen3-4b-q4.gguf";
+  assert.ok(
+    savePerModelConfig(modelId, null, {
+      ...DEFAULT_PER_MODEL_CONFIG,
+      customContextLength: 32768,
+    }),
+  );
+  const selection = switchBackSelection({ modelId }, [
+    {
+      id: modelId,
+      name: "qwen3-4b-q4",
+      source: "local",
+      isGguf: true,
+      isDirectGguf: true,
+    },
+  ]);
+  // A config on the meta would duplicate the lookup stageOrLoad already does.
+  assert.doesNotMatch(
+    slice(switchSource, "import type {", "export type ChatModelSwitchTarget"),
+    /resolveInitialConfig/,
+  );
+  const stage = slice(
+    page,
+    "const stageOrLoad = useCallback",
+    "useRepoDownload(",
+  );
+  assert.match(
+    stage,
+    /selection\.config \?\? rememberedConfigFor\(selection\)/,
+  );
+  const remembered = slice(
+    page,
+    "const rememberedConfigFor = useCallback",
+    "const isExternalModel",
+  );
+  assert.match(
+    remembered,
+    /resolveResidentInitialConfig\(\s*selection\.id,\s*selection\.ggufVariant,?\s*\)/,
+  );
+  assert.equal(
+    resolveResidentInitialConfig(selection.id, selection.ggufVariant).config
+      .customContextLength,
+    32768,
+  );
+});
+
+test("switch back recovers a repo-keyed context through a snapshot path", () => {
+  store.clear();
+  const snapshotPath =
+    "/home/u/.cache/huggingface/hub/models--unsloth--Repo-GGUF/snapshots/2f1c9ab";
+  const repoId = "unsloth/Repo-GGUF";
+  assert.ok(
+    savePerModelConfig(repoId, "Q4_K_M", {
+      ...DEFAULT_PER_MODEL_CONFIG,
+      customContextLength: 32768,
+    }),
+  );
+  assert.equal(resolveInitialConfig(snapshotPath, "Q4_K_M").remembered, false);
+  assert.equal(
+    resolveResidentInitialConfig(snapshotPath, "Q4_K_M").config
+      .customContextLength,
+    32768,
+  );
+  const remembered = slice(
+    page,
+    "const rememberedConfigFor = useCallback",
+    "const isExternalModel",
+  );
+  assert.match(
+    remembered,
+    /resolveResidentInitialConfig\(\s*selection\.id,\s*selection\.ggufVariant,?\s*\)/,
+  );
+});
+
+test("switching back to a fine-tuned row mirrors the picker's own metadata", () => {
+  // Same fields the fine-tuned list's selectionMeta sets, so the two doors agree.
+  const adapters = [
+    { id: "run-1", name: "run-1", source: "training" as const },
+    {
+      id: "run-2",
+      name: "run-2",
+      source: "exported" as const,
+      exportType: "merged" as const,
+    },
+  ];
+  assert.deepEqual(chatModelSwitchMeta({ modelId: "run-1" }, adapters), {
+    source: "lora",
+    isLora: true,
+    isDownloaded: true,
+    isGguf: false,
+  });
+  assert.deepEqual(chatModelSwitchMeta({ modelId: "run-2" }, adapters), {
+    source: "exported",
+    isLora: false,
+    isDownloaded: true,
+    isGguf: false,
+  });
+});
+
+test("a Hub or external id is still switched on the id alone", () => {
+  // Those two resolve without help: /api/models/list carries isGguf, and
+  // isExternalModelId routes the rest. Inventing a "local" source for them would
+  // send them down the wrong branch of handleCheckpointChange.
+  assert.equal(
+    chatModelSwitchMeta({ modelId: "unsloth/Qwen3-4B-GGUF" }, []),
+    undefined,
+  );
+  assert.equal(
+    chatModelSwitchMeta({ modelId: "openai:gpt-5-mini" }, []),
+    undefined,
+  );
+});

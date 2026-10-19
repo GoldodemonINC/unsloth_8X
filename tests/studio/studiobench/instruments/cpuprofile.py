@@ -1,0 +1,311 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Only the in-trace route can attribute samples to task origins; standalone profiles cannot."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..analysis import CellFailure
+from ..analysis.cpuprofile import CallFrame, CpuProfile, Sample
+
+# V8 default is 1000 us; 100 us resolves sub-ms frames without dominating the workload.
+DEFAULT_SAMPLING_INTERVAL_US = 100
+
+MIN_JS_SAMPLES_FOR_COMPARISON = 200
+
+
+@dataclass
+class StandaloneProfiler:
+    """`Profiler.start` / `Profiler.stop` over one CDP session."""
+
+    cdp: Any
+    sampling_interval_us: int = DEFAULT_SAMPLING_INTERVAL_US
+    _running: bool = field(default = False, init = False)
+
+    def start(self) -> None:
+        if self._running:
+            raise RuntimeError("StandaloneProfiler.start called twice")
+        self.cdp.send("Profiler.enable")
+        # The interval is latched at start, so set it first.
+        self.cdp.send("Profiler.setSamplingInterval", {"interval": int(self.sampling_interval_us)})
+        self.cdp.send("Profiler.start")
+        self._running = True
+
+    def stop(self) -> CpuProfile:
+        if not self._running:
+            raise RuntimeError("StandaloneProfiler.stop without start")
+        res = self.cdp.send("Profiler.stop")
+        self._running = False
+        return from_profiler_result(res.get("profile") or {})
+
+    def __enter__(self) -> "StandaloneProfiler":
+        self.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._running:
+            try:
+                self.cdp.send("Profiler.stop")
+            finally:
+                self._running = False
+
+
+def from_profiler_result(raw: dict[str, Any]) -> CpuProfile:
+    """Maps a Profiler.stop payload onto CpuProfile so both routes share one set of gates and arithmetic."""
+    nodes = raw.get("nodes")
+    if not nodes:
+        raise CellFailure("cpuprofile_empty", "Profiler.stop returned a profile with no nodes")
+    prof = CpuProfile(pid = 0, tid = 0, start_time = int(raw.get("startTime", 0)))
+    for n in nodes:
+        nid = int(n["id"])
+        cf = n.get("callFrame") or {}
+        prof.nodes[nid] = CallFrame(
+            function_name = str(cf.get("functionName", "")),
+            script_id = str(cf.get("scriptId", "")),
+            url = str(cf.get("url", "")),
+            line = int(cf.get("lineNumber", -1)),
+            column = int(cf.get("columnNumber", -1)),
+        )
+        for child in n.get("children") or ():
+            prof.parents[int(child)] = nid
+
+    samples = raw.get("samples") or []
+    deltas = raw.get("timeDeltas") or []
+    if len(samples) != len(deltas):
+        raise CellFailure(
+            "cpuprofile_ragged",
+            f"{len(samples)} samples against {len(deltas)} timeDeltas",
+        )
+    cursor = prof.start_time
+    for nid, d in zip(samples, deltas):
+        d = int(d)
+        if d < 0:
+            prof.negative_deltas += 1
+        cursor += d
+        prof.samples.append(Sample(ts = cursor, node_id = int(nid), delta = d))
+
+    prof.chunk_count = 1
+    prof.chunk_ts_first = prof.start_time
+    prof.chunk_ts_last = int(raw.get("endTime", cursor))
+    return prof
+
+
+def compare_with_trace_profile(
+    standalone: CpuProfile,
+    in_trace: CpuProfile,
+    *,
+    tolerance: float = 0.25,
+) -> dict[str, Any]:
+    """Compares per-frame self-time shares, not microseconds, as the two windows and intervals differ."""
+
+    def shares(p: CpuProfile) -> dict[str, float]:
+        by_name: dict[str, int] = {}
+        for s in p.samples:
+            f = p.nodes.get(s.node_id)
+            if f is None or f.is_synthetic:
+                continue
+            by_name[f.function_name or "(anonymous)"] = (
+                by_name.get(f.function_name or "(anonymous)", 0) + s.delta
+            )
+        total = sum(by_name.values())
+        if total <= 0:
+            return {}
+        return {k: v / total for k, v in by_name.items()}
+
+    def js_samples(p: CpuProfile) -> int:
+        return sum(
+            1 for s in p.samples if (f := p.nodes.get(s.node_id)) is not None and not f.is_synthetic
+        )
+
+    # Too few JS samples cannot distinguish the parsers from noise. With profiler trace categories
+    # the standalone profile is the in-trace one (V8 has one CpuProfiler), so comparing is vacuous.
+    if (
+        len(standalone.samples) == len(in_trace.samples)
+        and len(standalone.nodes) == len(in_trace.nodes)
+        and standalone.samples[:8]
+        and in_trace.samples[:8]
+        and [s.node_id for s in standalone.samples[:8]] == [s.node_id for s in in_trace.samples[:8]]
+    ):
+        return {
+            "agrees": None,
+            "verdict": "same_profile",
+            "reason": (
+                "both profiles have identical sample and node counts and identical leading "
+                "samples. V8 has a single CpuProfiler, so a Profiler.start taken while the "
+                "trace already records disabled-by-default-v8.cpu_profiler returns the same "
+                "samples. This is a comparison against itself and is not evidence."
+            ),
+        }
+
+    power = {
+        "standalone_js_samples": js_samples(standalone),
+        "in_trace_js_samples": js_samples(in_trace),
+    }
+    if min(power.values()) < MIN_JS_SAMPLES_FOR_COMPARISON:
+        return {
+            "agrees": None,
+            "verdict": "underpowered",
+            "reason": (
+                f"need at least {MIN_JS_SAMPLES_FOR_COMPARISON} non-synthetic samples on both "
+                f"sides; got {power}. Lengthen the window or enable the hires CPU profiler category."
+            ),
+            **power,
+        }
+
+    a, b = shares(standalone), shares(in_trace)
+    common = sorted(set(a) & set(b), key = lambda k: -(a[k] + b[k]))[:10]
+    rows = [
+        {
+            "function": k,
+            "standalone_share": round(a[k], 4),
+            "in_trace_share": round(b[k], 4),
+            "abs_diff": round(abs(a[k] - b[k]), 4),
+        }
+        for k in common
+    ]
+    worst = max((r["abs_diff"] for r in rows), default = 0.0)
+    return {
+        "compared_frames": len(common),
+        "worst_share_difference": worst,
+        "tolerance": tolerance,
+        "agrees": worst <= tolerance,
+        "rows": rows,
+    }
+
+
+# Harness adapter (INTERFACES.md section 3)
+# V8 has one CpuProfiler, so this is only meaningful at level 1; at level 2+ it stands down.
+
+import time  # noqa: E402
+
+from ..analysis import assert_no_bare_zero, measured, merge, unmeasured  # noqa: E402
+from . import register_instrument  # noqa: E402
+
+_STAND_DOWN = (
+    "instrument level {lvl} already records the v8 CPU profiler inside the trace. "
+    "V8 has a single CpuProfiler, so a second Profiler.start returns the same "
+    "samples; running it here would double the cost and produce a cross-check "
+    "against itself."
+)
+
+
+class CpuProfileInstrument:
+    """Standalone V8 sampling, for the level where the trace has no stacks."""
+
+    name = "cpu_profile"
+    level = 1
+
+    def __init__(self) -> None:
+        self.ctx: Any = None
+        self.cdp: Any = None
+        self.active = False
+        self.stand_down_reason = ""
+        self.profiler: StandaloneProfiler | None = None
+        self._overhead_ms = 0.0
+        self._windows = 0
+
+    def attach(self, ctx: Any) -> None:
+        self.ctx = ctx
+
+    def start_cell(self, cell: Any) -> None:
+        self.cdp = getattr(self.ctx, "cdp", None)
+        self._overhead_ms = 0.0
+        self._windows = 0
+        lvl = int(getattr(cell, "instrument_level", 1) or 1)
+        self.active = lvl == 1 and self.cdp is not None
+        if lvl != 1:
+            self.stand_down_reason = _STAND_DOWN.format(lvl = lvl)
+        elif self.cdp is None:
+            self.stand_down_reason = "no CDP session; the V8 profiler is Chromium only"
+        else:
+            self.stand_down_reason = ""
+
+    def open(self, window: Any) -> None:
+        if not self.active:
+            return
+        t0 = time.perf_counter()
+        self.profiler = StandaloneProfiler(self.cdp)
+        try:
+            self.profiler.start()
+        except Exception:
+            self.profiler = None
+        self._overhead_ms += (time.perf_counter() - t0) * 1000.0
+
+    def close(self, window: Any) -> dict | None:
+        if not self.active:
+            return merge(
+                unmeasured("self_ms_top", self.stand_down_reason or "instrument inactive"),
+                {"active": False},
+            )
+        if self.profiler is None:
+            return merge(
+                unmeasured("self_ms_top", "Profiler.start failed for this window"),
+                {"active": True},
+            )
+        t0 = time.perf_counter()
+        try:
+            prof = self.profiler.stop()
+            payload = self._summarise(prof)
+        except CellFailure as exc:
+            payload = merge(
+                unmeasured("self_ms_top", f"{exc.gate}: {exc.detail}"), {"active": True}
+            )
+        except Exception as exc:  # noqa: BLE001
+            payload = merge(
+                unmeasured("self_ms_top", f"{type(exc).__name__}: {exc}"), {"active": True}
+            )
+        finally:
+            self.profiler = None
+        self._windows += 1
+        self._overhead_ms += (time.perf_counter() - t0) * 1000.0
+        assert_no_bare_zero(payload, "cpu_profile")
+        return payload
+
+    def end_cell(self, cell: Any) -> dict | None:
+        out = merge(
+            measured("overhead_ms", round(self._overhead_ms, 3)),
+            measured("windows_profiled", self._windows),
+            {"active": self.active},
+            {"stand_down_reason": self.stand_down_reason} if self.stand_down_reason else {},
+        )
+        assert_no_bare_zero(out, "cpu_profile.end_cell")
+        return out
+
+    def detach(self) -> None:
+        if self.profiler is not None:
+            try:
+                self.profiler.stop()
+            except Exception:
+                pass
+            self.profiler = None
+
+    def _summarise(self, prof: Any) -> dict:
+        from ..analysis import cpuprofile as C
+
+        rows, diag = C.self_time_in_windows(
+            prof,
+            [(prof.chunk_ts_first, prof.chunk_ts_last)],
+            limit = 12,
+        )
+        payload = merge(
+            measured(
+                "self_ms_top",
+                [{"frame": f.label(), "self_ms": round(us / 1000.0, 3)} for f, us in rows],
+            ),
+            measured("js_sample_count", int(diag["js_sample_count"])),
+            measured("sampling_interval_us", round(prof.sampling_interval_us(), 2)),
+            {
+                "active": True,
+                "frame_ranking_underpowered": bool(diag["underpowered"]),
+                "profiler": "standalone",
+            },
+        )
+        return payload
+
+
+@register_instrument(name = "cpu_profile", level = 1)
+def _make_cpu_profile() -> CpuProfileInstrument:
+    return CpuProfileInstrument()

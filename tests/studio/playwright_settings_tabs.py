@@ -1,0 +1,748 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Settings tabs on the real dialog, no backend; PW_CHUNK_DELAY_MS and PW_CHUNK_FAIL inject faults."""
+
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
+from playwright.sync_api import sync_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _playwright_robust import (  # noqa: E402
+    chromium_launch_args,
+    start_vite,
+    stop_process,
+    wait_for_smoke_page,
+    click_forced,
+)
+
+TABS = [
+    "general",
+    "profile",
+    "appearance",
+    "resources",
+    "chat",
+    "voice",
+    "connections",
+    "library",
+    "data",
+    "api-keys",
+    "remote-lan",
+    "agents",
+    "keyboard-shortcuts",
+    "browser",
+    "debugging",
+    "sandbox",
+    "about",
+    "accounts",
+]
+
+ENGINE = os.environ.get("PW_ENGINE", "chromium")
+PORT = int(os.environ.get("PW_PORT", "5399"))
+OUT = Path(os.environ.get("PW_OUT", "logs/settings_tabs_report.json"))
+CHUNK_DELAY_MS = int(os.environ.get("PW_CHUNK_DELAY_MS", "0"))
+CHUNK_FAIL = os.environ.get("PW_CHUNK_FAIL", "")
+SETTLE_MS = 600
+SETTLE_TIMEOUT_S = 25.0
+LAN_URLS = ("http://192.168.1.24:8888", "http://10.0.0.7:8888")
+LAN_STATUS = {
+    "state": "online",
+    "urls": list(LAN_URLS),
+    "public_urls": [],
+    "error": None,
+    "auto_start": False,
+    "managed_by": "settings",
+    "can_start": False,
+    "can_stop": True,
+    "block_reason": None,
+    "bind_host": "0.0.0.0",
+    "wildcard_bind": True,
+    "serves_web_ui": True,
+    "keyless_lan_eligible": True,
+    "keyless_scope": "off",
+    "keyless_tools": False,
+}
+PANEL = 'div[role="dialog"] main div.hover-scrollbar'
+DEEP_OPEN_HOLD_MS = 2500
+DEEP_OPEN_ABANDON_MS = 300
+# vite appends ?t= or ?v= to module URLs.
+DATA_MODULE = re.compile(r"/data-tab(\.tsx)?(\?|$)")
+
+report: dict = {
+    "engine": ENGINE,
+    "chunk_delay_ms": CHUNK_DELAY_MS,
+    "chunk_fail": CHUNK_FAIL,
+    "steps": [],
+    "tabs": {},
+    "failures": [],
+}
+
+
+def log(msg: str) -> None:
+    print(f"[settings-tabs] {msg}", flush = True)
+
+
+def fail(msg: str) -> None:
+    log(f"FAIL {msg}")
+    report["failures"].append(msg)
+
+
+SNAPSHOT_JS = """(sel) => {
+    const root = document.querySelector(sel);
+    if (!root) return { present: false, sig: 'none' };
+    const labels = [...root.querySelectorAll('[data-settings-label]')]
+        .map((el) => el.dataset.settingsLabel);
+    const text = (root.innerText || '').trim();
+    return {
+        present: true,
+        labels,
+        elements: root.querySelectorAll('*').length,
+        textLength: text.length,
+        // Identity of what is on screen, insensitive to live values (versions, sizes).
+        sig: labels.join('|') + '#' + root.querySelectorAll('*').length,
+    };
+}"""
+
+
+def until(
+    page,
+    condition: str,
+    arg = None,
+    timeout: int = 5000,
+) -> None:
+    """Wait for the state a check reads, without failing here: a broken build spends the bound and
+    then fails on the same check. Replaces flat sleeps, which also asserted the runner's speed."""
+    try:
+        page.wait_for_function(condition, arg = arg, timeout = timeout)
+    except PlaywrightTimeout:
+        pass
+
+
+DIALOG_GONE = "() => !document.querySelector('div[role=\"dialog\"]')"
+ROWS = "[...document.querySelectorAll('[data-settings-label]')].map(r => r.dataset.settingsLabel)"
+
+
+def close_dialog(page) -> None:
+    page.evaluate("() => window.__settingsSmoke.close()")
+    until(page, DIALOG_GONE)
+
+
+def snapshot(page) -> dict:
+    return page.evaluate(SNAPSHOT_JS, PANEL)
+
+
+def settle(page, timeout_s: float = SETTLE_TIMEOUT_S) -> dict:
+    """Poll until the panel signature holds still for SETTLE_MS, then return it."""
+    deadline = time.time() + timeout_s
+    last = snapshot(page)
+    stable_since = time.time()
+    while time.time() < deadline:
+        page.wait_for_timeout(50)
+        now = snapshot(page)
+        if now.get("sig") != last.get("sig"):
+            last = now
+            stable_since = time.time()
+            continue
+        if (time.time() - stable_since) * 1000 >= SETTLE_MS:
+            return now
+    last["settle_timeout"] = True
+    return last
+
+
+def settle_panel(page, timeout_s: float = SETTLE_TIMEOUT_S) -> dict:
+    """Waits past the deferred-render placeholder, which can outlast SETTLE_MS under load."""
+    deadline = time.time() + timeout_s
+    latest = settle(page, timeout_s = timeout_s)
+    while latest.get("elements", 0) < 5 and time.time() < deadline:
+        page.wait_for_timeout(100)
+        latest = settle(page, timeout_s = max(1.0, deadline - time.time()))
+    return latest
+
+
+def click_tab_and_observe(page, tab: str) -> dict:
+    """Click a tab; record how long the panel keeps the old content and whether it blanks."""
+    before = snapshot(page)
+    click_forced(page.locator(f'[data-testid="settings-tab-{tab}"]'), timeout = 15000)
+    started = time.time()
+    changed_ms = None
+    blank_frames = 0
+    frames = 0
+    deadline = started + SETTLE_TIMEOUT_S
+    while time.time() < deadline:
+        now = snapshot(page)
+        frames += 1
+        if now.get("present") and now.get("elements", 0) < 5:
+            blank_frames += 1
+        if changed_ms is None and now.get("sig") != before.get("sig"):
+            changed_ms = round((time.time() - started) * 1000)
+            break
+        page.wait_for_timeout(20)
+    final = settle_panel(page)
+    return {
+        "before_sig": before.get("sig"),
+        "changed_ms": changed_ms,
+        "blank_frames": blank_frames,
+        "frames_sampled": frames,
+        "settled": final,
+    }
+
+
+def require_harness(page) -> None:
+    """Fail if the harness page is gone: a real Unsloth on 127.0.0.1:8888 gives /api 401 and navigates."""
+    if not page.evaluate("() => !!window.__settingsSmoke"):
+        raise RuntimeError(
+            "the harness page is gone (window.__settingsSmoke undefined). This smoke page "
+            f"is served by vite on {PORT} and proxies /api to 127.0.0.1:8888; an Unsloth "
+            "listening there answers 401 and the app navigates away. Run this without a "
+            "backend on 8888."
+        )
+
+
+def open_dialog(page, tab: str | None = None) -> None:
+    require_harness(page)
+    page.evaluate("(t) => window.__settingsSmoke.open(t || undefined)", tab)
+    page.wait_for_selector('div[role="dialog"]', timeout = 15000)
+
+
+ON_SUBPAGE_JS = """() => ({
+    subpage: !!document.querySelector('div[role="dialog"] main header button'),
+    elements: (document.querySelector('div[role="dialog"] main div.hover-scrollbar')
+        || { querySelectorAll: () => [] }).querySelectorAll('*').length,
+})"""
+
+ABANDON_DEEP_OPEN_JS = """(delay) => {
+    window.__abandonedAt = null;
+    window.__settingsSmoke.openArchived('chats');
+    setTimeout(() => {
+        const panel = document.querySelector('div[role="dialog"] main div.hover-scrollbar');
+        window.__abandonedAt = {
+            elements: panel ? panel.querySelectorAll('*').length : null,
+            subpage: !!document.querySelector('div[role="dialog"] main header button'),
+        };
+        window.__settingsSmoke.close();
+    }, delay);
+}"""
+
+
+def run_abandoned_deep_open(page) -> None:
+    """Closing the dialog mid-fetch must not leave archivedRequested set for the next Data visit."""
+
+    # Match only the Data module: the handler sleeps on the driver thread, queueing every request it sees.
+    def hold_data(route):
+        time.sleep(DEEP_OPEN_HOLD_MS / 1000)
+        return route.continue_()
+
+    page.route(DATA_MODULE, hold_data)
+    try:
+        page.evaluate(ABANDON_DEEP_OPEN_JS, DEEP_OPEN_ABANDON_MS)
+        page.wait_for_timeout(DEEP_OPEN_HOLD_MS + 1500)
+    finally:
+        page.unroute(DATA_MODULE, hold_data)
+    abandoned = page.evaluate("() => window.__abandonedAt")
+    open_dialog(page, "data")
+    settled = settle_panel(page)
+    landed = page.evaluate(ON_SUBPAGE_JS)
+    report["abandoned_deep_open"] = {
+        "abandoned_at": abandoned,
+        "landed": landed,
+        "state": page.evaluate("() => window.__settingsSmoke.state()"),
+        "settled_sig": settled.get("sig"),
+    }
+    log(f"abandoned deep-open: at close {abandoned}, later visit {landed}")
+    if not abandoned or abandoned.get("subpage"):
+        fail(f"deep-open abandon never happened mid-load, so nothing was tested ({abandoned})")
+    elif landed["elements"] < 5:
+        fail(f"after an abandoned deep-open, Data did not render at all ({landed})")
+    elif landed["subpage"]:
+        fail("an abandoned archive deep-open reopened the archive on the next visit to Data")
+    else:
+        log("an abandoned deep-open leaves the next visit to Data on the main page")
+    close_dialog(page)
+
+    page.evaluate("() => window.__settingsSmoke.openArchived('chats')")
+    page.wait_for_selector('div[role="dialog"]', timeout = 15000)
+    settle_panel(page)
+    honoured = page.evaluate(ON_SUBPAGE_JS)
+    report["abandoned_deep_open"]["honoured"] = honoured
+    if not honoured["subpage"]:
+        fail(f"a deep-open the panel did reach no longer opens the archive ({honoured})")
+    else:
+        log("a deep-open the panel reaches still opens the archive")
+    close_dialog(page)
+    report["steps"].append("abandoned-deep-open")
+
+
+def run_chunk_fail(page) -> None:
+    """One panel's module is blocked. The dialog must survive it, and so must the app."""
+    open_dialog(page)
+    settle_panel(page)
+    click_forced(page.locator('[data-testid="settings-tab-general"]'), timeout = 15000)
+    settle_panel(page)
+    # Read the nav size: the invariant is that a blocked panel does not collapse the dialog.
+    nav_before = page.evaluate(
+        "() => document.querySelectorAll('[data-testid^=\"settings-tab-\"]').length"
+    )
+    if nav_before < 2:
+        fail(f"the settings nav was already empty before blocking anything ({nav_before})")
+    click_forced(page.locator(f'[data-testid="settings-tab-{CHUNK_FAIL}"]'), timeout = 15000)
+    # Observation window: the blocked panel's failure (and the idle prefetch's) must play out
+    # without taking the dialog or the app down, so this watches for a fixed time.
+    page.wait_for_timeout(3000)
+    state = page.evaluate(
+        """() => ({
+            dialog: !!document.querySelector('div[role="dialog"]'),
+            nav: document.querySelectorAll('[data-testid^="settings-tab-"]').length,
+            harness: !!document.querySelector('[data-testid="harness-root"]'),
+            boundary: !!document.querySelector('[data-testid="harness-error-boundary"]'),
+            panelText: (document.querySelector('div[role="dialog"] main div.hover-scrollbar')
+                || {}).innerText || null,
+            bodyText: (document.body.innerText || '').trim().length,
+        })"""
+    )
+    report["chunk_fail_state"] = state
+    log(f"after blocking {CHUNK_FAIL}: {state}")
+    errors = page.evaluate("() => window.__settingsSmoke.errors()")
+    report["chunk_fail_window_errors"] = errors
+    unhandled = [
+        e for e in errors if "dynamically imported module" in e or "Importing a module" in e
+    ]
+    if unhandled:
+        fail(f"blocking the {CHUNK_FAIL} panel left an unhandled rejection: {unhandled}")
+    else:
+        log("no unhandled rejection from the idle prefetch")
+    if state["boundary"]:
+        fail(
+            f"blocking the {CHUNK_FAIL} panel unmounted the app: the throw reached the "
+            "harness root boundary, and the real app has none"
+        )
+    if not state["dialog"] or state["nav"] != nav_before:
+        fail(
+            f"blocking the {CHUNK_FAIL} panel took the dialog down "
+            f"(nav was {nav_before} before, {state})"
+        )
+    else:
+        log("the dialog and its twelve nav entries survived")
+    click_forced(page.locator('[data-testid="settings-tab-about"]'), timeout = 15000)
+    after = settle_panel(page)
+    report["chunk_fail_recovery"] = after
+    if not after.get("present") or after.get("elements", 0) < 5:
+        fail(f"after a failed panel, another tab no longer renders ({after})")
+    else:
+        log("another tab still renders after the failure")
+
+
+def run_lan_address_actions(page) -> None:
+    """Every listed address must own the actions that operate on it."""
+    click_forced(page.locator('[data-testid="settings-tab-remote-lan"]'), timeout = 15000)
+    settle_panel(page)
+
+    rows = {}
+    for url in LAN_URLS:
+        address = page.get_by_text(url, exact = True)
+        if address.count() != 1:
+            fail(f"LAN address {url}: expected one visible row, found {address.count()}")
+            continue
+        labels = address.evaluate(
+            """(node) => [...node.parentElement.querySelectorAll('button')]
+                .map((button) => button.getAttribute('aria-label'))"""
+        )
+        rows[url] = labels
+        expected = [f"Show QR code for {url}", f"Copy {url}"]
+        if labels != expected:
+            fail(f"LAN address {url}: row actions {labels}, expected {expected}")
+
+    if len(rows) != len(LAN_URLS):
+        return
+
+    target = LAN_URLS[1]
+    click_forced(page.get_by_role("button", name = f"Show QR code for {target}", exact = True))
+    qr_dialog = page.locator('div[role="dialog"]').last
+    qr_dialog.wait_for(state = "visible", timeout = 15000)
+    qr_value = qr_dialog.locator("code").inner_text().strip()
+    if qr_value != target:
+        fail(f"LAN QR action opened {qr_value}, expected {target}")
+    page.keyboard.press("Escape")
+    page.get_by_role("heading", name = "Open on your phone").wait_for(state = "hidden", timeout = 15000)
+
+    page.evaluate(
+        """() => Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: async (text) => { window.__copiedLanUrl = text; } },
+        })"""
+    )
+    click_forced(page.get_by_role("button", name = f"Copy {target}", exact = True))
+    page.wait_for_function("(url) => window.__copiedLanUrl === url", arg = target, timeout = 15000)
+    report["lan_address_actions"] = {"rows": rows, "qr": qr_value, "copied": target}
+    report["steps"].append("lan-address-actions")
+    log("each LAN address keeps its own QR and copy target")
+
+
+def assert_persisted_monitor_restores(page) -> None:
+    """An open resource monitor returns after reload without opening Settings."""
+    page.evaluate(
+        """() => localStorage.setItem(
+            'unsloth_monitor_overlay',
+            JSON.stringify({ state: { isOpen: true, isMinimized: false }, version: 0 }),
+        )"""
+    )
+    page.reload(wait_until = "domcontentloaded")
+    page.wait_for_function("() => !!window.__settingsSmoke", timeout = 120000)
+
+    monitor = page.locator('[data-testid="floating-monitor"]')
+    try:
+        monitor.wait_for(state = "visible", timeout = 15000)
+        visible = True
+    except Exception:
+        visible = False
+    dialog_count = page.locator('div[role="dialog"]').count()
+    report["persisted_monitor"] = {
+        "visible_after_reload": visible,
+        "settings_dialog_count": dialog_count,
+    }
+    if not visible:
+        fail("persisted open resource monitor did not return after reload")
+    elif dialog_count:
+        fail("persisted monitor required Settings to open")
+    else:
+        log("persisted resource monitor restored before Settings opened")
+
+    page.evaluate("() => window.__settingsSmoke.open('resources')")
+    dialog = page.locator('div[role="dialog"]').first
+    dialog.wait_for(state = "visible", timeout = 15000)
+    page.wait_for_function(
+        "() => document.querySelectorAll('[data-testid=\"floating-monitor\"]').length === 1",
+        timeout = 15000,
+    )
+    while_open = monitor.count()
+    page.evaluate("() => window.__settingsSmoke.close()")
+    dialog.wait_for(state = "hidden", timeout = 15000)
+    monitor.wait_for(state = "visible", timeout = 15000)
+    after_close = monitor.count()
+    report["persisted_monitor"].update(
+        {
+            "count_while_settings_open": while_open,
+            "count_after_settings_close": after_close,
+        }
+    )
+    if while_open != 1 or after_close != 1:
+        fail(
+            "resource monitor ownership did not transfer cleanly through Settings "
+            f"(open={while_open}, closed={after_close})"
+        )
+
+    page.evaluate("() => window.__settingsSmoke.setMonitor(false)")
+    monitor.wait_for(state = "hidden", timeout = 15000)
+    report["steps"].append("persisted-monitor-reload")
+
+
+def run_keystroke_search(page) -> None:
+    """Chord press must beat both the shortcut it names and the dialog's own Escape to the search box."""
+    open_dialog(page, "keyboard-shortcuts")
+    settle_panel(page)
+    rows_js = """() => [...document.querySelectorAll('[data-settings-label]')]
+        .map(r => r.dataset.settingsLabel)"""
+    box = page.locator(f"{PANEL} input")
+    toggle = page.locator(f"{PANEL} button[aria-pressed]")
+    click_forced(toggle, timeout = 15000)
+    until(page, "el => el?.getAttribute('aria-pressed') === 'true'", arg = toggle.element_handle())
+    # Mod is Cmd on macOS and Ctrl everywhere else, and bindingFromEvent drops a Meta
+    # chord off macOS outright, so a hardcoded Meta would record nothing on the Linux
+    # runner. Same read as isMacPlatform(), which is what the app itself goes by.
+    mac = page.evaluate(
+        "() => /mac|iphone|ipad|ipod/i.test(`${navigator.platform} ${navigator.userAgent}`)"
+    )
+    mod = "Meta" if mac else "Control"
+    state: dict = {"armed": toggle.get_attribute("aria-pressed"), "mod": mod}
+
+    page.keyboard.press(f"{mod}+Shift+KeyO")
+    until(
+        page,
+        f"() => {{ const rows = {ROWS}; return rows.includes('New chat')"
+        " && !rows.includes('New standalone chat'); }",
+    )
+    state["chord"] = box.input_value()
+    state["chord_rows"] = page.evaluate(rows_js)
+
+    page.keyboard.press("KeyO")
+    until(page, f"() => {ROWS}.includes('New standalone chat')")
+    state["bare_rows"] = page.evaluate(rows_js)
+
+    # A dialog gone here means the press reached Radix before the box.
+    page.keyboard.press("Escape")
+    # Observation window, not a readiness guess: the bug is the dialog closing, and a closing
+    # dialog stays mounted through its exit animation, so it needs the time to finish leaving.
+    page.wait_for_timeout(SETTLE_MS)
+    open_after_first = page.locator('div[role="dialog"]').count()
+    state["after_first_escape"] = {
+        "dialog": open_after_first,
+        "value": box.input_value() if open_after_first else None,
+        "rows": len(page.evaluate(rows_js)) if open_after_first else 0,
+    }
+    if open_after_first:
+        page.keyboard.press("Escape")
+        until(
+            page, "el => el?.getAttribute('aria-pressed') === 'false'", arg = toggle.element_handle()
+        )
+        open_after_second = page.locator('div[role="dialog"]').count()
+        state["after_second_escape"] = {
+            "dialog": open_after_second,
+            "armed": toggle.get_attribute("aria-pressed") if open_after_second else None,
+        }
+    else:
+        state["after_second_escape"] = {"dialog": 0, "armed": None}
+    report["keystroke_search"] = state
+
+    if state["armed"] != "true":
+        fail(f"keystroke search: the toggle did not arm ({state['armed']})")
+    if not state["chord"]:
+        fail("keystroke search: the pressed chord did not reach the box")
+    if "New chat" not in state["chord_rows"]:
+        fail(f"keystroke search: chord matched {state['chord_rows']}")
+    if "New standalone chat" in state["chord_rows"]:
+        fail(f"keystroke search: chord matched a lesser chord {state['chord_rows']}")
+    if "New standalone chat" not in state["bare_rows"]:
+        fail(
+            f"keystroke search: the bare key did not widen "
+            f"({state['bare_rows']} vs {state['chord_rows']})"
+        )
+    if state["after_first_escape"]["value"]:
+        fail("keystroke search: the first Escape left the chord in the box")
+    if state["after_first_escape"]["dialog"] != 1:
+        fail("keystroke search: the first Escape closed the dialog")
+    if state["after_second_escape"]["armed"] != "false":
+        fail("keystroke search: the second Escape left the mode armed")
+    if state["after_second_escape"]["dialog"] != 1:
+        fail("keystroke search: the second Escape closed the dialog")
+    page.evaluate("() => window.__settingsSmoke.close()")
+    report["steps"].append("keystroke-search")
+
+
+def assert_model_memory_rows() -> None:
+    """The image/video idle row moved to Model memory; keepKv renders without a backend."""
+    labels = {
+        tab: report["tabs"][tab]["settled"].get("labels", []) for tab in ("resources", "api-keys")
+    }
+    expected = [
+        ("resources", "Keep multiple models loaded", True),
+        ("resources", "Idle auto-unload for image and video", True),
+        ("api-keys", "Idle auto-unload for image and video", False),
+        ("api-keys", "Keep chat context across unloads", True),
+    ]
+    for tab, label, present in expected:
+        if (label in labels[tab]) != present:
+            fail(f"{tab}: '{label}' {'missing' if present else 'still renders'} ({labels[tab]})")
+
+
+def run(page) -> None:
+    if CHUNK_FAIL:
+        run_chunk_fail(page)
+        return
+
+    run_abandoned_deep_open(page)
+
+    assert_persisted_monitor_restores(page)
+
+    open_dialog(page)
+    settle_panel(page)
+    click_forced(page.locator('[data-testid="settings-tab-about"]'), timeout = 15000)
+    settle_panel(page)
+    for tab in TABS:
+        obs = click_tab_and_observe(page, tab)
+        report["tabs"][tab] = obs
+        snap = obs["settled"]
+        if not snap.get("present"):
+            fail(f"tab {tab}: panel container missing")
+        elif snap.get("elements", 0) < 5:
+            fail(f"tab {tab}: panel settled empty ({snap})")
+        elif snap.get("sig") == obs["before_sig"]:
+            fail(f"tab {tab}: panel never changed from the previous tab ({snap['sig']})")
+        else:
+            log(
+                f"tab {tab}: changed after {obs['changed_ms']}ms, "
+                f"{snap['elements']} elements, {len(snap['labels'])} labels, "
+                f"blank frames {obs['blank_frames']}/{obs['frames_sampled']}"
+            )
+    report["steps"].append("all-tabs-render")
+    assert_model_memory_rows()
+
+    run_lan_address_actions(page)
+
+    close_dialog(page)
+    for tab in ("voice", "api-keys", "data", "about", "connections"):
+        open_dialog(page, tab)
+        state = page.evaluate("() => window.__settingsSmoke.state()")
+        snap = settle_panel(page)
+        report.setdefault("deep_open", {})[tab] = {"state": state, "settled": snap}
+        if state["activeTab"] != tab:
+            fail(f"deep-open {tab}: store activeTab is {state['activeTab']}")
+        if not snap.get("present") or snap.get("elements", 0) < 5:
+            fail(f"deep-open {tab}: panel did not render ({snap})")
+        elif snap["sig"] != report["tabs"][tab]["settled"]["sig"]:
+            fail(
+                f"deep-open {tab}: panel differs from the same tab reached by clicking "
+                f"({snap['sig']} vs {report['tabs'][tab]['settled']['sig']})"
+            )
+        else:
+            log(f"deep-open {tab}: matches the clicked-to panel")
+        close_dialog(page)
+    report["steps"].append("deep-open")
+
+    target_tab = "general"
+    target_label = report["tabs"][target_tab]["settled"]["labels"][-1]
+    query = target_label.split()[0]
+    open_dialog(page, "about")
+    settle_panel(page)
+    search = page.locator('div[role="dialog"] aside input').first
+    search.fill(query)
+    until(
+        page,
+        """label => [...document.querySelectorAll('div[role="dialog"] aside button:not([data-testid])')]
+          .some(b => b.innerText.trim() === label)""",
+        arg = target_label,
+    )
+    entries = page.locator('div[role="dialog"] aside button:not([data-testid])')
+    texts = [entries.nth(i).inner_text().strip() for i in range(entries.count())]
+    report["search"] = {"query": query, "target_label": target_label, "result_texts": texts}
+    log(f"search '{query}' -> {texts}")
+    index = next((i for i, txt in enumerate(texts) if txt == target_label), None)
+    if index is None:
+        fail(f"search '{query}': '{target_label}' not among results {texts}")
+    else:
+        click_forced(entries.nth(index))
+        flashed = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            state = page.evaluate(
+                """(sel) => {
+                    const hit = document.querySelector('.settings-search-hit');
+                    const root = document.querySelector(sel);
+                    return {
+                        hit: hit ? (hit.dataset.settingsLabel || hit.tagName) : null,
+                        scrollTop: root ? root.scrollTop : null,
+                    };
+                }""",
+                PANEL,
+            )
+            if state["hit"]:
+                flashed = state
+                break
+            page.wait_for_timeout(30)
+        report["search"]["flashed"] = flashed
+        report["search"]["settled"] = settle_panel(page)
+        if not flashed:
+            fail(
+                f"search jump to '{target_label}': never flashed "
+                f"(panel {report['search']['settled'].get('sig')})"
+            )
+        elif flashed["hit"] != target_label:
+            fail(f"search jump: flashed '{flashed['hit']}', expected '{target_label}'")
+        else:
+            log(f"search jump to '{target_label}': flashed, scrollTop {flashed['scrollTop']}")
+    report["steps"].append("search-jump")
+
+    run_keystroke_search(page)
+
+    report["page_errors"] = page.evaluate("() => window.__settingsSmoke.errors()")
+
+
+def write_report() -> None:
+    OUT.parent.mkdir(parents = True, exist_ok = True)
+    OUT.write_text(json.dumps(report, indent = 2), encoding = "utf-8")
+    log(f"report -> {OUT}")
+
+
+def main() -> int:
+    vite = start_vite(PORT)
+    try:
+        url = f"http://127.0.0.1:{PORT}/smoke-settings.html"
+        wait_for_smoke_page(url, "smoke-settings-main.tsx", proc = vite)
+        with sync_playwright() as pw:
+            launcher = getattr(pw, ENGINE)
+            kwargs: dict = {"headless": True}
+            if ENGINE == "chromium":
+                kwargs["args"] = chromium_launch_args()
+            browser = launcher.launch(**kwargs)
+            ctx = browser.new_context(
+                viewport = {"width": 1440, "height": 900},
+                reduced_motion = "reduce",
+            )
+            page = ctx.new_page()
+            page.route(
+                "**/api/settings/lan-access*",
+                lambda route: route.fulfill(
+                    status = 200,
+                    content_type = "application/json",
+                    body = json.dumps(LAN_STATUS),
+                ),
+            )
+            if CHUNK_DELAY_MS or CHUNK_FAIL:
+
+                def handle(route):
+                    path = route.request.url
+                    if "/tabs/" not in path:
+                        return route.fallback()
+                    if CHUNK_FAIL and f"/{CHUNK_FAIL}-tab" in path:
+                        return route.abort("failed")
+                    if CHUNK_DELAY_MS:
+                        time.sleep(CHUNK_DELAY_MS / 1000)
+                    return route.continue_()
+
+                page.route("**/*", handle)
+            console: list[str] = []
+            page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
+            page.on("pageerror", lambda e: console.append(f"pageerror: {e}"))
+            for attempt in range(40):
+                try:
+                    page.goto(url, wait_until = "domcontentloaded", timeout = 30000)
+                    break
+                except Exception:
+                    if attempt == 39:
+                        raise
+                    time.sleep(2)
+            page.wait_for_function("() => !!window.__settingsSmoke", timeout = 120000)
+            # Vite re-optimizes deps on first sight and full-reloads; settle, then reload once.
+            page.wait_for_timeout(4000)
+            page.reload(wait_until = "domcontentloaded")
+            page.wait_for_function("() => !!window.__settingsSmoke", timeout = 120000)
+            page.wait_for_timeout(1500)
+            try:
+                run(page)
+            finally:
+                report["console"] = [
+                    c
+                    for c in console
+                    if ("error" in c.lower() or "pageerror" in c.lower())
+                    and "502" not in c
+                    and "403" not in c
+                ][:40]
+                boundary = page.locator('[data-testid="harness-error-boundary"]')
+                report["error_boundary"] = boundary.inner_text() if boundary.count() else None
+                if report["error_boundary"] and not CHUNK_FAIL:
+                    fail(f"error boundary tripped: {report['error_boundary']}")
+            browser.close()
+    except Exception as exc:
+        report["aborted"] = f"{type(exc).__name__}: {exc}"
+        fail(f"harness aborted: {report['aborted'].splitlines()[0]}")
+        write_report()
+        raise
+    finally:
+        stop_process(vite)
+
+    write_report()
+    if report["failures"]:
+        log(f"{len(report['failures'])} FAILURES")
+        for f in report["failures"]:
+            log(f"  - {f}")
+        return 1
+    log("PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

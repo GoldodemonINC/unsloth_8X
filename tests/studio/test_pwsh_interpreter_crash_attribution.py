@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""A signal-killed shell is retried, then blamed on the interpreter; a normal exit is never touched."""
+
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+
+from unsloth_pwsh_runner import PWSH, PwshInterpreterCrash, run_pwsh
+
+# os.abort() reproduces the CI condition: the helper keys on the signal. PR_SET_DUMPABLE=0
+# first avoids apport cores; Linux-only and non-fatal elsewhere.
+_ABORT = [
+    sys.executable,
+    "-c",
+    "import ctypes, os, sys; "
+    "sys.platform == 'linux' and ctypes.CDLL(None).prctl(4, 0, 0, 0, 0); "
+    "os.abort()",
+]
+_CLEAN_WRONG_ANSWER = [sys.executable, "-c", "print('WRONG'); raise SystemExit(3)"]
+
+
+def test_a_signal_death_is_attributed_to_the_interpreter_not_the_assertion():
+    """The message must name pwsh dying, and must not read as the script being wrong."""
+    with pytest.raises(PwshInterpreterCrash) as excinfo:
+        run_pwsh(_ABORT, attempts = 2, capture_output = True, text = True)
+
+    message = str(excinfo.value)
+    assert "pwsh itself killed by SIGABRT on all 2 attempts" in message, message
+    assert "interpreter dying, not an assertion failing" in message, message
+
+
+def test_a_clean_run_with_the_wrong_answer_still_fails_with_its_own_message():
+    """The load-bearing negative. Exit 3 is a verdict, so it is returned as-is, once."""
+    proc = run_pwsh(_CLEAN_WRONG_ANSWER, attempts = 3, capture_output = True, text = True)
+    assert proc.returncode == 3
+    assert proc.stdout.strip() == "WRONG"
+
+    # `check` still raises the ordinary CalledProcessError.
+    with pytest.raises(subprocess.CalledProcessError):
+        run_pwsh(_CLEAN_WRONG_ANSWER, check = True, capture_output = True, text = True)
+
+
+def test_a_clean_run_is_not_retried():
+    """A regression retried three times is a regression that can flake green."""
+    calls = []
+    real_run = subprocess.run
+
+    def counting_run(argv, **kwargs):
+        calls.append(argv)
+        return real_run(argv, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(subprocess, "run", counting_run)
+        run_pwsh(_CLEAN_WRONG_ANSWER, attempts = 3, capture_output = True, text = True)
+    assert len(calls) == 1, f"a normally-exiting run was retried {len(calls)} times"
+
+
+def test_the_startup_cache_is_redirected_without_disturbing_the_callers_env():
+    """The redirect must reach the child and add exactly one variable, keeping hermetic envs hermetic."""
+    dump = [sys.executable, "-c", "import json,os; print(json.dumps(dict(os.environ)))"]
+
+    marker = "UNSLOTH_PWSH_RUNNER_LEAK_PROBE"
+    os.environ[marker] = "ambient"
+    try:
+        hermetic = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent"}
+        proc = run_pwsh(dump, env = dict(hermetic), capture_output = True, text = True)
+        child = json.loads(proc.stdout)
+    finally:
+        os.environ.pop(marker, None)
+
+    assert "XDG_CACHE_HOME" in child, sorted(child)
+    assert child["HOME"] == "/nonexistent", "the caller's hermetic HOME was overwritten"
+    assert child["PATH"] == "/usr/bin:/bin"
+    # PEP 538 locale coercion can add LC_CTYPE, so probe for a named leak, not an exact key set.
+    assert marker not in child, "the ambient environment leaked past a hermetic env dict"
+
+    # env = None must still mean inherit.
+    inherited = json.loads(run_pwsh(dump, capture_output = True, text = True).stdout)
+    assert inherited["XDG_CACHE_HOME"] == child["XDG_CACHE_HOME"]
+    assert inherited.get("PATH") == os.environ.get("PATH")
+
+
+@pytest.mark.skipif(PWSH is None, reason = "no PowerShell on this platform")
+def test_a_real_pwsh_that_answers_correctly_is_untouched():
+    """The helper must be transparent on the path every migrated call site takes."""
+    proc = run_pwsh(
+        [PWSH, "-NoProfile", "-NonInteractive", "-Command", "Write-Output 'ANSWER=7'"],
+        capture_output = True,
+        text = True,
+    )
+    assert proc.returncode == 0
+    assert "ANSWER=7" in proc.stdout

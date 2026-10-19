@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-Present the Unsloth team. See /studio/LICENSE.AGPL-3.0
+
+"""Without libcublas on the loader path, the llama.cpp CUDA backend fails silently."""
+
+from __future__ import annotations
+
+import re
+import shlex
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
+
+
+@pytest.fixture(scope = "module")
+def dockerfile() -> str:
+    assert DOCKERFILE.is_file(), f"missing {DOCKERFILE}"
+    return DOCKERFILE.read_text(encoding = "utf-8")
+
+
+def test_cublas_dir_is_registered_with_the_loader(dockerfile: str):
+    conf = re.search(
+        r"ld\.so\.conf\.d/zz-unsloth-venv\.conf",
+        dockerfile,
+    )
+    assert conf, "the venv loader-config layer disappeared"
+    block = dockerfile[: conf.end()]
+    assert "$SP/nvidia/cublas/lib" in block, (
+        "libggml-cuda.so links against libcublas, which only exists in the venv's "
+        "wheel copy; without this entry the CUDA backend fails to dlopen and GGUF "
+        "silently runs on the CPU"
+    )
+    # nvidia-cublas-cu12 unpacks to nvidia/cublas/lib, nvidia-cublas (13+) to nvidia/cu13/lib.
+    assert "$SP/nvidia/cu13/lib" in block, (
+        "the CUDA 13 cublas wheel unpacks to nvidia/cu13/lib, so dropping this entry "
+        "puts libcublas.so.13 off the loader path even after the guard installs it"
+    )
+
+
+def test_loader_config_is_not_ld_library_path(dockerfile: str):
+    # LD_LIBRARY_PATH beats DT_RUNPATH and would shadow llama.cpp's $ORIGIN libs;
+    # ld.so.conf.d is consulted after.
+    assert "ld.so.conf.d/zz-unsloth-venv.conf" in dockerfile
+    assert not re.search(
+        r"ENV\s+LD_LIBRARY_PATH=.*site-packages/nvidia",
+        dockerfile,
+    ), "the venv nvidia libs must not go on LD_LIBRARY_PATH"
+
+
+def test_build_fails_on_an_unresolved_cuda_backend(dockerfile: str):
+    assert "libggml-cuda.so" in dockerfile, "the CUDA backend guard disappeared"
+    guard = dockerfile[dockerfile.index("CUDA_SO=") :]
+    assert "ldd" in guard, "the guard must inspect the backend's dependencies"
+    assert "not found" in guard
+    assert "exit 1" in guard, "an unresolved backend must fail the build"
+    assert re.search(
+        r"grep -v .libcuda\\?\.so\\?\.1", guard
+    ), "libcuda.so.1 must be exempt from the guard or every build fails"
+
+
+def _cublas_pkg_for(dockerfile: str, soname: str) -> str:
+    """Runs the Dockerfile's own wheel selection, since a name is right only if it resolves on PyPI."""
+    guard = dockerfile[dockerfile.index("CUDA_SO=") :]
+    start = guard.index('major="${want##*.}"')
+    snippet = guard[start : guard.index('echo ">> $want missing', start)]
+    lines = snippet.replace("\\\n", "\n")
+    script = "\n".join([f"want={shlex.quote(soname)}", lines, 'printf %s "$pkg"'])
+    return subprocess.run(
+        ["sh", "-eu", "-c", script], capture_output = True, text = True, check = True
+    ).stdout
+
+
+@pytest.mark.parametrize(
+    "soname, expected",
+    [
+        ("libcublas.so.12", "nvidia-cublas-cu12"),
+        ("libcublas.so.13", "nvidia-cublas==13.*"),
+        ("libcublas.so.14", "nvidia-cublas==14.*"),
+    ],
+)
+def test_guard_installs_the_matching_cublas_major(dockerfile: str, soname: str, expected: str):
+    # NVIDIA dropped the -cuXX suffix at CUDA 13; neither package spans both majors.
+    assert _cublas_pkg_for(dockerfile, soname) == expected
+
+
+def test_the_cublas_major_comes_from_the_bundle(dockerfile: str):
+    # Arch bundles differ in CUDA major; a hardcoded major would pass any single case above.
+    assert _cublas_pkg_for(dockerfile, "libcublas.so.12") != _cublas_pkg_for(
+        dockerfile, "libcublas.so.13"
+    )
+
+
+def test_the_guard_never_asks_for_a_retired_suffixed_wheel(dockerfile: str):
+    # nvidia-cublas-cu13 is a 0.0.1 sdist that fails the build, past every fail-soft path.
+    for major in range(13, 20):
+        assert f"-cu{major}" not in _cublas_pkg_for(dockerfile, f"libcublas.so.{major}")
+
+
+def test_guard_runs_after_the_prebuilt_is_fetched(dockerfile: str):
+    fetch = dockerfile.index("fetch_llama_prebuilt.py")
+    guard = dockerfile.index("CUDA_SO=")
+    assert fetch < guard, "the guard can only inspect a bundle that already exists"
+
+
+def test_flashinfer_jit_cache_tracks_flashinfer(dockerfile: str):
+    # flashinfer raises at import when jit-cache and python versions disagree.
+    assert (
+        "flashinfer-jit-cache==${FI_VER}" in dockerfile
+    ), "flashinfer-jit-cache must be pinned to the resolved flashinfer-python version"
+    assert not re.search(
+        r"flashinfer-jit-cache==[0-9]", dockerfile
+    ), "a literal flashinfer-jit-cache version will drift away from flashinfer-python"
+    assert "import flashinfer" in dockerfile, (
+        "the build must prove flashinfer imports, or a mismatch stays silent "
+        "until the first vLLM engine start"
+    )
+
+
+def test_cli_can_reach_the_studio_backend(dockerfile: str):
+    # unsloth_cli imports studio.backend.core, which needs structlog (a studio requirement).
+    assert '"structlog"' in dockerfile, "the base venv must install structlog for unsloth_cli"
+    assert (
+        "from studio.backend.core.export import ExportBackend" in dockerfile
+    ), "a build-time import guard must prove the CLI can reach the studio backend"

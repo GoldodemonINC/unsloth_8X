@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""STUDIO_UI_CPU_THROTTLE needs CDP, so the driver refuses it on firefox and webkit before launch."""
+
+import ast
+import re
+from pathlib import Path
+
+
+DRIVER_PATH = Path(__file__).resolve().parent / "playwright_chat_ui.py"
+DRIVER = DRIVER_PATH.read_text(encoding = "utf-8")
+
+
+def _code_only(source: str) -> str:
+    """The source with comments and string literals removed."""
+    stripped = re.sub(r"(?m)#[^\n]*", "", source)
+    return re.sub(r'("""|\'\'\')(?:.|\n)*?\1', "", stripped)
+
+
+CODE = _code_only(DRIVER)
+
+
+def test_the_throttle_is_read_once_into_a_module_constant():
+    """Read at the launch site instead and the refusal cannot see it."""
+    assert "STUDIO_UI_CPU_THROTTLE" in CODE
+    assert re.search(r"(?m)^CPU_THROTTLE\s*=", CODE), (
+        "the throttle is no longer a module constant, so the pre-launch "
+        "refusal below cannot be reading the same value the driver applies"
+    )
+
+
+def test_a_non_chromium_browser_refuses_the_throttle():
+    refusal = re.search(
+        r"if\s+CPU_THROTTLE\s*>\s*1\s+and\s+PLAYWRIGHT_BROWSER\s*!=\s*"
+        r"[\"']chromium[\"']\s*:(?P<body>(?:\n[ \t]+.*)+)",
+        CODE,
+    )
+    assert refusal, (
+        "nothing refuses STUDIO_UI_CPU_THROTTLE on firefox/webkit, so the run "
+        "aborts inside new_cdp_session with a message about CDP"
+    )
+    assert "fail(" in refusal.group("body"), (
+        "the combination is detected and not refused; a warning would let the "
+        "run continue unthrottled and report a pass that proves nothing"
+    )
+
+
+def test_the_refusal_precedes_the_first_page():
+    """The refusal must come before the first page; file order says nothing about run order."""
+    launch = CODE[CODE.index("browser_type = getattr(p, PLAYWRIGHT_BROWSER)") :]
+    guard = launch.index("CPU_THROTTLE > 1 and PLAYWRIGHT_BROWSER")
+    first_page = launch.index("new_throttled_page(ctx)")
+    assert guard < first_page, (
+        "a page is created before the unsupported-browser check, so firefox "
+        "and webkit reach the CDP call and raise"
+    )
+
+
+def test_every_page_the_driver_opens_goes_through_one_factory():
+    """Every page must go through the throttled factory, since one opened directly runs unthrottled."""
+    factory = re.search(
+        r"def new_throttled_page\([^)]*\):(?P<body>(?:\n(?:[ \t].*)?)+?)(?=\ndef |\nclass |\Z)",
+        CODE,
+    )
+    assert factory, "no new_throttled_page factory"
+    body = factory.group("body")
+    assert "ctx.new_page()" in body and "apply_cpu_throttle" in body
+    assert "set_default_timeout(60_000)" in body, (
+        "the factory drops the 60s default the direct call sites carried, so "
+        "the macos-14 runners go back to timing out on ordinary renders"
+    )
+    outside = CODE.replace(body, "", 1)
+    assert "new_page()" not in outside, (
+        "a page is still opened outside new_throttled_page, so it runs "
+        "unthrottled for every step that follows it"
+    )
+
+
+def test_the_cdp_call_has_exactly_one_owner():
+    # Two owners: apply_cpu_throttle, and close_page_without_waiting, which only reads the page's
+    # target id and is gated on chromium itself. The throttle itself is set in one place only.
+    assert CODE.count("new_cdp_session") == 2, (
+        "a CDP session outside apply_cpu_throttle and close_page_without_waiting would "
+        "sit outside the chromium refusal and the recovery path"
+    )
+    assert CODE.count("Emulation.setCPUThrottlingRate") == 1
+    closer = re.search(
+        r"def close_page_without_waiting\([^)]*\)[^:]*:(?P<body>(?:\n(?:[ \t].*)?)+?)(?=\ndef |\nclass |\Z)",
+        CODE,
+    )
+    assert closer and "new_cdp_session" in closer.group("body")
+    assert 'PLAYWRIGHT_BROWSER == "chromium"' in closer.group(
+        "body"
+    ), "the closer's CDP session is not gated on chromium, so firefox/webkit would hit a CDP error"
+    owner = re.search(
+        r"def apply_cpu_throttle\([^)]*\):(?P<body>(?:\n(?:[ \t].*)?)+?)(?=\ndef |\nclass |\Z)",
+        CODE,
+    )
+    assert owner and "new_cdp_session" in owner.group(
+        "body"
+    ), "the throttle is applied somewhere other than apply_cpu_throttle"
+
+
+def test_a_replacement_page_is_throttled_again():
+    """A page replaced after a renderer death must be throttled again."""
+    assert "recover_or_replace_page as _robust_recover_or_replace_page" in CODE, (
+        "the shared helper is imported under its own name, so the call sites "
+        "bypass the wrapper that re-throttles a replacement page"
+    )
+    wrapper = re.search(
+        r"def recover_or_replace_page\([^)]*\):(?P<body>(?:\n(?:[ \t].*)?)+?)"
+        r"(?=\ndef |\nclass |\Z)",
+        CODE,
+    )
+    assert wrapper, "no local recover_or_replace_page wrapper"
+    body = wrapper.group("body")
+    assert "_robust_recover_or_replace_page" in body
+    assert "apply_cpu_throttle" in body, (
+        "the wrapper does not re-apply the throttle, so a replaced page runs "
+        "unthrottled for the rest of the driver"
+    )
+    assert "is not page" in body, (
+        "the throttle is re-applied unconditionally; only a REPLACEMENT page "
+        "needs it, and a fresh CDP session per recovery is not free"
+    )
+    assert "_robust_recover_or_replace_page(" not in CODE.replace(body, "", 1).replace(
+        "recover_or_replace_page as _robust_recover_or_replace_page", "", 1
+    ), "a call site reaches the shared helper directly, skipping the wrapper"
+
+
+def test_the_driver_still_parses():
+    """The regexes above are read against real source, not a fixture."""
+    ast.parse(DRIVER)

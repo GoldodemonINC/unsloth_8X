@@ -1,0 +1,262 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Unit tests for the DiT trainer's timestep-shift / CFG-dropout / loss-weighting levers.
+
+CPU-only: cover the flow_shift config resolution (qwen-image defaults to "auto", every
+other family stays on the identity 1.0), the exact sigma transform for the auto and
+numeric modes, the shifted sampling distribution, and the bell weight table. The full
+training loop is exercised by the live GPU smokes, not here."""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+from core.training.diffusion_dit_trainer import (
+    _bell_loss_weights,
+    _gather_sigmas,
+    _sample_timesteps,
+    _training_sigma_table,
+)
+from core.training.diffusion_train_common import DiffusionLoraConfig
+
+QWEN_SHIFT_TERMINAL = 0.02
+
+
+def _qwen_scheduler():
+    # The Qwen/Qwen-Image scheduler config: shift=1.0 is SKIPPED at init (use_dynamic_shifting), base_shift = max_shift = log 3, exponential time shift, terminal stretch to 0.02.
+    diffusers = pytest.importorskip("diffusers")
+    FlowMatchEulerDiscreteScheduler = diffusers.FlowMatchEulerDiscreteScheduler
+    return FlowMatchEulerDiscreteScheduler(
+        num_train_timesteps = 1000,
+        shift = 1.0,
+        use_dynamic_shifting = True,
+        base_shift = math.log(3.0),
+        max_shift = math.log(3.0),
+        shift_terminal = QWEN_SHIFT_TERMINAL,
+        time_shift_type = "exponential",
+    )
+
+
+def _flux_static_scheduler():
+    # A static-shift scheduler (shift baked into sigmas at init, no dynamic shifting).
+    diffusers = pytest.importorskip("diffusers")
+    return diffusers.FlowMatchEulerDiscreteScheduler(num_train_timesteps = 1000, shift = 3.0)
+
+
+# ── config resolution ─────────────────────────────────────────────────────────
+def test_flow_shift_defaults_per_family():
+    qwen = DiffusionLoraConfig(
+        base_model = "Qwen/Qwen-Image", data_dir = "d", output_dir = "o"
+    ).normalized()
+    assert qwen.resolved_family == "qwen-image"
+    assert qwen.flow_shift == "auto"
+    flux = DiffusionLoraConfig(
+        base_model = "black-forest-labs/FLUX.1-dev", data_dir = "d", output_dir = "o"
+    ).normalized()
+    assert flux.flow_shift is None
+    zimg = DiffusionLoraConfig(
+        base_model = "Tongyi-MAI/Z-Image-Turbo", data_dir = "d", output_dir = "o"
+    ).normalized()
+    assert zimg.flow_shift is None
+
+
+def test_flow_shift_explicit_values_and_validation():
+    cfg = DiffusionLoraConfig(
+        base_model = "Qwen/Qwen-Image", data_dir = "d", output_dir = "o", flow_shift = 2.2
+    ).normalized()
+    assert cfg.flow_shift == 2.2
+    # String numerics from the Unsloth config path coerce; "auto" passes through.
+    assert (
+        DiffusionLoraConfig(base_model = "b", data_dir = "d", output_dir = "o", flow_shift = "3.0")
+        .normalized()
+        .flow_shift
+        == 3.0
+    )
+    assert (
+        DiffusionLoraConfig(base_model = "b", data_dir = "d", output_dir = "o", flow_shift = "AUTO")
+        .normalized()
+        .flow_shift
+        == "auto"
+    )
+    with pytest.raises(ValueError, match = "flow_shift"):
+        DiffusionLoraConfig(
+            base_model = "b", data_dir = "d", output_dir = "o", flow_shift = 0.0
+        ).normalized()
+    with pytest.raises(ValueError, match = "flow_shift"):
+        DiffusionLoraConfig(
+            base_model = "b", data_dir = "d", output_dir = "o", flow_shift = "bogus"
+        ).normalized()
+    # Non-finite must be rejected too: JSON accepts 1e309, which floats to inf, and a positivity-only guard passed it to the sigma table as NaN.
+    for bad in (float("inf"), float("-inf"), float("nan"), 1e309):
+        with pytest.raises(ValueError, match = "flow_shift"):
+            DiffusionLoraConfig(
+                base_model = "b", data_dir = "d", output_dir = "o", flow_shift = bad
+            ).normalized()
+
+
+def test_cfg_dropout_and_weighting_scheme_validation():
+    cfg = DiffusionLoraConfig(base_model = "b", data_dir = "d", output_dir = "o").normalized()
+    assert cfg.cfg_dropout == 0.0
+    assert cfg.weighting_scheme == "none"
+    on = DiffusionLoraConfig(
+        base_model = "b",
+        data_dir = "d",
+        output_dir = "o",
+        cfg_dropout = 0.1,
+        weighting_scheme = "bell",
+    ).normalized()
+    assert on.cfg_dropout == 0.1
+    assert on.weighting_scheme == "bell"
+    with pytest.raises(ValueError, match = "cfg_dropout"):
+        DiffusionLoraConfig(
+            base_model = "b", data_dir = "d", output_dir = "o", cfg_dropout = 1.5
+        ).normalized()
+    with pytest.raises(ValueError, match = "weighting_scheme"):
+        DiffusionLoraConfig(
+            base_model = "b", data_dir = "d", output_dir = "o", weighting_scheme = "sigma_sqrt"
+        ).normalized()
+
+
+def test_config_from_dict_plumbs_the_new_fields():
+    from core.training.diffusion_train_common import _config_from_dict
+
+    cfg = _config_from_dict(
+        {
+            "base_model": "Qwen/Qwen-Image",
+            "data_dir": "d",
+            "output_dir": "o",
+            "flow_shift": "auto",
+            "cfg_dropout": 0.05,
+            "weighting_scheme": "bell",
+        }
+    )
+    assert cfg.flow_shift == "auto"
+    assert cfg.cfg_dropout == 0.05
+    assert cfg.weighting_scheme == "bell"
+
+
+# ── sigma table transforms ────────────────────────────────────────────────────
+def test_auto_table_matches_the_exact_qwen_transform():
+    import torch
+
+    sched = _qwen_scheduler()
+    table = _training_sigma_table(sched, "auto")
+    base = sched.sigmas
+    # Exponential shift at mu = log 3 with sigma exponent 1 is exp(mu)/(exp(mu) + 1/u - 1) = 3u/(1 + 2u), then the terminal stretch maps the last sigma to 0.02.
+    shifted = 3.0 * base / (1.0 + 2.0 * base)
+    scale = (1.0 - shifted[-1]) / (1.0 - QWEN_SHIFT_TERMINAL)
+    expected = 1.0 - (1.0 - shifted) / scale
+    assert torch.allclose(table, expected, atol = 1e-6)
+    # Fixed-point spot checks: sigma 1.0 stays 1.0, the terminal sigma lands on 0.02, and u = 0.5 rises to ~0.754.
+    assert abs(float(table[0]) - 1.0) < 1e-6
+    assert abs(float(table[-1]) - QWEN_SHIFT_TERMINAL) < 1e-6
+    assert abs(float(table[499]) - 0.75427) < 1e-3
+    # The table stays a valid descending schedule in (0, 1].
+    assert bool((table[:-1] > table[1:]).all())
+
+
+def test_numeric_table_applies_the_linear_shift():
+    import torch
+
+    sched = _qwen_scheduler()
+    table = _training_sigma_table(sched, 2.2)
+    base = sched.sigmas
+    assert torch.allclose(table, 2.2 * base / (1.0 + 1.2 * base), atol = 1e-6)
+    # u = 0.5 under shift s maps to s/(s+1).
+    assert abs(float(table[499]) - 2.2 / 3.2) < 1e-3
+
+
+def test_identity_and_static_families_are_untouched():
+    # None returns the scheduler's own table; "auto" on a static-shift scheduler is a no-op.
+    sched = _qwen_scheduler()
+    assert _training_sigma_table(sched, None) is sched.sigmas
+    assert _training_sigma_table(sched, 1.0) is sched.sigmas
+    static = _flux_static_scheduler()
+    assert _training_sigma_table(static, None) is static.sigmas
+    assert _training_sigma_table(static, "auto") is static.sigmas
+
+
+def test_a_numeric_shift_is_the_effective_shift_on_a_static_scheduler():
+    import torch
+
+    # Z-Image-Turbo bakes in shift 3: a requested 3 is that schedule (not 9); 1.0 is unshifted.
+    static = _flux_static_scheduler()
+    assert torch.allclose(_training_sigma_table(static, 3.0), static.sigmas, atol = 1e-6)
+    u = _training_sigma_table(static, 1.0)
+    assert torch.allclose(u, torch.linspace(1.0, 0.001, 1000), atol = 1e-6)
+    assert torch.allclose(_training_sigma_table(static, 2.0), 2.0 * u / (1.0 + u), atol = 1e-6)
+
+
+def test_the_resume_identity_keeps_the_default_token_and_drops_min_snr_for_flow_families():
+    from core.training import diffusion_checkpoint as dc
+
+    flux = DiffusionLoraConfig(
+        base_model = "black-forest-labs/FLUX.1-dev", data_dir = "d", output_dir = "o"
+    ).normalized()
+    ident = dc.identity_for_config(flux)
+    # Earlier builds recorded the model's own schedule as "1.0", so a default run still resumes their checkpoints.
+    assert ident.flow_shift == "1.0"
+    assert ident.snr_gamma is None
+    old = dc.CheckpointIdentity.from_dict({**ident.as_dict(), "snr_gamma": "5.0"})
+    assert old.mismatch_reason(ident) is None
+    # FLUX.1 shifts dynamically, so older checkpoints still resume.
+    flux_shifted = dc.identity_for_config(
+        DiffusionLoraConfig(
+            base_model = "black-forest-labs/FLUX.1-dev", data_dir = "d", output_dir = "o", flow_shift = 3.0
+        ).normalized()
+    )
+    assert flux_shifted.flow_shift == "3.0"
+    legacy = dc.CheckpointIdentity.from_dict({**flux_shifted.as_dict(), "flow_shift": "3.0"})
+    assert legacy.mismatch_reason(flux_shifted) is None
+    # Z-Image bakes a static shift in: a number is now effective, not on top of it, so an older run is refused.
+    zimage_shifted = dc.identity_for_config(
+        DiffusionLoraConfig(
+            base_model = "Tongyi-MAI/Z-Image-Turbo", data_dir = "d", output_dir = "o", flow_shift = 3.0
+        ).normalized()
+    )
+    assert zimage_shifted.flow_shift == "effective:3.0"
+    legacy = dc.CheckpointIdentity.from_dict({**zimage_shifted.as_dict(), "flow_shift": "3.0"})
+    assert "timestep shift" in (legacy.mismatch_reason(zimage_shifted) or "")
+    sdxl = DiffusionLoraConfig(
+        base_model = "stabilityai/stable-diffusion-xl-base-1.0", data_dir = "d", output_dir = "o"
+    ).normalized()
+    assert dc.identity_for_config(sdxl).snr_gamma == "5.0"
+
+
+def test_sampled_sigma_distribution_shifts_under_auto():
+    import torch
+
+    torch.manual_seed(0)
+    sched = _qwen_scheduler()
+    auto_table = _training_sigma_table(sched, "auto")
+    _, idx = _sample_timesteps(sched, 4096, "cpu")
+    base = _gather_sigmas(sched.sigmas, idx, "cpu", torch.float32, 1)
+    shifted = _gather_sigmas(auto_table, idx, "cpu", torch.float32, 1)
+    # Unshifted logit-normal draws center at 0.5; the mu = log 3 shift + terminal stretch push the mass to high noise (mean ~0.72) and raise EVERY sample.
+    assert abs(float(base.mean()) - 0.5) < 0.03
+    assert float(shifted.mean()) > 0.68
+    assert bool((shifted >= base - 1e-6).all())
+
+
+def test_gather_sigmas_broadcasts_to_ndim():
+    import torch
+
+    sched = _qwen_scheduler()
+    sig = _gather_sigmas(sched.sigmas, torch.tensor([0, 499, 999]), "cpu", torch.float32, 4)
+    assert sig.shape == (3, 1, 1, 1)
+    assert abs(float(sig[0].flatten()) - 1.0) < 1e-6
+
+
+# ── bell weighting ────────────────────────────────────────────────────────────
+def test_bell_weights_shape_peak_and_normalization():
+    w = _bell_loss_weights(1000)
+    assert w.shape == (1000,)
+    assert float(w.min()) >= 0.0
+    # Peak at mid-schedule, mean 1 so the expected loss scale is unchanged.
+    assert int(w.argmax()) == 500
+    assert abs(float(w.mean()) - 1.0) < 1e-5
+    assert float(w[500]) > float(w[0])
+    assert float(w[500]) > float(w[999])

@@ -1,0 +1,287 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Standalone Playwright drivers run only when a workflow names them; this checks every one is named."""
+
+import re
+from fnmatch import fnmatch
+from pathlib import Path
+
+import yaml
+
+REPO = Path(__file__).resolve().parents[2]
+DRIVERS = sorted((REPO / "tests" / "studio").glob("playwright_*.py"))
+
+NOT_IN_CI = {
+    # Needs the Tauri desktop shell, which no Linux runner here builds.
+    "playwright_tauri_python_tool_images.py",
+    # Needs dataset/model resolution via huggingface_hub; UI workflows boot API-only.
+    "playwright_train_pickers.py",
+    # A measurement harness with no budget; its verdict logic is covered by
+    # test_autoscroll_harness_contract.py.
+    "playwright_thread_weight.py",
+    # A measurement harness with no budget; the non-staling parts are covered by
+    # studio/frontend/tests/reasoning-grid-collapse.test.ts.
+    "playwright_collapse_layout.py",
+    # Half of it is about WebKit, which Frontend CI does not install; thread-fast-copy.test.ts
+    # covers the gate's branches.
+    "playwright_thread_fast_copy.py",
+}
+
+
+def _uncommented(text: str) -> str:
+    """Strips comments so a disabled invocation stops counting as coverage."""
+    return "\n".join(re.sub(r"(?:^|(?<=\s))#.*", "", line) for line in text.splitlines())
+
+
+def _invoked(name: str, text: str) -> bool:
+    """Matches an interpreter invocation of name; a bare substring also hits prose mentions."""
+    pattern = (
+        rf"(?:^|[\s;&|(])(?:python3?|node|bash|sh)\s+(?:-\S+\s+)*[^\s;&|<>'\"]*{re.escape(name)}\b"
+    )
+    return re.search(pattern, _uncommented(text), re.M) is not None
+
+
+def _executable_text(path: Path) -> str:
+    """Only step run bodies and uses refs; trigger paths name files without running them."""
+    document = yaml.safe_load(path.read_text(encoding = "utf-8"))
+    if not isinstance(document, dict):
+        return ""
+    parts: list[str] = []
+    for job in (document.get("jobs") or {}).values():
+        if not isinstance(job, dict):
+            continue
+        parts.append(str(job.get("uses", "")))
+        for step in job.get("steps") or []:
+            if isinstance(step, dict):
+                parts.append(str(step.get("run", "")))
+                parts.append(str(step.get("uses", "")))
+                parts.append(str(step.get("with", "")))
+    return "\n".join(parts)
+
+
+def _ci_text() -> str:
+    """A helper counts only once something that runs names it, followed transitively through helpers."""
+    helpers = [
+        path
+        for directory in ((REPO / ".github" / "scripts"), (REPO / ".github" / "actions"))
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    ]
+    parts = [
+        _executable_text(path)
+        for path in sorted((REPO / ".github" / "workflows").rglob("*"))
+        if path.is_file() and path.suffix in (".yml", ".yaml")
+    ]
+    text = "\n".join(parts)
+    remaining = list(helpers)
+    added = True
+    while added:
+        added = False
+        for path in list(remaining):
+            rel = path.relative_to(REPO).as_posix()
+            # A composite action is referenced by its DIRECTORY, never by its action.yml.
+            if path.name in ("action.yml", "action.yaml"):
+                reached = path.parent.relative_to(REPO).as_posix() in text
+            else:
+                reached = _invoked(path.name, text) or _invoked(rel, text)
+            if reached:
+                parts.append(path.read_text(encoding = "utf-8", errors = "replace"))
+                remaining.remove(path)
+                text = "\n".join(parts)
+                added = True
+    return text
+
+
+def test_every_playwright_driver_is_invoked_by_ci():
+    text = _ci_text()
+    orphans = sorted(
+        driver.name
+        for driver in DRIVERS
+        if driver.name not in NOT_IN_CI and not _invoked(driver.name, text)
+    )
+    assert not orphans, (
+        f"{len(orphans)} Playwright suite(s) under tests/studio are not named by any workflow "
+        f"or CI script, so they run nowhere and every job stays green: {orphans}. Add the step, "
+        f"or add the file to NOT_IN_CI with the reason."
+    )
+
+
+def test_mcp_argument_driver_launches_the_managed_studio_python():
+    document = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-ui-smoke.yml").read_text(encoding = "utf-8")
+    )
+    steps = document["jobs"]["ui-smoke"]["steps"]
+    run = next(
+        str(step["run"])
+        for step in steps
+        if step.get("name") == "MCP arguments end to end (Playwright)"
+    )
+    driver = (REPO / "tests" / "studio" / "playwright_mcp_arguments.py").read_text(encoding = "utf-8")
+
+    assert 'export STUDIO_MCP_PYTHON="$studio_home/unsloth_studio/bin/python"' in run
+    assert 'os.environ.get("STUDIO_MCP_PYTHON", sys.executable)' in driver
+
+
+def test_the_exemptions_are_still_exempt_and_still_exist():
+    """An exemption that outlives its file, or its reason, quietly shrinks the check."""
+    names = {driver.name for driver in DRIVERS}
+    missing = sorted(NOT_IN_CI - names)
+    assert not missing, f"NOT_IN_CI names files that no longer exist: {missing}"
+    text = _ci_text()
+    now_covered = sorted(name for name in NOT_IN_CI if _invoked(name, text))
+    assert not now_covered, (
+        f"{now_covered} are exempted from CI coverage but CI now names them. Remove them from "
+        f"NOT_IN_CI so the check keeps guarding them."
+    )
+
+
+def test_tool_activity_install_enforces_the_script_allowlist():
+    document = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-ui-smoke.yml").read_text(encoding = "utf-8")
+    )
+    steps = document["jobs"]["ui-smoke"]["steps"]
+    run = next(
+        str(step["run"])
+        for step in steps
+        if step.get("name") == "Tool activity collapse regression (Playwright)"
+    )
+    upgrade = "npm install -g npm@^11"
+    version_gate = "11.1[6-9].*|11.[2-9][0-9].*|1[2-9].*"
+    install = "npm --prefix studio/frontend ci --strict-allow-scripts"
+    assert upgrade in run
+    assert version_gate in run
+    assert install in run
+    assert run.index(upgrade) < run.index(version_gate) < run.index(install)
+
+
+def test_the_linux_job_still_drives_all_three_browser_engines():
+    """Asserted on the job, since repo-wide checks stay green when only this job loses its calls."""
+    document = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-ui-smoke.yml").read_text(encoding = "utf-8")
+    )
+    job = document["jobs"]["ui-indicator"]
+    # Uncommented lines only, and only steps that invoke the helper: an install step names all
+    # three engines regardless.
+    runs = _uncommented(
+        "\n".join(
+            str(step.get("run", ""))
+            for step in job["steps"]
+            if isinstance(step, dict)
+            and "run-studio-indicator-browser.sh" in str(step.get("run", ""))
+        )
+    )
+    # Each engine must be a bare argument to the helper (they run from a port/engine loop).
+    assert (
+        "run-studio-indicator-browser.sh" in runs
+    ), "the ui-indicator job no longer invokes the cross-browser indicator helper at all"
+    missing = [
+        engine
+        for engine in ("chromium", "firefox", "webkit")
+        if not re.search(rf"(?<![\w-]){re.escape(engine)}(?![\w-])", runs)
+    ]
+    assert not missing, (
+        f"the ui-indicator job no longer drives {missing}. That is the cross-browser "
+        f"coverage this job was split out to keep, and the repo-wide check above cannot "
+        f"see it go: the Mac and Windows workflows name the same helper."
+    )
+    disabled = _uncommented(
+        "\n".join(
+            f"# bash run-studio-indicator-browser.sh 18899 {e}" for e in ("chromium", "webkit")
+        )
+    )
+    assert "chromium" not in disabled and "webkit" not in disabled
+
+
+def test_no_build_gate_sits_behind_a_browser_smoke():
+    """Browser smokes must come after the build gates, since a failing step skips every later one."""
+    document = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-frontend-ci.yml").read_text(encoding = "utf-8")
+    )
+    names = [str(step.get("name", "")) for step in document["jobs"]["build"]["steps"]]
+    gates = [
+        "Build",
+        "Built bundle must not contain Unsloth's unstable_Provider call site",
+        "Bundle size budget (75 MB)",
+        "Startup bundle budget",
+    ]
+    missing = [gate for gate in gates if gate not in names]
+    assert not missing, f"renamed or deleted build gates: {missing}; update this list"
+    first_smoke = min(index for index, name in enumerate(names) if name.startswith("Browser smoke"))
+    late = [gate for gate in gates if names.index(gate) > first_smoke]
+    assert not late, (
+        f"{late} run after {names[first_smoke]!r}, so a red browser smoke skips them and the "
+        f"checks that decide whether the app ships never report. Move them above the smokes."
+    )
+
+
+def test_the_scan_reads_the_workflows_it_claims_to():
+    """A scan that read nothing would pass both checks above on anything."""
+    assert len(DRIVERS) > 10, f"only found {len(DRIVERS)} drivers; the glob is wrong"
+    text = _ci_text()
+    assert "run-studio-indicator-browser.sh" in text
+    assert "playwright_loaded_models_indicator.py" in text, (
+        "the indicator driver is named by a CI script, so a scan that misses it is not "
+        "reading .github/scripts"
+    )
+    assert "actions/install-unsloth-local" in text
+    # From inside the action's body, proving the walk opened the action.
+    assert "The POSIX `install.sh --local --no-torch` bootstrap" in text, (
+        "the composite action's own contents are not in the text, so a driver launched "
+        "from inside one would read as an orphan"
+    )
+
+
+def test_every_smoke_report_is_covered_by_the_failure_upload():
+    """A bare logs/playwright-* glob misses the settings smoke's JSON report, so each path is named."""
+    workflow = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-frontend-ci.yml").read_text(encoding = "utf-8")
+    )
+    steps = workflow["jobs"]["build"]["steps"]
+    upload = next(s for s in steps if s.get("name") == "Upload browser smoke artifacts")
+    patterns = [line.strip() for line in str(upload["with"]["path"]).splitlines() if line.strip()]
+
+    run = " ".join(str(s.get("run", "")) for s in steps)
+    smokes = [d for d in DRIVERS if d.name in run]
+    assert len(smokes) >= 5, f"expected the browser smokes to be wired up, found {len(smokes)}"
+
+    uncovered = []
+    for driver in smokes:
+        text = driver.read_text(encoding = "utf-8")
+        for out in sorted(set(re.findall(r'"(logs/[^"]+)"', text))):
+            stem = out.split("%")[0].split("{")[0]
+            if not any(fnmatch(stem, p) or stem.startswith(p.rstrip("*")) for p in patterns):
+                uncovered.append(f"{driver.name} -> {out}")
+    assert not uncovered, (
+        f"these smoke reports are not in the failure upload: {uncovered}; a failing smoke "
+        f"would upload every report except its own. Upload patterns: {patterns}"
+    )
+
+
+def test_a_continue_on_error_smoke_can_still_upload_its_report():
+    """continue-on-error hides a smoke's failure from failure(), so name each such smoke in the upload."""
+    workflow = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "studio-frontend-ci.yml").read_text(encoding = "utf-8")
+    )
+    steps = workflow["jobs"]["build"]["steps"]
+    upload = next(s for s in steps if s.get("name") == "Upload browser smoke artifacts")
+    condition = str(upload.get("if", ""))
+
+    lenient = [
+        s
+        for s in steps
+        if s.get("continue-on-error") and str(s.get("name", "")).startswith("Browser smoke")
+    ]
+    assert lenient, "expected at least one continue-on-error browser smoke; did one get renamed?"
+
+    unseen = []
+    for step in lenient:
+        step_id = step.get("id")
+        if not step_id:
+            unseen.append(f"{step['name']!r} has no id, so the upload cannot reference it")
+        elif f"steps.{step_id}.outcome" not in condition:
+            unseen.append(f"{step['name']!r} (id {step_id}) is not in the upload condition")
+    assert not unseen, (
+        f"{unseen}; a continue-on-error smoke that fails alone leaves conclusion=success, so "
+        f"`{condition}` skips the upload and its report is lost."
+    )

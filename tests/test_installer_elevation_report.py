@@ -1,0 +1,355 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Windows installs record elevation and llama.cpp status as [TAURI:DIAG] markers for support."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+INSTALL_PS1 = REPO_ROOT / "install.ps1"
+SETUP_PS1 = REPO_ROOT / "studio" / "setup.ps1"
+SETUP_SH = REPO_ROOT / "studio" / "setup.sh"
+INSTALL_RS = REPO_ROOT / "studio" / "src-tauri" / "src" / "install.rs"
+UPDATE_RS = REPO_ROOT / "studio" / "src-tauri" / "src" / "update.rs"
+REPORT_RS = REPO_ROOT / "studio" / "src-tauri" / "src" / "diagnostics" / "report.rs"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding = "utf-8")
+
+
+def _code_only(text: str) -> str:
+    """Drop whole-line comments so an assertion about what the code reads is not
+    satisfied, or defeated, by prose explaining it."""
+    return "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+
+
+def _repair_block(path: Path) -> str:
+    """The marker-only block that covers a desktop repair, which runs without
+    SKIP_STUDIO_BASE and so never reaches the install-side block."""
+    src = _read(path)
+    return src[src.index("# A desktop repair runs update.rs") :]
+
+
+def test_diag_marker_prefix_is_still_parsed_and_reported():
+    """Both scripts write [TAURI:DIAG]; if the Rust side stops reading it the
+    markers become invisible without either file changing."""
+    assert '"[TAURI:DIAG] "' in _read(INSTALL_RS), "install.rs no longer parses [TAURI:DIAG]"
+    assert "record_diag_marker" in _read(INSTALL_RS), "the marker is parsed but not recorded"
+    assert "installer_diag_markers" in _read(
+        REPORT_RS
+    ), "the support report no longer prints markers"
+
+
+def test_install_ps1_reports_elevation():
+    src = _read(INSTALL_PS1)
+    assert "function Get-ElevationState" in src
+    assert "WindowsBuiltInRole]::Administrator" in src, "elevation must come from the process token"
+    assert "[TAURI:DIAG] elevated=$State" in src, "the state must reach the support report"
+    # Recorded on every run: "false" rules elevation out, absence would be ambiguous.
+    notice = src[src.index("function Write-ElevationNotice") :]
+    diag_idx = notice.index("[TAURI:DIAG] elevated=$State")
+    warn_idx = notice.index('if ($State -ne "true") { return }')
+    assert diag_idx < warn_idx, "the marker must be written before the warning returns early"
+
+
+def test_install_ps1_elevation_state_covers_unreadable_tokens():
+    src = _read(INSTALL_PS1)
+    block = src[
+        src.index("function Get-ElevationState") : src.index("function Write-ElevationNotice")
+    ]
+    assert '"unknown"' in block, "an unreadable token must report unknown, not a confident false"
+    for value in ('"true"', '"false"'):
+        assert value in block, f"Get-ElevationState must be able to return {value}"
+
+
+def test_install_ps1_warns_before_anything_is_created():
+    """The elevation warning must come before the override resolver creates the custom root."""
+    src = _read(INSTALL_PS1)
+    notice_idx = src.index("Write-ElevationNotice -State (Get-ElevationState)")
+    for marker in (
+        "[System.IO.Directory]::CreateDirectory($envOverride)",
+        '$probe = Join-Path $StudioHome (".unsloth-write-probe-',
+        'step "winget" "available"',
+        # `& $script:UvExe`, not a bare `uv`: the binary is resolved up front.
+        "venv $VenvDir --python",
+        'step "setup" "running unsloth studio setup..."',
+    ):
+        assert notice_idx < src.index(
+            marker
+        ), f"the elevation notice must be printed before {marker!r}"
+
+
+def test_install_ps1_marker_uses_the_parsed_tauri_flag():
+    """Gate the marker on the parsed --tauri flag: UNSLOTH_TAURI_MODE is not set yet at that point."""
+    src = _read(INSTALL_PS1)
+    notice = _code_only(
+        src[src.index("function Write-ElevationNotice") : src.index("$ElevationRoot = if")]
+    )
+    assert "[TAURI:DIAG] elevated=$State" in notice
+    assert (
+        "$env:UNSLOTH_TAURI_MODE" not in notice
+    ), "the env var is unset at this point; gate on the --tauri flag instead"
+    assert "-Tauri:$TauriMode" in src, "the parsed --tauri flag must be what drives the marker"
+    # The flag has to be parsed before the call, or it is always false.
+    assert src.index('"--tauri"    { $TauriMode = $true }') < src.index("-Tauri:$TauriMode")
+    # The env var must still be unassigned there, or this test proves nothing.
+    assert src.index("-Tauri:$TauriMode") < src.index("$env:UNSLOTH_TAURI_MODE = if ($TauriMode)")
+
+
+def test_install_ps1_warning_names_the_root_actually_written():
+    """A custom UNSLOTH_STUDIO_HOME holds every artefact, so naming
+    %USERPROFILE%\\.unsloth there points the user at the wrong directory."""
+    src = _read(INSTALL_PS1)
+    notice = src[src.index("function Write-ElevationNotice") : src.index("-Tauri:$TauriMode")]
+    assert "$Root" in notice, "the warning must name the resolved root, not a fixed path"
+    assert "outlives an uninstall" in notice, "the warning must say reinstalling does not clear it"
+    root = src[src.index("$UnslothRoot =") : src.index("-Tauri:$TauriMode")]
+    assert '".unsloth"' in root, "a default install must name the parent that also holds llama.cpp"
+    # The notice runs before the resolver, so $StudioHome is unset; mirror the override precedence.
+    assert "$StudioHome" not in root, "$StudioHome is not assigned until the resolver below"
+    assert (
+        "UNSLOTH_STUDIO_HOME" in root and "$env:STUDIO_HOME" in root
+    ), "both override names must be honoured, in that order"
+    assert root.index("UNSLOTH_STUDIO_HOME") < root.index(
+        "$env:STUDIO_HOME"
+    ), "UNSLOTH_STUDIO_HOME wins when both are set"
+
+
+def test_a_legacy_equal_override_names_its_parent():
+    """Override resolving to ~/.unsloth/studio is a default install: name the parent, not studio."""
+    for path, var in ((INSTALL_PS1, "$ElevationRoot"), (SETUP_PS1, "$_elevRoot")):
+        src = _read(path)
+        idx = src.index(f"{var} = if") - 400
+        block = src[idx : idx + 1200]
+        assert '"studio"' in block, f"{path.name} does not compare against the legacy root"
+        assert "-ieq" in block, f"{path.name} must compare case-insensitively"
+        assert (
+            block.count("Get-CanonicalRootPath") >= 2
+        ), f"{path.name} must canonicalize both sides before comparing"
+
+
+def test_the_legacy_root_comparison_is_canonical():
+    """Compare the legacy root canonically: an unresolved override with ~, slashes or .. names it too."""
+    for path in (INSTALL_PS1, SETUP_PS1):
+        src = _code_only(_read(path))
+        idx = src.index("function Get-CanonicalRootPath")
+        body = src[idx : src.index("\n    }\n", idx)]
+        # GetFullPath alone keeps a literal ~ and resolves it against the cwd.
+        assert '-eq "~"' in body and '"~/*"' in body, f"{path.name} must expand a leading ~"
+        assert "$env:USERPROFILE" in body, f"{path.name} must expand ~ to the profile"
+        assert (
+            "[System.IO.Path]::GetFullPath" in body
+        ), f"{path.name} must normalize separators and .. segments"
+        # Not first: GetFullPath uses [Environment]::CurrentDirectory, which Set-Location does not move.
+        assert (
+            "GetUnresolvedProviderPathFromPSPath" in body
+        ), f"{path.name} must resolve a relative override against the PowerShell location"
+        assert body.index("GetUnresolvedProviderPathFromPSPath") < body.index(
+            "[System.IO.Path]::GetFullPath"
+        ), f"{path.name} must try the provider location before the .NET working directory"
+        assert "TrimEnd('\\', '/')" in body, (
+            f"{path.name} must ignore a trailing separator -- with its arguments, since a bare "
+            "TrimEnd() strips whitespace only and leaves the case this exists for unhandled"
+        )
+        # A bare "~" leaves an empty child path, which Join-Path rejects on PS 5.1.
+        assert "Substring(1)" in body, f"{path.name} must handle a bare ~"
+        assert "catch { }" in body, f"{path.name} must survive an unresolvable path"
+
+
+def test_installer_restores_skip_studio_base():
+    """`irm ... | iex` runs in the caller's shell. A leaked SKIP_STUDIO_BASE=1
+    makes the next direct setup or update look like an installer child, which
+    suppresses both the elevation notice and the degraded-repair marker."""
+    src = _read(INSTALL_PS1)
+    assert "$previousSkipStudioBase = $env:SKIP_STUDIO_BASE" in src
+    set_idx = src.index('$env:SKIP_STUDIO_BASE = "1"')
+    save_idx = src.index("$previousSkipStudioBase = $env:SKIP_STUDIO_BASE")
+    assert save_idx < set_idx, "the previous value must be captured before it is overwritten"
+    restore = src[src.index("} finally {") :]
+    assert (
+        "$env:SKIP_STUDIO_BASE = $previousSkipStudioBase" in restore
+    ), "the flag must be restored alongside UNSLOTH_TAURI_MODE"
+    assert (
+        "Remove-Item Env:SKIP_STUDIO_BASE" in restore
+    ), "an unset value must be removed again, not left as an empty string"
+
+
+def test_every_handoff_variable_is_restored_not_just_skip_studio_base():
+    """Restore every handoff variable: a leaked SKIP_STUDIO_FRONTEND=1 later skips the web UI build."""
+    src = _read(INSTALL_PS1)
+    restore = src[src.index("} finally {") :]
+    # The handoff try specifically; install.ps1 opens several.
+    handoff_try = src.index("\n    try {\n        $env:SKIP_STUDIO_BASE")
+    for var, saved in (
+        ("SKIP_STUDIO_BASE", "$previousSkipStudioBase"),
+        ("STUDIO_PACKAGE_NAME", "$previousStudioPackageName"),
+        ("UNSLOTH_NO_TORCH", "$previousNoTorch"),
+        ("UNSLOTH_INSTALLER_TORCH_TAG", "$previousInstallerTorchTag"),
+        ("SKIP_STUDIO_FRONTEND", "$previousSkipStudioFrontend"),
+        ("STUDIO_LOCAL_INSTALL", "$previousStudioLocalInstall"),
+        ("STUDIO_LOCAL_REPO", "$previousStudioLocalRepo"),
+        # The --with-llama-cpp-dir bail reaches the clear without having set them.
+        ("UNSLOTH_LOCAL_LLAMA_CPP_DIR", "$previousLocalLlamaCppDir"),
+        ("UNSLOTH_INSTALL_ROLLBACK_MANAGED", "$previousInstallRollbackManaged"),
+        ("UNSLOTH_SETUP_PYTHON", "$previousSetupPython"),
+    ):
+        save = f"{saved} = $env:{var}"
+        assert save in src, f"{var} is mutated for the child but never captured"
+        assert src.index(save) < handoff_try, (
+            f"{var} must be captured above the try, or a finally entered early reads an "
+            "unassigned $hadPrevious* as 'there was nothing here'"
+        )
+        assert f"$env:{var} = {saved}" in restore, f"{var} is never restored"
+        assert (
+            f"Remove-Item Env:{var}" in restore
+        ), f"{var} must be REMOVED when it was originally unset, not left as an empty string"
+
+
+def test_the_early_bail_restores_the_environment_too():
+    """Early return on a missing path must still restore env: the try opens before the first mutation."""
+    src = _code_only(_read(INSTALL_PS1))
+    try_idx = src.index("    try {\n        $env:SKIP_STUDIO_BASE")
+    finally_idx = src.index("    } finally {", try_idx)
+    body = src[try_idx:finally_idx]
+    assert (
+        "--with-llama-cpp-dir path does not exist." in body
+    ), "the early bail must sit inside the try that the finally covers"
+    for var in ("SKIP_STUDIO_BASE", "UNSLOTH_STUDIO_HOME", "UNSLOTH_TAURI_MODE"):
+        assert f"$env:{var} =" in body, f"{var} is mutated outside the try"
+    # The saves read the previous value, so they must stay outside and before it.
+    for save in (
+        "$previousSkipStudioBase = $env:SKIP_STUDIO_BASE",
+        "$previousUnslothStudioHome = $env:UNSLOTH_STUDIO_HOME",
+        "$previousTauriMode = $env:UNSLOTH_TAURI_MODE",
+    ):
+        assert src.index(save) < try_idx, f"'{save}' must be captured before the try opens"
+
+
+def test_both_scripts_resolve_the_warning_root_the_same_way():
+    """install.ps1 and setup.ps1 each mirror the resolver's precedence for the
+    message, so a drift in one would send only half the flows to the right
+    directory."""
+    install_root = _read(INSTALL_PS1)
+    install_root = install_root[
+        install_root.index("$UnslothRoot =") : install_root.index("-Tauri:$TauriMode")
+    ]
+    setup_src = _read(SETUP_PS1)
+    setup_root = setup_src[
+        setup_src.index("$_unslothRoot =") : setup_src.index("# Back up User PATH")
+    ]
+    for fragment in (
+        "IsNullOrWhiteSpace($env:UNSLOTH_STUDIO_HOME)",
+        "$env:UNSLOTH_STUDIO_HOME.Trim()",
+        "IsNullOrWhiteSpace($env:STUDIO_HOME)",
+        "$env:STUDIO_HOME.Trim()",
+        'Join-Path $env:USERPROFILE ".unsloth"',
+        # Both copies run above the USERPROFILE fallback; missing the guard aborts the install.
+        "IsNullOrWhiteSpace($env:USERPROFILE)",
+    ):
+        assert fragment in install_root, f"install.ps1 root resolution lost {fragment!r}"
+        assert fragment in setup_root, f"setup.ps1 root resolution lost {fragment!r}"
+
+
+def test_install_ps1_warning_does_not_assume_a_powershell_window():
+    """install.rs spawns this from the desktop app, where there is no console to
+    close and no PowerShell prompt to re-run from."""
+    src = _read(INSTALL_PS1)
+    notice = src[src.index("function Write-ElevationNotice") : src.index("$ElevationRoot = if")]
+    for phrase in ("Close this window", "normal PowerShell"):
+        assert phrase not in notice, f"{phrase!r} is wrong for the desktop flow"
+
+
+def test_setup_ps1_reports_elevation_without_duplicating_the_installer():
+    """install.ps1 runs setup.ps1 with SKIP_STUDIO_BASE=1 and has already
+    reported; this covers direct setup, update and desktop repair."""
+    src = _read(SETUP_PS1)
+    idx = src.index('if ($env:SKIP_STUDIO_BASE -ne "1") {')
+    block = src[idx : src.index("# Back up User PATH")]
+    assert "WindowsBuiltInRole]::Administrator" in block
+    assert "[TAURI:DIAG] elevated=$ElevationState" in block
+    # Desktop repair runs with UNSLOTH_TAURI_UPDATE rather than UNSLOTH_TAURI_MODE.
+    assert "UNSLOTH_TAURI_UPDATE" in block, "repair updates must emit the marker too"
+
+
+def test_setup_ps1_warning_names_the_root_actually_written():
+    """$StudioHome is not resolved until much later in setup.ps1, so the message
+    mirrors the documented override precedence rather than a fixed path."""
+    src = _read(SETUP_PS1)
+    idx = src.index('if ($env:SKIP_STUDIO_BASE -ne "1") {')
+    block = src[idx : src.index("# Back up User PATH")]
+    assert "$_elevRoot" in block, "the warning must name a resolved root"
+    assert (
+        "UNSLOTH_STUDIO_HOME" in block and "STUDIO_HOME" in block
+    ), "both override names must be honoured, in that order"
+    assert block.index("UNSLOTH_STUDIO_HOME") < block.index(
+        "$env:STUDIO_HOME"
+    ), "UNSLOTH_STUDIO_HOME wins when both are set"
+    for phrase in ("Close this window", "normal PowerShell"):
+        assert phrase not in block, f"{phrase!r} is wrong for the desktop repair flow"
+    assert idx < src.index(
+        "$StudioHome = Join-Path $env:USERPROFILE"
+    ), "this test is only meaningful while the notice precedes the resolver"
+
+
+def test_degraded_llama_cpp_is_recorded_not_only_flashed():
+    """[TAURI:PROGRESS] is transient UI text; the marker is what survives."""
+    for path in (SETUP_PS1, SETUP_SH):
+        src = _read(path)
+        assert "llama_cpp=unavailable" in src, f"{path.name} does not record the degraded verdict"
+        progress_idx = src.index("llama.cpp unavailable; GGUF inference is disabled")
+        marker_idx = src.index("llama_cpp=unavailable")
+        assert (
+            marker_idx > progress_idx
+        ), f"{path.name} must keep the user-facing progress line and add the marker beside it"
+
+
+def test_degraded_llama_cpp_still_fails_outside_tauri_mode():
+    """The marker must not soften the non-desktop contract: install.sh and
+    install.ps1 still need the non-zero exit."""
+    assert 'setup_fail 1 "llama.cpp setup did not produce a usable server"' in _read(SETUP_SH)
+    assert 'Exit-SetupFailure "llama.cpp setup did not produce a usable server"' in _read(SETUP_PS1)
+
+
+def test_degraded_llama_cpp_is_recorded_on_a_desktop_repair():
+    """update.rs sets UNSLOTH_TAURI_UPDATE alone, neither SKIP_STUDIO_BASE nor
+    UNSLOTH_TAURI_MODE, so the install-side block never runs on a repair. It
+    parses [TAURI:DIAG] the same way install.rs does."""
+    assert 'strip_prefix("[TAURI:DIAG] ")' in _read(UPDATE_RS), "update.rs must parse the marker"
+    assert "record_diag_marker" in _read(UPDATE_RS), "the marker is parsed but not recorded"
+    for path, guard in (
+        (SETUP_SH, '[ "${SKIP_STUDIO_BASE:-0}" != "1" ]'),
+        (SETUP_PS1, '$env:SKIP_STUDIO_BASE -ne "1"'),
+    ):
+        block = _repair_block(path)
+        assert guard in block, f"{path.name} must record the repair path the install block skips"
+        assert "llama_cpp=unavailable" in block, f"{path.name} repair block emits no marker"
+        assert "UNSLOTH_TAURI_UPDATE" in block, f"{path.name} must gate the repair marker on it"
+
+
+def test_desktop_repair_marker_does_not_change_the_update_contract():
+    """A plain 'unsloth studio update' stays silent and successful; only a Tauri
+    repair emits, and neither path gains an exit-code change."""
+    for path in (SETUP_SH, SETUP_PS1):
+        block = _code_only(_repair_block(path))
+        for forbidden in ("setup_fail", "Exit-SetupFailure", "TAURI:PROGRESS", "exit "):
+            assert (
+                forbidden not in block
+            ), f"{path.name}: the repair block must be marker-only, found {forbidden!r}"
+
+
+def test_the_elevated_apt_install_runs_apt_get_by_absolute_path():
+    # Elevated commands must not resolve apt-get through a PATH the user controls.
+    code = INSTALL_RS.read_text(encoding = "utf-8")
+    assert 'StdCommand::new("apt-get")' not in code
+    assert 'const APT_GET: &str = "/usr/bin/apt-get";' in code
+    assert code.count("StdCommand::new(APT_GET)") == 2
+
+
+def test_the_readme_dev_studio_home_is_ignored_by_git():
+    # README's dev install uses UNSLOTH_STUDIO_HOME="$PWD/.studio": `git add .` must not stage it.
+    assert 'UNSLOTH_STUDIO_HOME="$PWD/.studio"' in _read(REPO_ROOT / "README.md")
+    assert "/.studio/" in _read(REPO_ROOT / ".gitignore").splitlines()

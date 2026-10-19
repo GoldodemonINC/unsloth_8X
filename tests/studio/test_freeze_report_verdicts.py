@@ -1,0 +1,716 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+"""A wrong freeze verdict is worse than no verdict, since the reader cannot doubt it."""
+
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / "studio" / "scripts" / "unsloth_freeze_report.py"
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("unsloth_freeze_report", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+freeze = _load()
+
+
+def verdict(samples, **kwargs):
+    """classify() with the arguments of an ordinary run, overridable one at a time."""
+    n_mon = samples[-1][1] if samples else 0
+    n_live = samples[-1][2] if samples else 0
+    args = dict(
+        samples = samples,
+        n_mon = n_mon,
+        n_live = n_live,
+        exited = None,
+        ran_for = samples[-1][0] if samples else 0,
+        interrupted = False,
+        preflight = "desktop_preflight completed disposition=OwnedReady port=8888 in 40ms",
+        shell_started = True,
+        has_display = True,
+        warmup = 90,
+    )
+    args.update(kwargs)
+    return freeze.classify(**args)
+
+
+def healthy_samples(end = 240, warmup_lag = 60):
+    """A run that is fine: the watchdog answers from the start, the webview joins once it
+    has loaded, and from then on both keep going to the end of the window."""
+    samples, mon, live = [], 0, 0
+    for t in range(15, end + 1, 15):
+        live += 1
+        if t >= warmup_lag:
+            mon += 1
+        samples.append((t, mon, live))
+    return samples
+
+
+def test_cold_start_is_not_a_freeze():
+    """The webview polls late, not never. Comparing samples from before the warmup
+    boundary made every healthy candidate FROZE at about the moment it started up."""
+    assert verdict(healthy_samples()).startswith("OK")
+
+
+def test_a_real_stall_after_warmup_is_still_caught():
+    """The warmup exclusion must not blunt the thing the script is for."""
+    samples, mon, live = [], 0, 0
+    for t in range(15, 241, 15):
+        live += 1
+        if 60 <= t <= 120:
+            mon += 1
+        samples.append((t, mon, live))
+    assert verdict(samples).startswith("FROZE")
+    assert "135s" in verdict(samples)
+
+
+def test_both_loops_going_quiet_is_not_healthy():
+    """Backend gone at 120s, shell still up. Both counters freeze together, so no
+    comparison between them can fail, and the totals from the first half are large enough
+    that every other branch declines: this used to fall through to OK."""
+    samples, mon, live = [], 0, 0
+    for t in range(15, 241, 15):
+        if t <= 120:
+            mon += 1
+            live += 1
+        samples.append((t, mon, live))
+    assert verdict(samples).startswith("NO SIGNAL")
+
+
+def test_no_watchdog_is_a_measurement_failure_not_a_pass():
+    """The oracle is "watchdog ticking, interface silent". With no watchdog the script
+    cannot tell a frozen interface from a healthy one, so it must not claim either."""
+    samples = [(t, t // 15, 0) for t in range(15, 241, 15)]
+    assert verdict(samples, n_live = 0).startswith("NO SIGNAL")
+
+
+def test_interrupted_candidate_is_skipped_not_scored():
+    """Ctrl-C is documented as skipping the candidate. Scoring the truncated window puts
+    an OK (or a FROZE) into the summary for a run nobody measured."""
+    result = verdict(healthy_samples(end = 120), interrupted = True, ran_for = 120)
+    assert result.startswith("SKIPPED")
+    assert "120s" in result
+
+
+def test_clean_exit_late_in_the_window_is_not_a_single_instance_handoff():
+    """Immediate clean exit means another copy took over; a clean exit at 200s means the
+    window was closed, and saying "another copy is already running" sends the reporter
+    hunting a copy that is not there."""
+    assert verdict(healthy_samples(), exited = 0, ran_for = 200).startswith("ENDED EARLY")
+    assert verdict([], exited = 0, ran_for = 15).startswith("SKIPPED")
+
+
+def test_candidate_env_drops_an_inherited_workaround():
+    """The reporter has already been told to try these by hand, so one is very likely
+    still exported. Overlaying on top of it runs the control through the workaround and
+    the report then says the control was fine."""
+    base = {"GDK_BACKEND": "x11", "PATH": "/usr/bin", "DISPLAY": ":0"}
+    control = freeze.candidate_env(base, {})
+    assert "GDK_BACKEND" not in control
+    assert control["PATH"] == "/usr/bin"
+
+    candidate = freeze.candidate_env(base, {"WEBKIT_DISABLE_COMPOSITING_MODE": "1"})
+    assert "GDK_BACKEND" not in candidate
+    assert candidate["WEBKIT_DISABLE_COMPOSITING_MODE"] == "1"
+
+    x11 = freeze.candidate_env(base, {"GDK_BACKEND": "x11"})
+    assert x11["GDK_BACKEND"] == "x11"
+
+
+def test_display_check_reads_the_candidate_environment():
+    """With GDK_BACKEND stripped from the control, the control's display question is
+    "is there any display", not "is there an X display" inherited from the caller."""
+    assert freeze._has_display({"WAYLAND_DISPLAY": "wayland-0"})
+    assert not freeze._has_display({"GDK_BACKEND": "x11", "WAYLAND_DISPLAY": "wayland-0"})
+    assert freeze._has_display({"GDK_BACKEND": "x11", "DISPLAY": ":0"})
+
+
+def test_the_heartbeat_survives_the_backend_keeping_its_suppressors_on():
+    """Counts the whole liveness group, since an attached backend may dedupe it into one shared bucket."""
+    log = (
+        '127.0.0.1 "GET /api/inference/images/status" 200\n'
+        '127.0.0.1 "GET /api/inference/audio/stt/status" 200\n'
+    )
+    assert len(freeze.INTERFACE.findall(log)) == 2
+
+
+def test_a_silent_interface_is_not_a_freeze_when_silence_proves_nothing():
+    """A zero count cannot tell disabled polling from a freeze, so the verdict must be NO SIGNAL."""
+    healthy_watchdog = [(t, 0, t // 15) for t in range(15, 241, 15)]
+    result = verdict(healthy_watchdog, n_mon = 0)
+    assert not result.startswith("FROZE")
+    assert result.startswith("NO SIGNAL")
+
+
+def test_the_heartbeat_includes_a_poll_no_preference_can_switch_off():
+    """/api/export/status always polls, with no setting or hidden-window check, so a zero is rare."""
+    assert freeze.INTERFACE.findall('127.0.0.1 "GET /api/export/status" 200')
+    optional = (
+        '127.0.0.1 "GET /api/inference/monitor" 200\n'
+        '127.0.0.1 "GET /api/inference/status" 200\n'
+        '127.0.0.1 "GET /api/inference/images/status" 200\n'
+        '127.0.0.1 "GET /api/inference/video/status" 200\n'
+        '127.0.0.1 "GET /api/inference/audio/stt/status" 200\n'
+    )
+    assert len(freeze.INTERFACE.findall(optional)) == 5
+    # auth/status is navigation-driven, not a timer; scoring it would flatline and read FROZE.
+    assert not freeze.INTERFACE.findall('"GET /api/auth/status" 200')
+    assert not freeze.INTERFACE.findall('"GET /api/liveness" 200')
+
+
+def test_the_run_widens_the_access_log_so_the_heartbeat_is_written_down():
+    """Both log suppressors are off only when the two window variables are 0, which --verbose sets."""
+    env = freeze.candidate_env({"PATH": "/usr/bin"}, {})
+    assert env["UNSLOTH_STUDIO_ACCESS_LOG_DEDUP_MS"] == "0"
+    assert env["UNSLOTH_STUDIO_ACCESS_LOG_POLL_DEDUP_MS"] == "0"
+    for _, extra, _ in freeze.CANDIDATES:
+        assert freeze.candidate_env({}, extra)["UNSLOTH_STUDIO_ACCESS_LOG_DEDUP_MS"] == "0"
+
+
+def test_control_is_not_pinned_by_an_override_the_candidates_never_name():
+    """Inherited WEBKIT_* overrides that no candidate names would pin the control launch too."""
+    base = {
+        "WEBKIT_DISABLE_DMABUF_RENDERER": "1",
+        "WEBKIT_DMABUF_RENDERER_FORCE_SHM": "1",
+        "WEBKIT_FORCE_DMABUF_RENDERER": "1",
+        "UNSLOTH_WEBKIT_RENDERER_WORKAROUND": "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "UNSLOTH_WEBKIT_DISABLE_COMPOSITING": "1",
+        "GDK_BACKEND": "x11",
+        "PATH": "/usr/bin",
+    }
+    control = freeze.candidate_env(base, {})
+    for name in base:
+        if name != "PATH":
+            assert name not in control, f"{name} still pins the control"
+    assert control["PATH"] == "/usr/bin"
+    shm = freeze.candidate_env(base, {"WEBKIT_DISABLE_COMPOSITING_MODE": "1"})
+    assert shm["WEBKIT_DISABLE_COMPOSITING_MODE"] == "1"
+    assert "WEBKIT_DMABUF_RENDERER_FORCE_SHM" not in shm
+    assert "UNSLOTH_WEBKIT_RENDERER_WORKAROUND" not in shm
+
+
+def test_the_app_marker_is_recorded_so_a_stale_claim_is_visible():
+    """UNSLOTH_WEBKIT_RENDERER_WORKAROUND decides whether the app reads a renderer
+    variable as its own output or as an instruction, so a report that omits it cannot
+    explain a launch that preserved the environment."""
+    import inspect
+    assert "UNSLOTH_WEBKIT_RENDERER_WORKAROUND" in inspect.getsource(freeze.exec_env)
+
+
+def test_every_setting_the_app_reads_is_one_the_reporter_clears():
+    """Reads setting names from linux_webkit.rs, so a new UNSLOTH_WEBKIT_* setting fails until listed."""
+    import re
+
+    source = (REPO_ROOT / "studio" / "src-tauri" / "src" / "linux_webkit.rs").read_text(
+        encoding = "utf-8"
+    )
+    settings = set(re.findall(r'"(UNSLOTH_WEBKIT_[A-Z_]+)"', source))
+    assert settings, "no settings found; the pattern above stopped matching the Rust"
+    missing = sorted(settings - set(freeze.RENDERER_OVERRIDE_VARS))
+    assert missing == [], (
+        f"{missing} steer the app but survive candidate_env(), so an inherited value pins "
+        f"every launch including the control. Add them to RENDERER_OVERRIDE_VARS."
+    )
+
+
+def test_ports_cover_the_range_the_desktop_actually_uses():
+    """desktop_candidate_ports() walks 8888..=8908. A leftover backend on any port outside
+    the checked set is neither stopped nor waited for, and the next candidate adopts it."""
+    assert freeze.PORTS[0] == 8888
+    assert freeze.PORTS[-1] == 8908
+    assert 8889 in freeze.PORTS
+
+
+def test_renderer_workaround_comes_from_the_app_not_from_proc():
+    """/proc/<pid>/environ is the environment as it was at execve; the app applies its
+    renderer choice with set_var afterwards, so that file can never show it."""
+    shell_out = (
+        "12:00:00 [INFO] Unsloth desktop app starting\n"
+        "12:00:00 [INFO] NVIDIA on Wayland with an AppImage that cannot load GLES; "
+        "set WEBKIT_DISABLE_DMABUF_RENDERER=1 for WebKitGTK compatibility\n"
+    )
+    assert freeze.renderer_applied(shell_out) == {"WEBKIT_DISABLE_DMABUF_RENDERER": "1"}
+    assert freeze.renderer_applied("no renderer line here") == {}
+
+
+def test_shell_started_marker_separates_a_dead_shell_from_a_dead_backend():
+    """ "The desktop shell never started" is the one verdict that tells the reporter they
+    ran the wrong program, so it must not be reached by a shell that did start."""
+    started = "12:00:00 [INFO] Unsloth desktop app starting"
+    assert freeze.SHELL_STARTED.search(started)
+    silent = verdict([(15, 0, 0), (30, 0, 0)], n_mon = 0, n_live = 0, preflight = "", shell_started = False)
+    assert "the desktop shell never started" in silent
+    live_shell = verdict(
+        [(15, 0, 0), (30, 0, 0)], n_mon = 0, n_live = 0, preflight = "", shell_started = True
+    )
+    assert "the desktop shell never started" not in live_shell
+
+
+def test_bare_relative_executable_is_resolved_before_launch(tmp_path, monkeypatch):
+    """Popen looks a slashless argument up on PATH, not in the current directory, so
+    `Unsloth.AppImage` typed in ~/Downloads passed validation and then failed to launch."""
+    app = tmp_path / "Unsloth.AppImage"
+    app.write_text("#!/bin/sh\n")
+    app.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    resolved = freeze.resolve_command(["Unsloth.AppImage"])
+    assert resolved == [str(app)]
+    assert Path(resolved[0]).is_absolute()
+    assert freeze.resolve_command(["definitely-not-installed-xyz"]) is None
+
+
+def test_candidate_rationale_survives_a_no_signal_result():
+    """The reason a candidate was tried is a field of the report. A no-signal run used to
+    overwrite it with the measurement-failure explanation, so the one result that most
+    needs context lost it."""
+    import inspect
+
+    source = inspect.getsource(freeze.run_candidate)
+    assert '"why": why' in source
+    body = source[source.index("def run_candidate") :]
+    assert "\n        why = " not in body and "\n    why = " not in body
+
+
+def test_busy_port_is_not_taken_as_permission_to_stop_a_live_studio(monkeypatch):
+    """stop_leftover_backend() cannot tell an orphan from the backend serving the Unsloth
+    the reporter has open, so an unattended run must refuse rather than SIGTERM it."""
+    monkeypatch.delenv("UNSLOTH_FREEZE_STOP_RUNNING", raising = False)
+    monkeypatch.setattr(freeze.sys, "stdin", None)
+    assert freeze.confirm_stop_running_studio() is False
+    monkeypatch.setenv("UNSLOTH_FREEZE_STOP_RUNNING", "1")
+    assert freeze.confirm_stop_running_studio() is True
+
+
+def test_main_aborts_instead_of_killing_a_running_studio(monkeypatch, capsys, tmp_path):
+    """The end to end shape of the above: an Unsloth backend already answering, with nobody
+    to ask, must reach no candidate at all, so nothing is ever killed."""
+    launched = []
+    monkeypatch.setattr(freeze, "studio_backend_pids", lambda: [4321])
+    monkeypatch.setattr(freeze, "confirm_stop_running_studio", lambda: False)
+    monkeypatch.setattr(freeze, "stop_leftover_backend", lambda: launched.append("killed"))
+    monkeypatch.setattr(freeze, "run_candidate", lambda *a, **k: launched.append("ran"))
+    app = tmp_path / "unsloth-studio"
+    app.write_text("#!/bin/sh\n")
+    app.chmod(0o755)
+    monkeypatch.setattr(freeze.sys, "argv", ["unsloth_freeze_report.py", str(app)])
+    # main() writes its report to the working directory.
+    monkeypatch.chdir(tmp_path)
+    assert freeze.main() == 2
+    assert launched == []
+    assert "no report was written" in capsys.readouterr().out
+    assert not list(tmp_path.glob("unsloth-freeze-report-*.json"))
+
+
+def test_a_listener_that_is_not_ours_does_not_refuse_the_run(monkeypatch, tmp_path):
+    """Only a listener this app owns should abort the run; a foreign one just gets the next free port."""
+    ran = []
+    monkeypatch.setattr(freeze, "studio_backend_pids", lambda: [])
+    monkeypatch.setattr(freeze, "port_busy", lambda: True)
+    monkeypatch.setattr(freeze, "confirm_stop_running_studio", lambda: pytest.fail("must not ask"))
+    monkeypatch.setattr(freeze, "stop_leftover_backend", lambda: None)
+    monkeypatch.setattr(
+        freeze,
+        "host_facts",
+        lambda: {"session_type": "wayland", "desktop": "GNOME", "gpus": [], "nvidia_driver": ""},
+    )
+    monkeypatch.setattr(
+        freeze,
+        "run_candidate",
+        lambda label, extra, why, cmd: ran.append(label)
+        or {"candidate": label, "verdict": "OK: x"},
+    )
+    app = tmp_path / "unsloth-studio"
+    app.write_text("#!/bin/sh\n")
+    app.chmod(0o755)
+    monkeypatch.setattr(freeze.sys, "argv", ["unsloth_freeze_report.py", str(app)])
+    monkeypatch.chdir(tmp_path)
+    assert freeze.main() == 0
+    assert len(ran) == len(freeze.CANDIDATES)
+
+
+def test_the_gate_and_the_cleanup_share_one_attribution_rule():
+    """Two rules for "is this ours" is how the gate ends up refusing to run against a
+    process the cleanup would then decline to touch. stop_leftover_backend() must ask
+    studio_backend_pids() rather than re-deriving it."""
+    import inspect
+
+    assert "studio_backend_pids()" in inspect.getsource(freeze.stop_leftover_backend)
+    # The backend's venv python is a symlink, so /proc/<pid>/exe resolves to the system one.
+    source = inspect.getsource(freeze.studio_backend_pids)
+    assert "/cmdline" in source
+    assert "{pid}/exe" not in source
+
+
+def test_exactly_three_silent_intervals_is_already_stale():
+    """Silence of exactly STALE_AFTER counts as stale, so the comparison must be inclusive."""
+    samples, mon, live = [], 0, 0
+    for t in range(15, 241, 15):
+        if t <= 195:
+            mon += 1
+            live += 1
+        samples.append((t, mon, live))
+    assert samples[-1][0] - 195 == freeze.STALE_AFTER
+    got = verdict(samples)
+    assert got.startswith("NO SIGNAL"), got
+    assert "45s" in got
+
+
+def test_a_non_executable_appimage_is_refused_with_the_command_that_fixes_it(
+    monkeypatch, tmp_path, capsys
+):
+    """An AppImage downloaded through a browser has no execute bit. Popen raises
+    PermissionError on it and nothing between run_candidate() and the candidate loop
+    catches it, so the run ended in a traceback with nothing measured and no report."""
+    app = tmp_path / "Unsloth-Desktop.AppImage"
+    app.write_text("#!/bin/sh\n")
+    app.chmod(0o644)
+    monkeypatch.setattr(freeze.sys, "argv", ["unsloth_freeze_report.py", str(app)])
+    monkeypatch.setattr(
+        freeze, "studio_backend_pids", lambda: pytest.fail("must not reach the port gate")
+    )
+    monkeypatch.chdir(tmp_path)
+    assert freeze.main() == 2
+    out = capsys.readouterr().out
+    assert str(app) in out
+    assert f"chmod +x {app}" in out
+    assert not list(tmp_path.glob("unsloth-freeze-report-*.json"))
+
+
+def test_discovery_prefers_an_appimage_that_can_actually_be_started(monkeypatch, tmp_path):
+    """Downloads/ is where a non-executable copy lands, and it is usually the newest, so
+    picking purely by mtime handed the launch a file that cannot run."""
+    (tmp_path / "Downloads").mkdir()
+    (tmp_path / "Applications").mkdir()
+    runnable = tmp_path / "Applications" / "Unsloth-Desktop.AppImage"
+    runnable.write_text("#!/bin/sh\n")
+    runnable.chmod(0o755)
+    downloaded = tmp_path / "Downloads" / "Unsloth-Desktop.AppImage"
+    downloaded.write_text("#!/bin/sh\n")
+    downloaded.chmod(0o644)
+    import os as _os
+
+    _os.utime(downloaded, (2_000_000_000, 2_000_000_000))
+    monkeypatch.setattr(freeze, "HOME", tmp_path)
+    monkeypatch.setattr(freeze.shutil, "which", lambda name: None)
+    if Path("/usr/bin/unsloth-studio").is_file() or Path("/opt/Unsloth/unsloth-studio").is_file():
+        pytest.skip("a system-wide Unsloth Desktop outranks the discovery being tested")
+    assert freeze.find_desktop_app() == [str(runnable)]
+    runnable.chmod(0o644)
+    assert freeze.find_desktop_app() == [str(downloaded)]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_one_flat_interval_that_recovers_is_not_a_freeze():
+    """A single flat window is not a freeze, since a delayed request or hiccup can cause one."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 12, 12),
+        (75, 12, 15),
+        (90, 15, 18),
+        (105, 18, 21),
+        (120, 21, 24),
+    ]
+    got = verdict(samples, warmup = 0)
+    assert not got.startswith("FROZE"), got
+
+
+def test_an_interface_that_stops_and_stays_stopped_is_still_a_freeze():
+    """The other direction, so the fix above cannot be satisfied by never reporting."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 9, 12),
+        (75, 9, 15),
+        (90, 9, 18),
+        (105, 9, 21),
+        (120, 9, 24),
+    ]
+    got = verdict(samples, warmup = 0)
+    assert got.startswith("FROZE"), got
+
+
+def test_a_stall_that_only_starts_as_the_window_closes_is_not_called_a_freeze():
+    """A stall starting on the final sample is not a freeze: the run ended before it could recover."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 12, 12),
+        (75, 15, 15),
+        (90, 15, 18),
+    ]
+    got = verdict(samples, warmup = 0)
+    assert not got.startswith("FROZE"), got
+    assert not got.startswith("OK"), got
+    assert got.startswith("SUSPECT"), got
+    assert "90s" in got
+    assert "UNSLOTH_FREEZE_WINDOW" in got
+
+
+def test_a_stall_watched_for_exactly_stale_after_is_a_freeze():
+    """A stall watched for exactly STALE_AFTER is a freeze, not a tail artefact to be refused."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 12, 12),
+        (75, 15, 15),
+        (90, 15, 18),
+        (105, 15, 21),
+        (120, 15, 24),
+        (135, 15, 27),
+    ]
+    assert samples[-1][0] - 90 == freeze.STALE_AFTER
+    got = verdict(samples, warmup = 0)
+    assert got.startswith("FROZE"), got
+    assert "90s" in got
+
+
+class _Clock:
+    """A monotonic clock that only moves when the code under test sleeps, so a run that
+    takes four minutes of wall time takes none here and its sample times are exact."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, seconds):
+        self.t += seconds
+
+
+class _FakeApp:
+    """A launched app that answers `poll()` alive for the first `dies_after` asks."""
+
+    pid = 4242
+
+    def __init__(
+        self,
+        dies_after,
+        code = 9,
+    ):
+        self.polls, self.dies_after, self.code = 0, dies_after, code
+        self.returncode = None
+
+    def poll(self):
+        self.polls += 1
+        if self.polls > self.dies_after:
+            self.returncode = self.code
+            return self.code
+        return None
+
+    def wait(self, timeout = None):
+        return self.returncode
+
+
+def _drive_candidate(
+    monkeypatch,
+    tmp_path,
+    log_at_sample,
+    dies_after = 10_000,
+):
+    """Runs the real run_candidate() loop, cleanup and classify() handoff; everything else is faked."""
+    proc = _FakeApp(dies_after)
+    # Before anything else: cleanup SIGTERMs the fake pid's process group, which is real.
+    signalled = []
+    monkeypatch.setattr(freeze.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(freeze.os, "killpg", lambda pgid, sig: signalled.append((pgid, sig)))
+    monkeypatch.setattr(freeze, "time", _Clock())
+    monkeypatch.setattr(freeze, "WARMUP", 0)
+    monkeypatch.setattr(freeze, "WINDOW", 15 * len(log_at_sample))
+    monkeypatch.setattr(freeze, "POLL_EVERY", 15)
+    monkeypatch.setattr(freeze, "stop_leftover_backend", lambda: None)
+    monkeypatch.setattr(freeze, "wait_for_leftover_backend_to_stop", lambda *a, **k: True)
+    monkeypatch.setattr(freeze, "backend_offsets", lambda: {})
+    monkeypatch.setattr(freeze, "exec_env", lambda pid: {})
+    monkeypatch.setattr(freeze.subprocess, "Popen", lambda *a, **k: proc)
+    calls = {"n": 0}
+
+    def tail(_before):
+        text = log_at_sample[min(calls["n"], len(log_at_sample) - 1)]
+        calls["n"] += 1
+        return text
+
+    monkeypatch.setattr(freeze, "backend_tail", tail)
+    monkeypatch.chdir(tmp_path)
+    return freeze.run_candidate("control (no override)", {}, "baseline", ["/bin/true"])
+
+
+def _log(
+    heartbeats,
+    watchdogs,
+    session = 0,
+):
+    """A cumulative access log with that many of each request in it."""
+    return (
+        '127.0.0.1 "GET /api/export/status" 200\n' * heartbeats
+        + '127.0.0.1 "GET /api/liveness" 200\n' * watchdogs
+        + '127.0.0.1 "POST /api/auth/logout" 200\n' * session
+    )
+
+
+def test_an_exit_seen_only_by_the_cleanup_poll_is_still_recorded(monkeypatch, tmp_path):
+    """An exit seen only by the cleanup poll must still be recorded, or a crash reads as a healthy run."""
+    healthy = [_log(3 * n, 3 * n) for n in range(1, 5)]
+    result = _drive_candidate(monkeypatch, tmp_path, healthy, dies_after = 4)
+    assert result["samples"], "the loop must have run, or this proves nothing"
+    assert result["exit_code"] == 9, "the cleanup poll saw it dead; that must be recorded"
+    assert not result["verdict"].startswith("OK"), result["verdict"]
+    assert "9" in result["verdict"]
+
+
+def test_signing_out_midway_is_not_reported_as_a_freeze():
+    """Sign-out stops the heartbeat like a freeze; only a webview still requesting shows it is not
+    frozen."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 12, 12),
+        (75, 15, 15),
+        (90, 15, 18),
+        (105, 15, 21),
+        (120, 15, 24),
+        (135, 15, 27),
+    ]
+    frozen = verdict(samples, warmup = 0)
+    assert frozen.startswith("FROZE"), "the stall itself is real and still reads as a freeze"
+    got = verdict(samples, warmup = 0, session_at = 90)
+    assert not got.startswith("FROZE"), got
+    assert got.startswith("SIGNED OUT"), got
+    assert "90s" in got
+
+
+def test_sign_in_traffic_from_before_the_stall_does_not_clear_a_freeze():
+    """The evidence is a request the webview made AFTER it went quiet. Every run has auth
+    traffic at startup, and if that counted, the FROZE arm would never fire again."""
+    samples = [
+        (0, 0, 0),
+        (15, 3, 3),
+        (30, 6, 6),
+        (45, 9, 9),
+        (60, 12, 12),
+        (75, 15, 15),
+        (90, 15, 18),
+        (105, 15, 21),
+        (120, 15, 24),
+        (135, 15, 27),
+    ]
+    got = verdict(samples, warmup = 0, session_at = 30)
+    assert got.startswith("FROZE"), got
+    assert verdict(samples, warmup = 0, session_at = None).startswith("FROZE")
+
+
+def test_the_session_signal_is_the_webview_talking_not_the_shell():
+    """/api/auth/desktop-login is posted by the native shell itself
+    (src-tauri/src/desktop_auth.rs:194), so counting it would let the shell vouch for a
+    webview that is not running, which is the one thing this signal must never do."""
+    assert freeze.SESSION.findall('127.0.0.1 "POST /api/auth/logout" 200')
+    assert freeze.SESSION.findall('127.0.0.1 "POST /api/auth/refresh" 401')
+    assert freeze.SESSION.findall('127.0.0.1 "GET /api/auth/status" 200')
+    assert freeze.SESSION.findall('127.0.0.1 "POST /api/auth/login" 200')
+    assert not freeze.SESSION.findall('127.0.0.1 "POST /api/auth/desktop-login" 200')
+    assert not freeze.INTERFACE.findall('127.0.0.1 "GET /api/auth/status" 200')
+
+
+def test_the_run_records_when_the_session_was_last_asked_about(monkeypatch, tmp_path):
+    """The classifier cannot use a signal the run does not collect. This is the loop and the
+    handoff to classify() as written, not an argument list invented by a test."""
+    scripted = [
+        _log(3, 3),
+        _log(6, 6),
+        _log(9, 9),
+        _log(12, 12),
+        _log(12, 15, session = 1),
+        _log(12, 18, session = 1),
+        _log(12, 21, session = 1),
+        _log(12, 24, session = 1),
+    ]
+    result = _drive_candidate(monkeypatch, tmp_path, scripted)
+    assert result["session_seen_at"] == 75, result["samples"]
+    assert result["verdict"].startswith("SIGNED OUT"), result["verdict"]
+
+
+def test_an_interface_first_heard_as_the_window_closes_is_not_a_measured_run():
+    """An interface first heard as the window closes must not be reported as polling for the whole run."""
+    samples, mon, live = [], 0, 0
+    for t in range(15, 241, 15):
+        live += 1
+        if t >= 210:
+            mon += 3
+        samples.append((t, mon, live))
+    assert samples[-1][1] * 3 >= samples[-1][2], "must clear the ratio test, as the real run did"
+    got = verdict(samples, warmup = 0)
+    assert not got.startswith("OK"), got
+    assert got.startswith("SUSPECT"), got
+    assert "210s" in got and "30s" in got
+
+
+def test_an_interface_heard_early_enough_is_still_allowed_to_be_healthy():
+    """A run that keeps polling through the whole watched window must still be allowed to say OK."""
+    assert verdict(healthy_samples()).startswith("OK")
+    late, mon, live = [], 0, 0
+    for t in range(15, 241, 15):
+        live += 1
+        if t >= 195:
+            mon += 3
+        late.append((t, mon, live))
+    assert freeze._first_heard(late, 1) == 195
+    assert late[-1][0] - 195 == freeze.STALE_AFTER
+    assert verdict(late, warmup = 0).startswith("OK"), verdict(late, warmup = 0)
+
+
+def test_a_launch_that_fails_at_execve_does_not_end_the_whole_run(monkeypatch, tmp_path):
+    """A bad candidate binary (execve OSError) must be recorded, not end the whole diagnostic run."""
+    app = tmp_path / "Unsloth-Desktop.AppImage"
+    app.write_text("garbage, not an executable format\n")
+    app.chmod(0o755)
+
+    def refuse(*args, **kwargs):
+        raise OSError(8, "Exec format error", str(app))
+
+    monkeypatch.setattr(freeze.subprocess, "Popen", refuse)
+    monkeypatch.setattr(freeze, "studio_backend_pids", lambda: [])
+    monkeypatch.setattr(freeze, "port_busy", lambda: False)
+    monkeypatch.setattr(freeze, "stop_leftover_backend", lambda: None)
+    monkeypatch.setattr(freeze, "wait_for_leftover_backend_to_stop", lambda *a, **k: True)
+    monkeypatch.setattr(
+        freeze,
+        "host_facts",
+        lambda: {"session_type": "wayland", "desktop": "GNOME", "gpus": [], "nvidia_driver": ""},
+    )
+    monkeypatch.setattr(freeze.sys, "argv", ["unsloth_freeze_report.py", str(app)])
+    monkeypatch.chdir(tmp_path)
+
+    assert freeze.main() == 0
+    written = list(tmp_path.glob("unsloth-freeze-report-*.json"))
+    assert len(written) == 1, "the report is the only output of the run; it must be written"
+    import json as _json
+
+    results = _json.loads(written[0].read_text(encoding = "utf-8"))["results"]
+    assert len(results) == len(freeze.CANDIDATES)
+    for r in results:
+        assert r["verdict"].startswith("CANNOT RUN"), r["verdict"]
+        assert "Exec format error" in r["verdict"]
+        assert r["samples"] == [] and r["interface_polls"] == 0

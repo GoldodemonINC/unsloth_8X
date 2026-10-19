@@ -1,0 +1,1202 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""AMSI scans the whole script block before running it, so every byte, comments included, counts."""
+
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from unsloth_pwsh_runner import pwsh_env
+
+
+REPO = Path(__file__).resolve().parents[2]
+
+PS_SCRIPTS = ("install.ps1", "studio/setup.ps1", "scripts/uninstall.ps1")
+SH_SCRIPTS = ("install.sh", "studio/setup.sh", "scripts/uninstall.sh")
+# setup.bat launches PowerShell, so the same rules apply to it.
+BAT_SCRIPTS = ("studio/setup.bat",)
+ALL_SCRIPTS = PS_SCRIPTS + SH_SCRIPTS + BAT_SCRIPTS
+
+
+# Why the installers look the way they do lives here: AMSI scans the whole script, comments
+# included, so shipped scripts must not explain detections. This file does not ship.
+AV_SHAPES_RECORD = r"""
+## Measured detections
+
+| Sample | Verdict |
+|---|---|
+| install.ps1 at 1ad44677d (the revision reported in #10805) | 1 malicious / 58 undetected: Skyhigh
+  (Trellix / McAfee Enterprise) BehavesLike.PS.Suspicious.gr, engine v2021.2.0+4045, definitions
+  20260912 |
+| the same file uploaded elsewhere as unsloth_install2.ps1 | same single engine, same label |
+| tests/security/fixtures/malicious_wheel.whl, malicious_sdist.tar.gz | 2/65 and 2/60 (Tencent,
+  Rising), and the cause of Panda flagging the GitHub repo zip as Exploit/CVE-2014-6271. Both are now
+  generated at test time rather than committed |
+
+Beyond the one engine verdict, VirusTotal runs 17 Sigma rules against install.ps1 (1 high, 11 medium,
+5 low) plus two crowdsourced YARA rules. That rule count, not an engine detection, is what drives the
+high scores seen on third-party analysis sites.
+
+## What the hardening has actually bought so far
+
+Measured by scripts/virustotal_delta.py, not asserted:
+
+|                  | baseline (1ad44677d)          | main (2c70592a)   |
+|------------------|-------------------------------|-------------------|
+| engines flagging | 1 / 60                        | 1 / 61            |
+| which            | Skyhigh BehavesLike.PS.Suspicious.gr | the same   |
+| Sigma            | 17 (1 high, 11 medium, 5 low) | 14 (10 medium, 4 low) |
+| YARA             | 2                             | 0                 |
+
+The high-severity rule is gone, and so are both YARA hits --
+INDICATOR_SUSPICIOUS_PWSH_B64Encoded_Concatenated_FileEXEC and Windows_API_Function, the second of
+which is the P/Invoke cluster. The Skyhigh verdict has not moved, and that is recorded as unchanged
+rather than dressed up: a cloud behavioural verdict is not recomputed because we deleted some code,
+and the honest expectation is that the static axis moves first and the engine axis may never move.
+
+This is the first before-and-after this work has had. Six passes shipped without one, which is why
+none of them could be shown to have achieved anything.
+
+## Reflection emit instead of Add-Type
+
+Add-Type on Windows PowerShell 5.1 -- the interpreter the desktop app spawns, and the one a clean
+Windows box ships -- has no in-process compiler. -TypeDefinition and -MemberDefinition alike write C#
+to %TEMP% and run csc.exe, leaving source, a response file and a DLL behind.
+
+Bitdefender blocked the resulting DLL as Gen:Variant.MSILHeracles.272113 (#10540). The shape it scores
+is real: a windowless PowerShell spawned by a GUI binary, running a compiler, writing executable
+content to %TEMP%. The same call also failed outright with CS2001 where %TEMP% was unusable (#9140),
+so this is a robustness fix as much as a detection one.
+
+System.Reflection.Emit built the identical interop stubs in memory: no compiler process, no source
+file, no DLL, and an empty Assembly.Location. windows-no-compiler-ci.yml is the standing proof --
+4688 process auditing unioned with a live FileSystemWatcher over every temp root, with a positive
+control, requiring zero compiler launches across a full install. That requirement has not moved; what
+went away is the emit apparatus that replaced the compiler.
+
+### And then no emit either
+
+Emit fixed the compiler shape and did not fix the engine verdict. A controlled pair measured it: the
+same install.ps1 with and without the apparatus, both first-seen so both got a fresh pass, same engine
+build v2021.2.0+4045, same definitions 20260916, 74 engines reporting and zero timeouts on each.
+
+| Sample | Size | Verdict |
+|---|---|---|
+| with the apparatus | 629,894 B | malicious, BehavesLike.PS.Suspicious.jr, 1 / 60 |
+| without it | 594,150 B | undetected, 0 / 61 |
+
+A 550 byte file containing nothing but a DefinePInvokeMethod call scans 0 / 62, and identical-length
+comment filler in place of the apparatus also scans clean, so this is aggregate threshold scoring
+rather than a construct match: the apparatus is the largest single contributor pushing the file over
+the line, not something independently malicious-looking. Both halves of it were independently
+sufficient, so partial removal bought nothing and only full removal could help.
+
+Two things that did NOT move the verdict, both measured rather than assumed. A valid Authenticode
+signature from a Microsoft issued CA: same family, same suffix, on a matched pair. And VirusTotal does
+not parse the signature block on a .ps1 at all, so signer identity is not an input for these assets,
+only for the .exe bundles. Signing is still worth having for AllSigned and RemoteSigned hosts, for
+WDAC and Smart App Control, and as the artifact a false-positive submission asks for.
+
+What replaced the four emitted types imports nothing. Path identity goes through a child interpreter
+running pathlib.Path.resolve, which is GetFinalPathNameByHandleW on Windows, so the exact answer is
+the same string the emitted CreateFileW / GetFinalPathNameByHandleW rung returned. The process image
+lookup and the shell icon refresh call the same entry points through ctypes, and the NVIDIA inventory
+reaches NVML and the CUDA driver API the same way. AMSI does not scan CPython, so the interop left the
+scanned surface rather than moving within it. Where no interpreter can be reached, the path resolver
+answers lexically and reports Exact = $false, which makes the caller take BOTH runtime locks: the
+degradation fails closed.
+
+## No .vbs launcher
+
+A WScript.Shell .vbs that spawns a hidden PowerShell with a bypassed execution policy is close to the
+canonical shape VBS-dropper heuristics are written for -- Kaspersky HEUR:Trojan.VBS.Agent.gen is the
+family. The .lnk files therefore point straight at powershell.exe running launch-studio.ps1, with no
+script engine in between, and the installer removes an older launch-studio.vbs if it finds one,
+because leaving it behind means a machine that was cleaned still has the flagged file.
+
+## RemoteSigned rather than Bypass, next to a hidden window
+
+A hidden window paired with a bypassed execution policy is a pair Microsoft's own detections key on,
+and it appears in Sigma's "Suspicious PowerShell WindowStyle Option" too. The hidden window is a real
+requirement -- a console flashing up on every launch is a visible regression, and
+tests/studio/install/test_launch_studio_launcher.py pins the flag -- so the half that goes is the
+policy.
+
+RemoteSigned is not a weaker guarantee here, it is the same one: it refuses unsigned scripts only in
+the Internet and Untrusted zones, and every script involved is written locally by the installer. Where
+a mark of the web can exist (a downloaded zip rather than a clone), Unblock-File clears it first
+instead of the policy being relaxed to tolerate it.
+
+Three things to know before simplifying any of this:
+
+  - UNC paths are a remote zone. \\wsl.localhost\<distro>\tmp\x.ps1 is refused under RemoteSigned,
+    which is why install.sh resolves the Windows %TEMP% for its generated script and skips shortcut
+    creation rather than falling back to Bypass when it cannot.
+  - Execution policy is evaluated against the script FILE's zone, not against who launched
+    PowerShell, and it does not apply to -Command at all. A .cmd or .bat shim therefore cannot
+    launder a remote-zone script, and Sigma's "Powershell Execute Batch Script" scores the shim
+    itself.
+  - The Windows CLIENT default is Restricted, which blocks every script file. Documentation telling a
+    user to set a process-scoped policy is load-bearing; it just does not need to say Bypass.
+
+## The icon-cache refresh is gated on a first install or a real icon change
+
+Clearing icon caches and killing StartMenuExperienceHost is the only way to make Explorer pick up a
+rewritten .lnk icon, and ie4uinit's global broadcast alone does not do it. But "clear caches, kill a
+shell process, repeat on every run" is a cluster behavioural engines score, and on a reinstall that
+changed nothing it is also pure waste. So both install.ps1 and install.sh snapshot the icon and run
+the heavy path only on a first install or an actual change, preserving start2.bin.
+
+SHChangeNotify stays, called through a Windows Python's ctypes in both install.ps1 and the WSL
+shortcut script install.sh generates, so neither defines a native type. Where no interpreter can be
+reached the per-item refresh is skipped: a stale icon on a shortcut that works is cosmetic, and the
+heavier refresh above still runs on a first install or an icon change.
+
+## uv comes from a pinned archive, not from a remote install script
+
+The upstream one-liner pipes a remote script into the interpreter. Running remote script text
+in-process is the highest-scoring thing in this problem space, and download-run-delete is the literal
+definition of a dropper. Our fallback reaches the same end state (same archive, same destination, same
+user-PATH prepend as astral's installer) by fetching a DATA file with a pinned SHA-256.
+
+Cost: bumping the uv version means bumping all three hashes, one per architecture, in all three
+scripts. That is deliberate friction and the comment at each site says so.
+
+There is a floor no shape work removes: while the supported install route is
+`irm https://unsloth.ai/install.ps1 | iex`, the documented entry point is itself the top-scoring token
+sequence in this space.
+
+## Why the script headers do not repeat the usage text
+
+install.ps1 and scripts/uninstall.ps1 are scanned in full at compile time, before a line of either
+runs, and nothing reads a header comment from inside the script. Duplicating the README's option list
+into a header adds bytes to a classifier's input and reaches no user.
+
+## Shapes we are keeping, on purpose
+
+Each fires a rule and each is load-bearing. Listed so nobody spends a second pass rediscovering them.
+
+  - -WindowStyle Hidden on the shortcuts. Removing it makes a console window appear on every launch;
+    the flag is a pinned contract in test_launch_studio_launcher.py.
+  - Authenticode publisher checks on the python.org and vc_redist downloads. Weakening a real security
+    control to lower a heuristic score is backwards.
+  - New-Object -ComObject WScript.Shell to write the .lnk files. The only shortcut mechanism available
+    to PowerShell 5.1 without IShellLink interop; hand-writing the shell-link binary format or
+    emitting COM interop are both more suspicious and more fragile.
+  - Unblock-File rather than deleting the Zone.Identifier stream directly. The direct delete trades
+    one medium indicator ("Suspicious Unblock-File") for another ("Hidden Executable In NTFS Alternate
+    Data Stream"), which already fires.
+  - ie4uinit, Get-Process, python -X utf8 -c, Invoke-WebRequest. Each is scored; each has no
+    equivalent that does the job.
+
+## Which products ship a controlled-folder-access equivalent
+
+Get-SecuritySoftwareNote, in install.ps1 and studio/setup.ps1, explains a denied llama.cpp cache
+by naming the security product that is registered and running, because takeown and icacls cannot
+clear a filter-driver block and elevation does not either. Defender's own feature is Controlled
+folder access, and the script names it directly: that name is Microsoft's, not a third-party
+vendor's, and is already in the user-facing string the function returns.
+
+The third-party suites ship the same protected-folders feature under their own product names,
+and those names live here rather than in the scripts, because the scripts are AMSI input and a
+comment listing security vendors raises the score of the file it is explaining:
+
+| Vendor | Feature |
+|---|---|
+| Bitdefender | Safe Files, and Ransomware Remediation |
+| Kaspersky | Anti-Ransomware / Protected folders |
+| Trellix and McAfee Enterprise | Access Protection rules |
+| Sophos | CryptoGuard protected folders |
+
+The function does not hard-code any of these. It reads whatever SecurityCenter2 has registered
+and names that, so the list above is the reason the code is written to ask rather than the data
+it asks with, and it does not need updating when a vendor renames a feature.
+
+## Reporting a detection
+
+Use the "Windows: antivirus or security software blocked the installer" issue form. It requires the
+product, the exact detection name, the full error including its FullyQualifiedErrorId, and the output
+of a read-only collection script naming the AMSI providers actually loaded.
+
+Those fields are required because clearance is granted per file hash and every vendor submission form
+asks for a detection name. Six previous reports (#8523, #6326, #6588, #6648, #10540, #10805) named
+none of them, which is why none could be submitted to a vendor or proven fixed.
+"""
+
+
+def _text(name: str) -> str:
+    return (REPO / name).read_text(encoding = "utf-8")
+
+
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _code_lines(name: str):
+    """Executable lines only; printed remediation text inside quotes would otherwise read as a real call."""
+    in_here_string = False
+    for number, line in enumerate(_text(name).splitlines(), start = 1):
+        stripped = line.strip()
+        if in_here_string:
+            # PowerShell wants the terminator in column 0; install.ps1 has indented `"@echo off",`.
+            if line.startswith(("'@", '"@')):
+                in_here_string = False
+            continue
+        # Quoted literals first: `'$1<redacted>@'` ends in `@'` and would open a here-string.
+        blanked = _QUOTED.sub('""', line)
+        if re.search(r"@[\"']$", blanked.strip()):
+            in_here_string = True
+            continue
+        if stripped.startswith("#"):
+            continue
+        yield number, blanked
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_script_exists(name: str) -> None:
+    assert (REPO / name).is_file(), f"missing {name}"
+
+
+@pytest.mark.parametrize("name", PS_SCRIPTS)
+def test_no_remote_script_is_executed_in_process(name: str) -> None:
+    for number, line in _code_lines(name):
+        assert not re.search(
+            r"Invoke-Expression\s*\(\s*Invoke-(RestMethod|WebRequest)", line
+        ), f"{name}:{number} runs downloaded script text in-process: {line.strip()}"
+        assert not re.search(
+            r"\|\s*(iex|Invoke-Expression)\b", line
+        ), f"{name}:{number} pipes into the engine: {line.strip()}"
+        assert "scriptblock]::Create" not in line.lower().replace(
+            " ", ""
+        ), f"{name}:{number} builds a script block from a string: {line.strip()}"
+
+
+@pytest.mark.parametrize("name", SH_SCRIPTS)
+def test_no_remote_script_is_piped_into_a_shell_first(name: str) -> None:
+    # The astral fallback stays reachable for unpinned hosts, but must never be tried first.
+    text = _text(name)
+    match = re.search(r"astral\.sh/uv/(\$\w+/)?install\.sh", text)
+    if match is None:
+        return
+    pinned = min(
+        (m.start() for m in re.finditer(r"_(setup_install_uv_pinned|uv_install_pinned)\b", text)),
+        default = None,
+    )
+    fallback = match.start()
+    assert pinned is not None, f"{name} has no pinned uv path"
+    assert pinned < fallback, f"{name} reaches the piped fallback before the pinned release"
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_no_encoded_or_base64_command_payloads(name: str) -> None:
+    text = _text(name)
+    for banned in ("-EncodedCommand", "FromBase64String", "base64 -d", "base64 --decode"):
+        assert banned not in text, f"{name} contains {banned}"
+
+
+_HIDDEN = re.compile(r"-WindowStyle\s+Hidden", re.IGNORECASE)
+_BYPASS = re.compile(
+    r"-ExecutionPolicy\s+Bypass|Set-ExecutionPolicy[^\r\n]*?\bBypass\b", re.IGNORECASE
+)
+_ASSIGNMENT = re.compile(r"\$(?:script:|env:)?(\w+)\s*(?:=|\+=)\s*(.*)")
+
+# A ratchet failing both ways: too many is a new site, too few a stale entry.
+KNOWN_BYPASS_SITES = {
+    # The roaming-profile launcher fallback: %LOCALAPPDATA% may be a UNC path RemoteSigned
+    # refuses. Removing it needs a guaranteed-local launch-studio.ps1.
+    "install.ps1": 1,
+}
+
+# Casefolded: PowerShell variable names are not case-sensitive.
+KNOWN_SPLIT_PAIR_VARIABLES = {("install.ps1", "shortcutargs")}
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_hidden_window_never_pairs_with_a_bypassed_policy(name: str) -> None:
+    """A hidden window and a bypassed policy must never pair in one file, even fourteen lines apart."""
+    text = _text(name)
+    lines = text.splitlines()
+
+    for number, line in enumerate(lines, start = 1):
+        if _HIDDEN.search(line):
+            assert not _BYPASS.search(
+                line
+            ), f"{name}:{number} pairs a hidden window with a bypassed policy: {line.strip()}"
+
+    found = [
+        (number, line.strip()) for number, line in enumerate(lines, start = 1) if _BYPASS.search(line)
+    ]
+    allowed = KNOWN_BYPASS_SITES.get(name, 0)
+    assert len(found) <= allowed, (
+        f"{name} relaxes the execution policy in {len(found)} place(s) but {allowed} are recorded: "
+        f"{found}. RemoteSigned loads any locally written, unmarked script, which covers almost "
+        f"every case; if this one genuinely cannot, add it to KNOWN_BYPASS_SITES with the reason "
+        f"and what would remove it."
+    )
+    assert len(found) >= allowed, (
+        f"{name} now has {len(found)} relaxed policies but KNOWN_BYPASS_SITES records {allowed}. "
+        f"Lower the count in the same commit that removed one, so the ratchet keeps its grip "
+        f"instead of leaving slack for the next regression to fit into."
+    )
+
+    contributions: dict[str, set] = {}
+    spellings: dict[str, set] = {}
+    for line in lines:
+        match = _ASSIGNMENT.match(line.strip())
+        if not match:
+            continue
+        key = match.group(1).casefold()
+        spellings.setdefault(key, set()).add(match.group(1))
+        seen = contributions.setdefault(key, set())
+        if _HIDDEN.search(match.group(2)):
+            seen.add("hidden")
+        if _BYPASS.search(match.group(2)):
+            seen.add("bypass")
+    for variable, seen in sorted(contributions.items()):
+        if seen != {"hidden", "bypass"}:
+            continue
+        written = " / ".join(sorted(spellings[variable]))
+        assert (name, variable) in KNOWN_SPLIT_PAIR_VARIABLES, (
+            f"{name}: ${written} is assigned a hidden window in one place and a relaxed policy in "
+            f"another. Only one of them reaches the command line, so whichever is dead weight "
+            f"should go rather than be recorded here."
+        )
+
+
+# Every native import left in the installers; a new entry needs a reason.
+ALLOWED_PINVOKES = {
+    # Linked-ancestor canonicalisation; no 5.1 equivalent. The mutex name is hashed from this
+    # spelling byte for byte, so a GetFullPath shortcut would break exclusion.
+    "CreateFileW",
+    "GetFinalPathNameByHandleW",
+    # ANSI colour on a real console; skipped when stdout is redirected.
+    "GetStdHandle",
+    "GetConsoleMode",
+    "SetConsoleMode",
+    # Per-item icon refresh; ie4uinit -show alone does not recover a stale .lnk.
+    "SHChangeNotify",
+    # Names the image behind a pid with LIMITED_INFORMATION only; Process.Path needs VM_READ
+    # and WMI may be broken.
+    "OpenProcess",
+    "QueryFullProcessImageNameW",
+    "CloseHandle",
+    # NVML inventory when nvidia-smi is absent, stale or hangs; no PowerShell equivalent.
+    "nvmlInit_v2",
+    "nvmlShutdown",
+    "nvmlSystemGetCudaDriverVersion_v2",
+    "nvmlDeviceGetCount_v2",
+    "nvmlDeviceGetHandleByIndex_v2",
+    "nvmlDeviceGetCudaComputeCapability",
+    "cuInit",
+    "cuDriverGetVersion",
+    "cuDeviceGetCount",
+    "cuDeviceGet",
+    "cuDeviceGetAttribute",
+}
+
+
+# Both ways a native import can be declared: Add-Type runs csc.exe over C#, DefinePInvokeMethod builds the same stub
+# in memory. The second is invisible to a DllImport regex, so without it the inventory above would stop covering
+# install.ps1 the moment it stopped compiling.
+def _native_imports(text: str) -> set:
+    imported = set()
+    for match in re.finditer(
+        r"DllImport\(\"[^\"]+\"[^)]*\)\][^;{]*?extern\s+[\w.\[\]]+\s+(\w+)", text
+    ):
+        imported.add(match.group(1))
+    # Multi-line declarations put the parameter list on later lines.
+    for match in re.finditer(r"extern\s+[\w.<>\[\]]+\s+(\w+)\s*\(", text):
+        imported.add(match.group(1))
+    if "DefinePInvokeMethod" in text:
+        for match in re.finditer(r"@\{\s*Name\s*=\s*\"(\w+)\"", text):
+            imported.add(match.group(1))
+    return imported
+
+
+def test_setup_bat_clears_the_mark_before_loading_under_remotesigned() -> None:
+    """setup.bat must clear the web mark, then run under RemoteSigned, and never add -NoProfile."""
+    text = _text("studio/setup.bat")
+    lines = [
+        line
+        for line in text.splitlines()
+        if line.strip() and not line.strip().lower().startswith(("rem ", "@echo", "rem\t"))
+    ]
+    # Match on flags: path and policy travel in variables now.
+    launches = [line for line in lines if "-File" in line and "-ExecutionPolicy" in line]
+    assert len(launches) == 1, f"expected exactly one setup.ps1 launch, found {launches}"
+    launch = launches[0]
+
+    assert "-ExecutionPolicy %UNSLOTH_SETUP_POLICY%" in launch, (
+        f"studio/setup.bat must load setup.ps1 under the probed policy, not a hardcoded relaxed "
+        f"one: {launch}"
+    )
+    assert 'set "UNSLOTH_SETUP_POLICY=RemoteSigned"' in text, (
+        "the probed policy no longer DEFAULTS to RemoteSigned. That default is what makes a probe "
+        "which fails to run leave the tightened policy in place instead of restoring the relaxed one."
+    )
+    assert "-NoProfile" not in launch, (
+        "studio/setup.bat must keep loading profiles for setup.ps1. "
+        "tests/studio/test_amd_venv_repair_loop.ps1 drives a profile that sets Set-StrictMode "
+        "against it, and -NoProfile here would retire that coverage without anything failing."
+    )
+
+    unblock = [line for line in lines if "Unblock-File" in line]
+    assert len(unblock) == 1, f"expected exactly one Unblock-File call, found {unblock}"
+    assert text.index(unblock[0]) < text.index(launch), (
+        "the mark of the web has to be cleared before the launch that RemoteSigned would refuse, "
+        "not after it"
+    )
+    # An apostrophe in the install directory would break an interpolated path.
+    assert "$env:" in unblock[0], (
+        f"pass the script path to Unblock-File through an environment variable rather than "
+        f"interpolating it into the command string: {unblock[0]}"
+    )
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_no_new_native_imports(name: str) -> None:
+    text = _text(name)
+    unexpected = _native_imports(text) - ALLOWED_PINVOKES
+    assert not unexpected, (
+        f"{name} imports {sorted(unexpected)} from native code. Prefer a PowerShell or .NET "
+        f"equivalent; if there genuinely is none, add it to ALLOWED_PINVOKES with the reason."
+    )
+
+
+@pytest.mark.parametrize("name", ("install.ps1", "studio/setup.ps1"))
+def test_virtual_terminal_answers_a_redirected_stream_without_defining_a_type(name: str) -> None:
+    """A redirected stream is decided FALSE first, and the function makes no native call at all."""
+    text = _text(name)
+    start = text.index("function Enable-StudioVirtualTerminal")
+    end = text.index("$script:StudioVtOk = Enable-StudioVirtualTerminal", start)
+    body = text[start:end]
+
+    fast_path = body.index("if ($script:StudioStdoutRedirected) { return $false }")
+    property_read = body.index("$Host.UI.SupportsVirtualTerminal")
+    assert fast_path < property_read, (
+        f"{name} consults the host before checking whether the stream is redirected. A redirected "
+        f"stream can never render VT, so that case has to be decided first and decided false."
+    )
+
+    for banned in (
+        "New-StudioEmittedNativeType",
+        "DefinePInvokeMethod",
+        "Add-Type",
+        "GetStdHandle",
+        "SetConsoleMode",
+        "kernel32",
+    ):
+        assert banned not in _strip_comments(body), (
+            f"{name}'s Enable-StudioVirtualTerminal does native work again ({banned}). The host "
+            f"already enables virtual terminal processing at startup, measured: the console mode "
+            f"is 0x7 before we touch it. Colouring a banner is not worth three kernel32 imports."
+        )
+
+
+def _strip_comments(text: str) -> str:
+    return "\n".join(line for line in text.splitlines() if not line.strip().startswith("#"))
+
+
+def test_neither_installer_declares_a_console_mode_import() -> None:
+    """No console-mode import: the host already sets VT, so SetConsoleMode changes nothing."""
+    for name in ("install.ps1", "studio/setup.ps1"):
+        declared = _native_imports(_text(name))
+        for banned in ("GetStdHandle", "GetConsoleMode", "SetConsoleMode"):
+            assert banned not in declared, (
+                f"{name} declares {banned} again; the console mode is the host's job and "
+                f"$Host.UI.SupportsVirtualTerminal reports its outcome"
+            )
+    setup = _strip_comments(_text("studio/setup.ps1"))
+    assert "StudioVTNative" not in setup, "the emitted console thunk is back in studio/setup.ps1"
+    assert "Add-Type" not in setup, "studio/setup.ps1 compiles C# through csc.exe again"
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_no_process_memory_apis(name: str) -> None:
+    for banned in (
+        "VirtualAllocEx",
+        "WriteProcessMemory",
+        "ReadProcessMemory",
+        "CreateRemoteThread",
+        "SetWindowsHookEx",
+    ):
+        assert banned not in _text(name), f"{name} references {banned}"
+
+
+# User-visible reinstall output a search-and-replace could take out.
+REQUIRED_OUTPUT = {
+    "install.ps1": ['Write-StudioLine "          irm https://unsloth.ai/install.ps1 | iex"'],
+    "studio/setup.ps1": ['Write-StudioLine "        irm https://unsloth.ai/install.ps1 | iex"'],
+    "install.sh": ["curl -fsSL https://unsloth.ai/install.sh | sh"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(REQUIRED_OUTPUT))
+def test_printed_remediation_survives_the_hardening(name: str) -> None:
+    text = _text(name)
+    for snippet in REQUIRED_OUTPUT[name]:
+        assert snippet in text, (
+            f"{name} no longer prints {snippet!r}. Removing the one-liner from comments is the "
+            f"point; removing it from what the user is told to run is a regression."
+        )
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_the_installer_never_runs_the_c_sharp_compiler(name: str) -> None:
+    """Add-Type runs csc.exe and drops a DLL in %TEMP%, which AV blocked; ban it in all scripts."""
+    text = _text(name)
+    hits = re.findall(r"(?m)^[ \t]*Add-Type\b(?![^\r\n]*-AssemblyName).*", text)
+    assert not hits, (
+        f"{name} compiles C# again ({len(hits)} Add-Type call(s), first: {hits[0].strip()!r}). "
+        "Make the native call out of process instead (the early Python interpreter's ctypes, "
+        "as the NVIDIA probe and path resolver do, or an in-box System32 tool), or with an "
+        "inline DefinePInvokeMethod block where the script is generated; "
+        "-MemberDefinition runs csc.exe just as -TypeDefinition does."
+    )
+    # Only for files that HAVE native imports; three shipped files declare none.
+    if _native_imports(text):
+        assert "DefinePInvokeMethod" in text, (
+            f"{name} declares native imports but no longer emits them. If they are compiled again "
+            f"instead, that is csc.exe on 5.1, which is the shape this whole file exists to keep out."
+        )
+    # The private-%TEMP% compile retry is gone; scoped to the resolver since
+    # Initialize-StudioTempEnvironment legitimately redirects TEMP.
+    if "function Initialize-StudioFinalPathNativeType" not in text:
+        return
+    start = text.index("function Initialize-StudioFinalPathNativeType")
+    body = text[start : text.index("\n    function ", start + 1)]
+    assert (
+        "$env:TMP" not in body and "$env:TEMP" not in body
+    ), "the native resolver touches the temporary directory again; it should need nothing there"
+
+
+def test_a_ci_lane_fails_when_a_compiler_actually_runs() -> None:
+    """Reading scripts misses compiles reached via a module or here-string, so a CI lane must catch them."""
+    workflow = REPO / ".github" / "workflows" / "windows-no-compiler-ci.yml"
+    assert workflow.is_file(), "the runtime guard lane is gone; the text check is alone again"
+    body = workflow.read_text(encoding = "utf-8")
+    assert "Positive control" in body, "the lane no longer proves its own detector works"
+    assert (
+        "Add-Type -TypeDefinition" in body
+    ), "the positive control must really compile something; a simulated one proves nothing"
+
+    watcher = REPO / ".github" / "scripts" / "Watch-ForCompiler.ps1"
+    assert watcher.is_file()
+    watcher_body = watcher.read_text(encoding = "utf-8")
+    for image in ("csc.exe", "vbc.exe", "cvtres.exe"):
+        assert image in watcher_body, f"the watcher no longer looks for {image}"
+    # 4688 sees a compiler at any depth; the temp sweep survives audit overrides.
+    assert "4688" in watcher_body
+    assert "*.cmdline" in watcher_body
+
+
+_WATCHER = REPO / ".github" / "scripts" / "Watch-ForCompiler.ps1"
+
+# The .NET host tearing itself down (FileLoadException then SIGABRT), not the script.
+_PWSH_HOST_FAULT = (
+    "An error has occurred that was not properly handled",
+    "System.IO.FileLoadException",
+    "Unhandled exception.",
+)
+
+
+def _run_pwsh(script: Path, *, timeout: int):
+    """Skips only on an abnormal host abort with a fault banner; a clean non-zero exit still fails."""
+    command = ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(script)]
+    env = pwsh_env()
+    for attempt in range(2):
+        result = subprocess.run(command, capture_output = True, text = True, timeout = timeout, env = env)
+        crashed = result.returncode < 0 and any(
+            marker in result.stderr for marker in _PWSH_HOST_FAULT
+        )
+        if not crashed:
+            return result
+        if attempt:
+            pytest.skip(f"pwsh host aborted ({result.returncode}): {result.stderr.strip()[:400]}")
+    raise AssertionError("unreachable")
+
+
+_FAKE_EVENTS = r"""
+function New-FakeEvent {
+    param([string]$Image, [string]$CommandLine, [string]$Parent = 'C:\Windows\System32\cmd.exe')
+    $xml = "<Event><EventData>" +
+        "<Data Name='NewProcessName'>$Image</Data>" +
+        "<Data Name='ParentProcessName'>$Parent</Data>" +
+        "<Data Name='CommandLine'>$CommandLine</Data>" +
+        "</EventData></Event>"
+    $record = [pscustomobject]@{
+        TimeCreated = [datetime]'2026-01-01T00:00:00Z'
+        Message     = "New Process Name: $Image`nProcess Command Line: $CommandLine"
+    }
+    $body = [scriptblock]::Create("return @'`n$xml`n'@")
+    return ($record | Add-Member -MemberType ScriptMethod -Name ToXml -Value $body -PassThru)
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+@pytest.mark.parametrize(
+    ("image", "command_line", "expected"),
+    [
+        (r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe", "csc.exe /out:x.dll", 1),
+        (r"C:\Windows\System32\cmd.exe", "cmd.exe /c echo csc.exe", 0),
+        (r"C:\Windows\System32\cmd.exe", r"cmd.exe /c copy a.txt C:\csc.exe.log", 0),
+        (r"C:\Users\r\csc.exe.helper.exe", "whatever", 0),
+    ],
+    ids = ["a-real-compile", "a-command-line-mentioning-one", "a-path-argument", "a-similar-name"],
+)
+def test_the_watcher_scores_the_image_that_ran_not_the_words_in_the_message(
+    tmp_path, image: str, command_line: str, expected: int
+) -> None:
+    """4688 renders the command line into the message, so a message search is not a detector:
+    it scored `cmd.exe /c echo csc.exe` as a compile. The record names the image it created
+    in its own field; that is what gets read, matched whole against the leaf name rather
+    than as a substring.
+    """
+    script = tmp_path / "probe.ps1"
+    script.write_text(
+        "\n".join(
+            [
+                '$ErrorActionPreference = "Stop"',
+                f'. "{_WATCHER}"',
+                _FAKE_EVENTS,
+                f"$e = New-FakeEvent -Image '{image}' -CommandLine '{command_line}'",
+                "$hits = Select-StudioCompilerHits -Events @($e)",
+                'Write-Output "HITS:$($hits.Count)"',
+            ]
+        ),
+        encoding = "utf-8",
+    )
+    result = _run_pwsh(script, timeout = 120)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HITS:{expected}" in result.stdout, result.stdout
+
+
+_CSC = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+_CVTRES = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\cvtres.exe"
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+@pytest.mark.parametrize(
+    ("image", "parent", "expected"),
+    [
+        (_CSC, r"C:\Program Files\PowerShell\7\pwsh.exe", 1),
+        (_CVTRES, r"C:\Program Files\PowerShell\7\pwsh.exe", 1),
+        (_CVTRES, _CSC, 0),
+    ],
+    ids = [
+        "a-compile-the-shell-started",
+        "a-resource-step-with-no-compiler-parent",
+        "a-resource-step-the-compiler-started",
+    ],
+)
+def test_a_compiler_started_by_a_compiler_is_one_compile_not_two(
+    tmp_path, image: str, parent: str, expected: int
+) -> None:
+    """csc.exe shells out to cvtres.exe, so a single compile creates two 4688 records and
+    scoring both says the action compiled twice.
+
+    It also decides the cross-step bleed the timestamp baseline could not. The Security log
+    is written with latency: the positive control's csc.exe started before the installer's
+    window opened, its cvtres.exe child landed just inside, and neither was in the log yet
+    when the baseline was read, so the subtraction had nothing to subtract and the
+    installer was failed for a compile one step earlier.
+
+    A compile the action really starts is still caught, because its ROOT compiler is
+    spawned by the installer's shell and the window opens before the action does. That is
+    the middle case here: an orphaned resource step with a non-compiler parent still counts.
+    """
+    script = tmp_path / "probe.ps1"
+    script.write_text(
+        "\n".join(
+            [
+                '$ErrorActionPreference = "Stop"',
+                f'. "{_WATCHER}"',
+                _FAKE_EVENTS,
+                f"$e = New-FakeEvent -Image '{image}' -CommandLine 'x' -Parent '{parent}'",
+                "$hits = Select-StudioCompilerHits -Events @($e)",
+                'Write-Output "HITS:$($hits.Count)"',
+            ]
+        ),
+        encoding = "utf-8",
+    )
+    result = _run_pwsh(script, timeout = 120)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert f"HITS:{expected}" in result.stdout, result.stdout
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_a_record_with_no_parent_field_is_still_scored(tmp_path) -> None:
+    """The whole chain is reported when the schema does not carry ParentProcessName. An
+    absent field reads as empty, and empty must not be mistaken for a compiler parent, or a
+    log that predates the field would report nothing at all."""
+    script = tmp_path / "probe.ps1"
+    script.write_text(
+        "\n".join(
+            [
+                '$ErrorActionPreference = "Stop"',
+                f'. "{_WATCHER}"',
+                "function New-OldEvent {",
+                "    param([string]$Image)",
+                "    $xml = \"<Event><EventData><Data Name='NewProcessName'>$Image</Data>\" +",
+                '        "</EventData></Event>"',
+                "    $record = [pscustomobject]@{",
+                "        TimeCreated = [datetime]'2026-01-01T00:00:00Z'",
+                '        Message     = "New Process Name: $Image"',
+                "    }",
+                "    $body = [scriptblock]::Create(\"return @'`n$xml`n'@\")",
+                "    return ($record | Add-Member -MemberType ScriptMethod -Name ToXml "
+                "-Value $body -PassThru)",
+                "}",
+                f"$e = New-OldEvent -Image '{_CSC}'",
+                "$hits = Select-StudioCompilerHits -Events @($e)",
+                'Write-Output "HITS:$($hits.Count)"',
+            ]
+        ),
+        encoding = "utf-8",
+    )
+    result = _run_pwsh(script, timeout = 120)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "HITS:1" in result.stdout, result.stdout
+
+
+_FAKE_WINEVENT = r"""
+function Get-WinEvent {
+    # Off Windows there is no such cmdlet, so this resolves the call. Empty rather than
+    # throwing: this exercises the artefact half, and the 4688 half has its own tests.
+    param([Parameter(ValueFromRemainingArguments = $true)]$Rest)
+    return @()
+}
+"""
+
+
+def _run_watch(
+    tmp_path,
+    action: str,
+    setup: str = "",
+) -> tuple[str, list[str]]:
+    """Runs the real Invoke-WithCompilerWatch over an action, with TEMP pointed at tmp_path."""
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    evidence = tmp_path / "evidence"
+    script = tmp_path / "probe.ps1"
+    script.write_text(
+        "\n".join(
+            [
+                '$ErrorActionPreference = "Stop"',
+                f'$env:TEMP = "{temp_root.as_posix()}"',
+                f'$env:TMP = "{temp_root.as_posix()}"',
+                _FAKE_WINEVENT,
+                f'. "{_WATCHER}"',
+                setup,
+                f"$action = {{ {action} }}",
+                "$seen = Invoke-WithCompilerWatch -Name 'probe' -Action $action "
+                f'-EvidenceRoot "{evidence.as_posix()}"',
+                'foreach ($lib in $seen.TempLibraries) { Write-Output "LIB:$lib" }',
+                'Write-Output "COUNT:$($seen.TempLibraries.Count)"',
+            ]
+        ),
+        encoding = "utf-8",
+    )
+    result = _run_pwsh(script, timeout = 300)
+    assert result.returncode == 0, result.stderr + result.stdout
+    libraries = [
+        line[len("LIB:") :] for line in result.stdout.splitlines() if line.startswith("LIB:")
+    ]
+    return result.stdout, libraries
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_the_watcher_sees_intermediates_the_compiler_cleaned_up(tmp_path) -> None:
+    """The failure this replaces: the positive control compiled a type, 4688 recorded
+
+        csc.exe /noconfig /fullpaths @"...\\Temp\\vpmyd5eq\\vpmyd5eq.cmdline"
+
+    and the artefact half reported nothing, because CodeDom deletes its intermediate
+    directory once the assembly is loaded. Comparing a listing taken before against one
+    taken after cannot see a file that no longer exists, so the job failed as a broken
+    detector on every run since it was added.
+
+    The directory is staged BEFORE the watch starts, and that is the whole reason this
+    test is reliable. It used to be created inside the action, which is what CodeDom
+    does, and which is unobservable here: `IncludeSubdirectories` is recursive in the
+    kernel on Windows, but off Windows .NET emulates it by adding an inotify watch per
+    directory, and it adds the one for a new subdirectory after the fact. A file written
+    into a brand-new subdirectory microseconds later can land before its watch does and
+    never be raised at all. Measured driving the same shape in a loop, idle: 1 miss in
+    60. On a two-core hosted runner it landed as COUNT:0 on a pull request that touches
+    none of this (Backend CI job 105986532571, `Repo tests (CPU, studio)`).
+
+    There is nothing to synchronise on either, so a wait is the only alternative and a
+    wait is just a wider race. The watcher's NotifyFilter is FileName, which does not
+    raise a directory's own creation: measured, 0 of 1 under FileName and 1 of 1 once
+    DirectoryName is added, so the event that would say "the subdirectory is watched
+    now" is deliberately not in the stream, and widening the production filter to put it
+    there would change what the detector records.
+
+    What is under test does not need a new directory. The claim is that a file which no
+    longer exists when the action returns is still reported, and the only detector that
+    can make it is the live stream: the before-listing is taken while the directory is
+    empty, the after-listing sees a directory that is gone. Staging the directory removes
+    the platform's timing from the measurement without touching the claim.
+    """
+    setup = (
+        '$staged = Join-Path $env:TEMP "vpmyd5eq"; '
+        "New-Item -ItemType Directory -Force -Path $staged | Out-Null"
+    )
+    action = (
+        '$dir = Join-Path $env:TEMP "vpmyd5eq"; '
+        'Set-Content -LiteralPath (Join-Path $dir "vpmyd5eq.cmdline") -Value "/noconfig"; '
+        'Set-Content -LiteralPath (Join-Path $dir "vpmyd5eq.dll") -Value "MZ"; '
+        "Start-Sleep -Milliseconds 400; "
+        "Remove-Item -LiteralPath $dir -Recurse -Force"
+    )
+    stdout, libraries = _run_watch(tmp_path, action, setup = setup)
+    assert libraries, f"a compile that cleaned up after itself was missed again: {stdout}"
+    assert any(lib.endswith("vpmyd5eq.cmdline") for lib in libraries), libraries
+    assert any(lib.endswith("vpmyd5eq.dll") for lib in libraries), libraries
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_the_watcher_still_reports_intermediates_that_were_left_behind(tmp_path) -> None:
+    """The listing half must keep working; the watcher is added to it, not swapped for it.
+
+    A compile that was NOT cleaned up, so the response file is still next to the assembly.
+    This asserted a bare ``leftover.dll`` before, which read as "any DLL under TEMP is a
+    compiler artefact"; that is the rule the job died on, and it is not what this test is
+    for. The vehicle changed, the listing half it checks did not.
+    """
+    action = (
+        '$dir = Join-Path $env:TEMP "leftover"; '
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null; "
+        'Set-Content -LiteralPath (Join-Path $dir "leftover.cmdline") -Value "/noconfig"; '
+        'Set-Content -LiteralPath (Join-Path $dir "leftover.dll") -Value "MZ"'
+    )
+    _, libraries = _run_watch(tmp_path, action)
+    assert any(lib.endswith("leftover.dll") for lib in libraries), libraries
+    assert any(lib.endswith("leftover.cmdline") for lib in libraries), libraries
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_an_unpacked_archive_is_not_scored_as_a_compile(tmp_path) -> None:
+    """What actually ran on every red run of this job.
+
+    The installer unpacks llama.cpp's checksum-verified prebuilt release into a staging
+    directory under TEMP, which lands ~25 DLLs there with no compiler anywhere near them.
+    The shape under test is ``csc.exe -> %TEMP%\\<random>.dll``; an unpacked archive is a
+    different thing and must not read as one, or the job can never pass and stops meaning
+    anything.
+    """
+    action = (
+        '$dir = Join-Path $env:TEMP "unsloth-llama-prebuilt-ay5ptbfd"; '
+        '$dir = Join-Path $dir "extract-w613j_am"; '
+        "New-Item -ItemType Directory -Force -Path $dir | Out-Null; "
+        'foreach ($n in @("ggml.dll", "llama.dll", "mtmd.dll", "ggml-cpu-x64.dll")) { '
+        '    Set-Content -LiteralPath (Join-Path $dir $n) -Value "MZ" '
+        "}; "
+        'Set-Content -LiteralPath (Join-Path $dir "LICENSE.txt") -Value "MIT"; '
+        "Start-Sleep -Milliseconds 400"
+    )
+    stdout, libraries = _run_watch(tmp_path, action)
+    assert not libraries, f"an unpacked release archive was scored as a compile: {stdout}"
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_a_compile_beside_an_unpacked_archive_is_still_caught(tmp_path) -> None:
+    """The narrowing is per-directory, so unpacking an archive cannot cover a real compile."""
+    action = (
+        '$extract = Join-Path $env:TEMP "unsloth-llama-prebuilt-zz\\extract-zz"; '
+        "New-Item -ItemType Directory -Force -Path $extract | Out-Null; "
+        'Set-Content -LiteralPath (Join-Path $extract "ggml.dll") -Value "MZ"; '
+        '$compile = Join-Path $env:TEMP "vpmyd5eq"; '
+        "New-Item -ItemType Directory -Force -Path $compile | Out-Null; "
+        'Set-Content -LiteralPath (Join-Path $compile "vpmyd5eq.cmdline") -Value "/noconfig"; '
+        'Set-Content -LiteralPath (Join-Path $compile "vpmyd5eq.dll") -Value "MZ"; '
+        "Start-Sleep -Milliseconds 400"
+    )
+    _, libraries = _run_watch(tmp_path, action)
+    assert any(lib.endswith("vpmyd5eq.dll") for lib in libraries), libraries
+    assert not any(lib.endswith("ggml.dll") for lib in libraries), libraries
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason = "needs PowerShell")
+def test_an_action_that_compiles_nothing_reports_nothing(tmp_path) -> None:
+    """Otherwise the real measurement, which requires neither detector to fire, can never pass.
+
+    A text file is written so the action is not a no-op: the watcher sees the creation and
+    must still discard it, because the extension is not one a compiler writes.
+    """
+    action = (
+        'Set-Content -LiteralPath (Join-Path $env:TEMP "notes.txt") -Value "hello"; '
+        "Start-Sleep -Milliseconds 400"
+    )
+    stdout, libraries = _run_watch(tmp_path, action)
+    assert "COUNT:0" in stdout, stdout
+    assert not libraries, libraries
+
+
+def test_an_unreadable_security_log_is_void_rather_than_clean() -> None:
+    """Get-WinEvent throws for no match and for an unreadable log; the latter must void, not pass."""
+    body = _WATCHER.read_text(encoding = "utf-8")
+    assert (
+        "-MaxEvents 1" in body
+    ), "the watcher no longer distinguishes an empty result from an unreadable log"
+    assert "void rather than as clean" in body
+
+
+def test_the_compiler_window_is_cut_to_size_by_timecreated() -> None:
+    """The compiler-event window must cut by TimeCreated at the exact floor, or it scores the prior step."""
+    body = _WATCHER.read_text(encoding = "utf-8")
+    assert "StartTime = $Since.AddSeconds(-1)" in body
+    assert "EndTime   = $Until.AddSeconds(1)" in body
+    assert "$_.TimeCreated -ge $Since -and $_.TimeCreated -le $Until" in body, (
+        "the padded query is no longer cut back to the real window, so it reports "
+        "compiles from before the action began"
+    )
+
+
+def test_the_path_resolver_still_has_a_lexical_fallback() -> None:
+    """The point of the change is the acquisition, not the ladder: a host that cannot reach the
+    exact rung must degrade exactly as one that could not compile already did.
+    """
+    text = _text("install.ps1")
+    assert "Write-StudioFinalPathDegraded" in text
+    assert "Get-StudioLexicalPath" in text
+    assert "Get-StudioPythonFinalPath" in text
+    assert "UNSLOTH_EARLY_PYTHON_PROBE" in text
+
+
+DOCUMENTED_SCRIPTS = tuple(sorted(set(ALL_SCRIPTS) | {"studio/setup.bat", "scripts/uninstall.sh"}))
+
+# Not a style rule: AMSI treats comments as classifier input.
+BANNED_TOKENS = (
+    "bitdefender",
+    "kaspersky",
+    "skyhigh",
+    "trellix",
+    "mcafee",
+    "avast",
+    "sophos",
+    "malwarebytes",
+    "tencent",
+    # "rising" is absent: it is also ordinary English.
+    "panda",
+    "wacatac",
+    "heur:",
+    "heracles",
+    "gen:variant",
+    "behaveslike",
+    "trojan",
+    "dropper",
+    "amsi",
+    "smartscreen",
+    "virustotal",
+    "sigma rule",
+    "malware",
+)
+
+# Generic hazard words (antivirus, quarantine, blocked) and "false positive" are allowed.
+
+
+def _banned_pattern(token: str) -> re.Pattern:
+    """Word boundaries only at word-character edges, so 'rising' does not match inside 'surprising'."""
+    left = r"\b" if token[:1].isalnum() else ""
+    right = r"\b" if token[-1:].isalnum() else ""
+    return re.compile(left + re.escape(token) + right, re.IGNORECASE)
+
+
+@pytest.mark.parametrize("name", DOCUMENTED_SCRIPTS)
+@pytest.mark.parametrize("token", BANNED_TOKENS)
+def test_no_shipped_script_names_a_detection(name: str, token: str) -> None:
+    path = REPO / name
+    if not path.is_file():
+        pytest.skip(f"{name} is not present")
+    found = _banned_pattern(token).search(path.read_text(encoding = "utf-8"))
+    assert not found, (
+        f"{name} contains {token!r}. Vendor names, detection families and analyst vocabulary "
+        f"belong in tests/studio/test_installer_av_shapes.py, not in a file that is itself handed to "
+        f"a classifier in full before it runs. Say what the code does and what breaks if it "
+        f"changes; link the anchor for which product flagged what."
+    )
+
+
+def test_the_record_survives_and_keeps_its_evidence() -> None:
+    """AV_SHAPES_RECORD keeps which engine flagged what, so bans cannot be met by deleting the knowledge."""
+    for section in (
+        "## Measured detections",
+        "## Reflection emit instead of Add-Type",
+        "## No .vbs launcher",
+        "## RemoteSigned rather than Bypass, next to a hidden window",
+        "## The icon-cache refresh is gated on a first install or a real icon change",
+        "## uv comes from a pinned archive, not from a remote install script",
+        "## Why the script headers do not repeat the usage text",
+        "## Shapes we are keeping, on purpose",
+    ):
+        assert section in AV_SHAPES_RECORD, f"the record lost its {section!r} section"
+
+    for evidence in (
+        "Gen:Variant.MSILHeracles.272113",
+        "HEUR:Trojan.VBS.Agent.gen",
+        "BehavesLike.PS.Suspicious.gr",
+        "#10540",
+        "#10805",
+        "#9140",
+    ):
+        assert evidence in AV_SHAPES_RECORD, f"the record no longer names {evidence}"
+
+
+@pytest.mark.parametrize("name", DOCUMENTED_SCRIPTS)
+def test_every_script_that_dropped_its_explanation_points_at_the_record(name: str) -> None:
+    """A comment reduced to "security software blocks this" with no forward reference is worse
+    than the prose it replaced: the next maintainer cannot tell whether it is still true.
+    """
+    path = REPO / name
+    if not path.is_file():
+        pytest.skip(f"{name} is not present")
+    text = path.read_text(encoding = "utf-8")
+    hints = ("Add-Type", "RemoteSigned", "ClearIconCache", "Sha256", "SHA-256")
+    if not any(hint in text for hint in hints):
+        pytest.skip(f"{name} carries none of the documented shapes")
+    assert "test_installer_av_shapes.py" in text, (
+        f"{name} implements one of the recorded shapes but references nothing. Point at "
+        f"tests/studio/test_installer_av_shapes.py, where AV_SHAPES_RECORD says which product "
+        f"flagged what, so the reasoning is one grep away rather than lost."
+    )
+    # Assembled so a blanket rename of the doc path cannot invert this check.
+    stale = "docs/windows-installer-" + "av-shapes.md"
+    assert stale not in text, (
+        f"{name} points at {stale}, which does not exist. The record lives in "
+        f"tests/studio/test_installer_av_shapes.py as AV_SHAPES_RECORD."
+    )
+
+
+def _setup_bat_probe() -> str:
+    """The PowerShell that setup.bat embeds to clear the mark and choose a policy."""
+    for line in _text("studio/setup.bat").splitlines():
+        stripped = line.strip().lower()
+        if stripped.startswith("rem") or stripped.startswith("@rem"):
+            continue
+        if "-Command" not in line:
+            continue
+        body = line.split('-Command "', 1)[1]
+        return body[: body.rindex('"`)')]
+    raise AssertionError(
+        "studio/setup.bat no longer embeds a -Command probe. It needs one: Unblock-File has to run "
+        "before setup.ps1 is loaded under RemoteSigned, and the remote-path check has to happen "
+        "before a policy is chosen."
+    )
+
+
+def test_the_setup_bat_probe_parses() -> None:
+    """The one-line setup.bat probe must parse; a syntax error silently skips clearing the web mark."""
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is unavailable")
+    probe = _setup_bat_probe()
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "probe.ps1"
+        path.write_text(probe, encoding = "utf-8")
+        result = _run_pwsh_parse(pwsh, path)
+    assert (
+        result.returncode == 0
+    ), f"the probe embedded in studio/setup.bat does not parse:\n{result.stdout}\n{result.stderr}"
+
+
+def _run_pwsh_parse(pwsh: str, path: Path):
+    import os
+    from unsloth_pwsh_runner import run_pwsh
+
+    script = (
+        "$errors = $null; $tokens = $null; "
+        "$null = [System.Management.Automation.Language.Parser]::ParseFile("
+        "$env:UNSLOTH_TARGET, [ref]$tokens, [ref]$errors); "
+        "if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }"
+    )
+    return run_pwsh(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output = True,
+        text = True,
+        timeout = 120,
+        env = {**os.environ, "UNSLOTH_TARGET": str(path)},
+    )
+
+
+def test_setup_bat_steps_down_to_bypass_only_for_a_remote_script() -> None:
+    """setup.bat steps down to Bypass only for a script on a remote share, where RemoteSigned refuses."""
+    probe = _setup_bat_probe()
+    assert (
+        "DriveInfo" in probe and "Network" in probe
+    ), "the probe no longer detects a mapped network drive, so a script on H:/Z: would be refused"
+    assert "-like '\\\\*'" in probe, "the probe no longer detects a UNC path"
+    assert (
+        "'Bypass'" in probe and "'RemoteSigned'" in probe
+    ), "the probe no longer chooses between the two policies"
+    assert (
+        "Unblock-File" in probe
+    ), "the probe no longer clears the mark of the web, so an unzipped download is refused"
+
+
+# Whole-line comments only: a trailing `#` cannot be told from one in a string.
+_COMMENT_PREFIXES = {".bat": ("rem ", "::"), ".ps1": ("#",), ".sh": ("#",)}
+
+# Needs a real top-level dir and an extension, so URLs and bare dirs do not match.
+_REPO_PATH_IN_PROSE = re.compile(
+    r"(?<![\w./-])((?:\.github|docs|tests|scripts|studio|unsloth|unsloth_cli|unsloth_zoo)"
+    r"/[\w./-]+\.\w+)"
+)
+
+
+def _comment_lines(text: str, name: str):
+    prefixes = _COMMENT_PREFIXES[Path(name).suffix]
+    for line in text.splitlines():
+        stripped = line.strip().lower() if name.endswith(".bat") else line.strip()
+        if stripped.startswith(prefixes):
+            yield line
+
+
+@pytest.mark.parametrize("name", DOCUMENTED_SCRIPTS)
+def test_a_comment_never_points_at_a_file_that_is_not_here(name: str) -> None:
+    """Comments must not cite a repo file path that is not in this tree; a PR number is fine."""
+    text = (REPO / name).read_text(encoding = "utf-8")
+    cited = set()
+    for line in _comment_lines(text, name):
+        cited.update(_REPO_PATH_IN_PROSE.findall(line))
+
+    missing = sorted(p for p in cited if not (REPO / p).exists())
+    assert not missing, (
+        f"{name} has a comment pointing at {missing}, which is not in this tree. Cite a PR number, "
+        "or cite tests/studio/test_installer_av_shapes.py (AV_SHAPES_RECORD), which travels with the repo."
+    )
+
+
+@pytest.mark.parametrize("name", PS_SCRIPTS)
+def test_no_comment_line_starts_with_a_bareword(name: str) -> None:
+    path = REPO / name
+    if not path.is_file():
+        pytest.skip(f"{name} is not present")
+    offenders = [
+        f"{n}: {line.strip()}"
+        for n, line in enumerate(path.read_text(encoding = "utf-8").splitlines(), 1)
+        if re.match(r"^\s*[A-Za-z0-9_]+#", line)
+    ]
+    assert not offenders, (
+        f"{name} has lines where a bareword runs into a '#'. PowerShell reads those as a command "
+        f"named '<word>#', not as a comment, and the run dies there:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_bareword_comment_rule_can_fire() -> None:
+    """The pattern really does catch the shape, and really does leave ordinary lines alone."""
+    assert re.match(r"^\s*[A-Za-z0-9_]+#", "f# An in-box tool")
+    assert re.match(r"^\s*[A-Za-z0-9_]+#", "    unction# something")
+    assert not re.match(r"^\s*[A-Za-z0-9_]+#", "# An in-box tool")
+    assert not re.match(r"^\s*[A-Za-z0-9_]+#", '    $x = "a#b"')

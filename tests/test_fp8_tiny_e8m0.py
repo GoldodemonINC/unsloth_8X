@@ -1,0 +1,105 @@
+"""Non-tileable dims and e8m0 scales skip triton; the torch fallback must match a dequant reference."""
+
+import pytest
+import torch
+
+cuda_available = torch.cuda.is_available()
+xpu_available = hasattr(torch, "xpu") and torch.xpu.is_available()
+dev = "cuda" if cuda_available else "xpu" if xpu_available else "cpu"
+
+pytestmark = pytest.mark.skipif(not (cuda_available or xpu_available), reason = "needs CUDA or XPU")
+
+
+def _reference(X, weight, scale, block):
+    m, n = weight.shape
+    s = scale.to(torch.float32)
+    s = s.repeat_interleave(block[0], 0)[:m].repeat_interleave(block[1], 1)[:, :n]
+    W = (weight.to(torch.float32) * s).to(X.dtype)
+    return X @ W.T
+
+
+def test_tiny_non_tileable_forward_backward_matches_reference():
+    from unsloth.kernels.fp8 import FP8BlockQuantLinear
+
+    torch.manual_seed(0)
+    block = [128, 128]
+    m, n = 8, 8  # non-tileable, in-dim % 128 != 0
+    weight = torch.randn(m, n, device = dev, dtype = torch.bfloat16)
+    scale = torch.rand(1, 1, device = dev, dtype = torch.float32) + 0.5
+    X = torch.randn(4, n, device = dev, dtype = torch.bfloat16, requires_grad = True)
+
+    out = FP8BlockQuantLinear.apply(X, weight, scale)
+    assert torch.isfinite(out).all(), "forward produced non-finite values"
+
+    ref = _reference(X.detach(), weight, scale, block)
+    torch.testing.assert_close(out, ref, atol = 5e-2, rtol = 5e-2)
+
+    out.sum().backward()
+    assert X.grad is not None and torch.isfinite(X.grad).all(), "backward non-finite"
+
+
+def test_e8m0_scale_is_upcast_and_runs():
+    from unsloth.kernels.fp8 import FP8BlockQuantLinear
+
+    if not hasattr(torch, "float8_e8m0fnu"):
+        pytest.skip("torch build lacks float8_e8m0fnu")
+
+    m, n = 8, 8
+    weight = torch.randn(m, n, device = dev, dtype = torch.bfloat16)
+    scale = (torch.rand(1, 1, device = dev) + 1.0).to(torch.float8_e8m0fnu)
+    X = torch.randn(4, n, device = dev, dtype = torch.bfloat16, requires_grad = True)
+
+    out = FP8BlockQuantLinear.apply(X, weight, scale)
+    assert torch.isfinite(out).all()
+    out.sum().backward()
+    assert torch.isfinite(X.grad).all()
+
+
+def test_rectangular_block_dequant_matches_reference():
+    # The triton weight_dequant kernel uses one BLOCK_SIZE for both axes, mis-indexing rectangular blocks.
+    from unsloth.kernels.fp8 import _blockwise_weight_dequant_any_shape
+
+    torch.manual_seed(0)
+    block = [64, 128]
+    m, n = 64, 256
+    weight = torch.randn(m, n, device = dev, dtype = torch.bfloat16)
+    # Distinct per-block column scales expose column mis-indexing.
+    scale = torch.tensor([[0.5, 3.0]], device = dev, dtype = torch.float32)
+
+    W_deq = _blockwise_weight_dequant_any_shape(weight, scale, block, torch.bfloat16)
+
+    s = scale.repeat_interleave(block[0], 0)[:m].repeat_interleave(block[1], 1)[:, :n]
+    ref = (weight.to(torch.float32) * s).to(torch.bfloat16)
+    torch.testing.assert_close(W_deq, ref, atol = 5e-3, rtol = 5e-3)
+
+
+def test_e8m0_scale_preserves_non_default_block_size_attr():
+    # A non-default block_size on an e8m0 scale must survive the float32 upcast in forward.
+    from unsloth.kernels.fp8 import FP8BlockQuantLinear
+
+    if not hasattr(torch, "float8_e8m0fnu"):
+        pytest.skip("torch build lacks float8_e8m0fnu")
+
+    torch.manual_seed(0)
+    block = [64, 64]
+    # in-dim 96 is not divisible by block[1]=64, so forward takes the torch dequant fallback.
+    m, n = 128, 96
+    weight = torch.randn(m, n, device = dev, dtype = torch.bfloat16)
+    scale_f = torch.rand(2, 2, device = dev) + 1.0
+    scale = scale_f.to(torch.float8_e8m0fnu)
+    scale.block_size = block  # attribute lives on the scale, not the weight
+    X = torch.randn(4, n, device = dev, dtype = torch.bfloat16, requires_grad = True)
+
+    out = FP8BlockQuantLinear.apply(X, weight, scale)
+    assert torch.isfinite(out).all()
+
+    ref = _reference(X.detach(), weight, scale.to(torch.float32), block)
+    torch.testing.assert_close(out, ref, atol = 5e-2, rtol = 5e-2)
+
+    out.sum().backward()
+    assert X.grad is not None and torch.isfinite(X.grad).all()
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__, "-q"]))

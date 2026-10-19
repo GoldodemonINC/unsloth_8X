@@ -1,0 +1,585 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team.
+"""Checks lora_request reaches vLLM rollouts across TRL generate shapes, not by version."""
+
+from __future__ import annotations
+
+import importlib.machinery
+import importlib.util
+import linecache
+import os
+import sys
+import textwrap
+import types
+
+import pytest
+
+
+# Collection must stay cheap and safe with no runtime; daily-fresh-fetch collects with only pytest.
+if importlib.util.find_spec("torch") is None:
+    pytest.skip("torch not installed; this test drives the real patch", allow_module_level = True)
+
+
+# _init_vllm and sync_weights are rewritten from source, so these must carry the regex anchors.
+_INIT_VLLM = """
+def _init_vllm(self, model):
+    if self.mode == "colocate":
+        self.llm = LLM(
+            model = model.name_or_path,
+            enable_sleep_mode = self.enable_sleep_mode,
+        )
+    else:
+        self.llm = None
+"""
+
+_SYNC_WEIGHTS = """
+def sync_weights(self):
+    if self._llm_weights_sleeping:
+        self.llm.wake_up()
+        self._llm_weights_sleeping = False
+    self.llm.collective_rpc("update_weights")
+"""
+
+_GENERATE_TRL_1_10 = """
+def generate(self, prompts, **kwargs):
+    self.sync_weights()
+    return self.llm.generate(prompts, sampling_params = self.sampling_params, use_tqdm = False)
+"""
+
+_GENERATE_TRL_0_22 = """
+def generate(self, prompts, **kwargs):
+    if self.enable_sleep_mode:
+        self.llm.wake_up()
+    self.llm.collective_rpc("reload_weights")
+    return self.llm.generate(prompts, sampling_params = self.sampling_params, use_tqdm = False)
+"""
+
+_GENERATE_CHAT = """
+def generate(self, prompts, **kwargs):
+    self.sync_weights()
+    return self.llm.chat(prompts, sampling_params = self.sampling_params)
+"""
+
+_GENERATE_SERVER = """
+def generate(self, prompts, **kwargs):
+    return self.client.generate(prompts)
+"""
+
+# Unanchorable sync_weights: reaches the all-or-nothing rollback branch.
+_SYNC_WEIGHTS_UNPATCHABLE = """
+def sync_weights(self, tags = None):
+    self.llm.collective_rpc("update_weights")
+"""
+
+
+class FakeEngine:
+    """shared_weights = True marks an engine holding live training weights; pass the LoRA on each call."""
+
+    shared_weights = True
+
+    def __init__(
+        self,
+        log,
+        shared_weights = True,
+    ):
+        self.log = log
+        self.shared_weights = shared_weights
+        self.woken = 0
+
+    def generate(self, *args, **kwargs):
+        self.log.append(("generate", kwargs.get("lora_request", "ABSENT")))
+        return ["generated"]
+
+    def chat(self, *args, **kwargs):
+        self.log.append(("chat", kwargs.get("lora_request", "ABSENT")))
+        return ["chatted"]
+
+    def collective_rpc(self, method, *args, **kwargs):
+        self.log.append(("collective_rpc", method))
+        return "rpc_ran"
+
+    def wake_up(self, *args, **kwargs):
+        self.woken += 1
+        self.log.append(("wake_up", kwargs.get("tags", None)))
+
+
+def _rl_replacements():
+    from unsloth.models import rl_replacements
+    return rl_replacements
+
+
+def _build_fake_trl(
+    monkeypatch,
+    generate_src,
+    sync_src = _SYNC_WEIGHTS,
+    version = "1.10.0",
+):
+    """Installs the fake module through monkeypatch, so sys.modules reverts regardless of test order."""
+    class_src = (
+        "class VLLMGeneration:\n"
+        + "\n".join(
+            textwrap.indent(textwrap.dedent(src), "    ")
+            for src in (_INIT_VLLM, sync_src, generate_src)
+        )
+        + "\n"
+    )
+
+    # inspect.getsource is how the patch reads these methods back out.
+    filename = f"<fake_trl_{version}_vllm_generation>"
+    monkeypatch.setitem(
+        linecache.cache,
+        filename,
+        (len(class_src), None, [line + "\n" for line in class_src.splitlines()], filename),
+    )
+
+    vllm_generation = types.ModuleType("trl.generation.vllm_generation")
+    vllm_generation.__file__ = filename
+    vllm_generation.__spec__ = importlib.machinery.ModuleSpec(
+        name = "trl.generation.vllm_generation",
+        loader = None,
+        origin = filename,
+    )
+    vllm_generation.LLM = FakeEngine
+    exec(compile(class_src, filename, "exec"), vllm_generation.__dict__)
+
+    generation = types.ModuleType("trl.generation")
+    generation.__spec__ = importlib.machinery.ModuleSpec(
+        name = "trl.generation",
+        loader = None,
+        origin = "<fake trl>",
+    )
+    generation.vllm_generation = vllm_generation
+
+    # The patch gates on find_spec('trl'), which resolves from sys.modules.
+    trl = types.ModuleType("trl")
+    trl.__spec__ = importlib.machinery.ModuleSpec(name = "trl", loader = None, origin = "<fake trl>")
+    trl.__spec__.submodule_search_locations = []
+    trl.__path__ = []
+    trl.__version__ = version
+    trl.generation = generation
+
+    monkeypatch.setitem(sys.modules, "trl", trl)
+    monkeypatch.setitem(sys.modules, "trl.generation", generation)
+    monkeypatch.setitem(sys.modules, "trl.generation.vllm_generation", vllm_generation)
+    monkeypatch.setattr(
+        _rl_replacements(),
+        "importlib_version",
+        lambda name: version if name == "trl" else "0",
+    )
+    return vllm_generation.VLLMGeneration
+
+
+def _make_generation(
+    cls,
+    log,
+    shared_weights = True,
+    with_lora = True,
+    sleeping = True,
+):
+    """A `VLLMGeneration` instance shaped the way unsloth's `_init_vllm` leaves it."""
+    self = cls.__new__(cls)
+    self.llm = FakeEngine(log, shared_weights = shared_weights)
+    self.mode = "colocate"
+    self.enable_sleep_mode = True
+    self._llm_weights_sleeping = sleeping
+    self.sampling_params = {"n": 1}
+    if with_lora:
+        self.unsloth_fast_inference_lora = True
+        self._unsloth_load_lora = lambda name, load_tensors = False: f"LORA[{name}|{load_tensors}]"
+    return self
+
+
+def _lora_requests(log, kind = "generate"):
+    return [entry[1] for entry in log if entry[0] == kind]
+
+
+def _lora_name():
+    """Recomputed, not hardcoded: the suffix depends on whether CUDA_VISIBLE_DEVICES is set."""
+    name = "vllm_gen_lora"
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        name += "_" + os.environ.get("CUDA_VISIBLE_DEVICES", "0").replace(",", "")
+    return name
+
+
+def test_lora_reaches_engine_without_reload_weights_anchor(monkeypatch):
+    """TRL >= 1.10.0 generate has no reload_weights line; the LoRA adapter must still reach the engine."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    assert cls.generate(self, ["hello"]) == ["generated"]
+
+    requests = _lora_requests(log)
+    assert requests, f"engine.generate was never called: {log}"
+    assert all(isinstance(r, str) and r.startswith("LORA[vllm_gen_lora") for r in requests), (
+        f"vLLM was asked to sample without the adapter -> rollouts come from the "
+        f"BASE model. lora_request values: {requests}"
+    )
+    assert all(
+        "|True" in r for r in requests
+    ), f"the adapter tensors were not loaded (load_tensors=True): {requests}"
+
+
+def test_trl_0_22_shape_keeps_working(monkeypatch):
+    """The older `generate`, with the reload_weights call, must not regress."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_0_22, version = "0.28.0")
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    assert cls.generate(self, ["hello"]) == ["generated"]
+
+    requests = _lora_requests(log)
+    assert requests and all(
+        str(r).startswith("LORA[vllm_gen_lora") for r in requests
+    ), f"adapter missing on the 0.22.2-era shape: {log}"
+    # The shared engine already holds live weights; reload_weights would reload the checkpoint.
+    assert (
+        ("collective_rpc", "reload_weights") not in log
+    ), f"reload_weights reached the shared engine and clobbered the trained weights: {log}"
+
+
+def test_chat_rollouts_get_the_adapter_too(monkeypatch):
+    """Conversational rollouts go through `LLM.chat`, same adapter requirement."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_CHAT)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    assert cls.generate(self, [[{"role": "user", "content": "hi"}]]) == ["chatted"]
+
+    requests = _lora_requests(log, kind = "chat")
+    assert requests and all(
+        str(r).startswith("LORA[vllm_gen_lora") for r in requests
+    ), f"adapter missing on llm.chat: {log}"
+
+
+def test_engine_is_restored_after_the_call(monkeypatch):
+    """The override must not outlive generate, since the same engine backs model.fast_generate."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    cls.generate(self, ["hello"])
+
+    for name in ("generate", "chat", "collective_rpc"):
+        assert name not in self.llm.__dict__, f"{name} override outlived the call"
+
+    log.clear()
+    self.llm.generate(["direct call, e.g. model.fast_generate"])
+    assert _lora_requests(log) == [
+        "ABSENT"
+    ], f"a direct engine call picked up an injected lora_request: {log}"
+
+
+def test_pre_existing_instance_attribute_is_put_back(monkeypatch):
+    """Restoring must not delete an override the engine already carried."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+
+    def sentinel(*args, **kwargs):
+        log.append(("generate", kwargs.get("lora_request", "ABSENT")))
+        return ["generated"]
+
+    self.llm.generate = sentinel
+    cls.generate(self, ["hello"])
+
+    assert (
+        self.llm.__dict__.get("generate", None) is sentinel
+    ), "the engine's own generate was deleted instead of restored"
+    assert all(str(r).startswith("LORA[") for r in _lora_requests(log)), log
+
+
+def test_engine_trl_created_itself_is_left_alone(monkeypatch):
+    """No shared weights and no unsloth LoRA -> upstream behaviour, untouched."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_0_22, version = "0.28.0")
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log, shared_weights = False, with_lora = False)
+    assert cls.generate(self, ["hello"]) == ["generated"]
+
+    assert _lora_requests(log) == [
+        "ABSENT"
+    ], f"unsloth injected an adapter into an engine TRL owns: {log}"
+    assert ("collective_rpc", "reload_weights") in log, (
+        f"TRL's own reload_weights was suppressed on an engine unsloth does not "
+        f"share weights with: {log}"
+    )
+
+
+def test_server_mode_falls_through(monkeypatch):
+    """Server mode has no `self.llm` at all; the wrapper must just delegate."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_SERVER)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = cls.__new__(cls)
+    self.llm = None
+    self.mode = "server"
+    self.client = types.SimpleNamespace(
+        generate = lambda prompts, **kwargs: log.append(("client", prompts)) or ["served"],
+    )
+    assert cls.generate(self, ["hello"]) == ["served"]
+    assert log == [("client", ["hello"])]
+
+
+def test_sleeping_engine_is_woken_before_sync_weights_returns(monkeypatch):
+    """The shared-weights guard returns early in sync_weights, so the engine needs an explicit wake-up."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log, sleeping = True)
+    cls.generate(self, ["hello"])
+
+    assert self.llm.woken == 1, f"engine was never woken: {log}"
+    assert self._llm_weights_sleeping is False
+    cls.generate(self, ["again"])
+    assert self.llm.woken == 1, f"engine woken again while already awake: {log}"
+
+
+def test_failed_patch_rolls_all_three_methods_back(monkeypatch):
+    """A failed patch must roll back all three methods; half-patched samples the base model silently."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10, sync_src = _SYNC_WEIGHTS_UNPATCHABLE)
+    originals = {name: getattr(cls, name) for name in ("_init_vllm", "sync_weights", "generate")}
+
+    _rl_replacements().vllm_generation_init_patch()
+
+    for name, original in originals.items():
+        assert getattr(cls, name) is original, (
+            f"{name} stayed patched after a sibling patch failed; VLLMGeneration "
+            f"is now half-patched"
+        )
+
+
+def test_patching_twice_does_not_double_wrap(monkeypatch):
+    """`vllm_generation_init_patch` runs once per RL trainer patch, so it repeats."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    rl_replacements = _rl_replacements()
+
+    rl_replacements.vllm_generation_init_patch()
+    after_first = {name: getattr(cls, name) for name in ("_init_vllm", "sync_weights", "generate")}
+    rl_replacements.vllm_generation_init_patch()
+
+    for name, method in after_first.items():
+        assert getattr(cls, name) is method, f"{name} was re-patched on the second call"
+
+    # Unwraps to TRL's function so inspect.getsource / signature still report TRL's generate.
+    wrapped = getattr(cls.generate, "__wrapped__", None)
+    assert wrapped is not None, "the wrapper did not set __wrapped__"
+    assert getattr(wrapped, "__wrapped__", None) is None, "generate was wrapped twice"
+
+    log = []
+    self = _make_generation(cls, log)
+    cls.generate(self, ["hello"])
+    assert len(_lora_requests(log)) == 1, f"generate reached the engine twice: {log}"
+
+
+# `lora_request` is keyword-only on LLM.generate but positional on LLM.chat (index moved in 0.18.0),
+# so injecting it as a keyword can raise 'got multiple values'.
+class VLLMSignatureEngine(FakeEngine):
+    """`FakeEngine` with vLLM 0.27.1's real parameter lists on both entry points."""
+
+    def generate(
+        self,
+        prompts,
+        sampling_params = None,
+        *,
+        use_tqdm = True,
+        lora_request = None,
+        priority = None,
+        tokenization_kwargs = None,
+        mm_processor_kwargs = None,
+    ):
+        self.log.append(("generate", lora_request if lora_request is not None else "ABSENT"))
+        return ["generated"]
+
+    def chat(
+        self,
+        messages,
+        sampling_params = None,
+        use_tqdm = True,
+        lora_request = None,
+        chat_template = None,
+        chat_template_content_format = "auto",
+        add_generation_prompt = True,
+        continue_final_message = False,
+        tools = None,
+        chat_template_kwargs = None,
+        tokenization_kwargs = None,
+        mm_processor_kwargs = None,
+    ):
+        self.log.append(("chat", lora_request if lora_request is not None else "ABSENT"))
+        return ["chatted"]
+
+
+_GENERATE_CHAT_POSITIONAL = """
+def generate(self, prompts, **kwargs):
+    self.sync_weights()
+    return self.llm.chat(prompts, self.sampling_params, False, self.caller_lora)
+"""
+
+
+def test_the_adapter_still_reaches_a_signature_accurate_engine(monkeypatch):
+    """`generate`'s keyword-only `lora_request` accepts the injected keyword."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_TRL_1_10)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    self.llm = VLLMSignatureEngine(log)
+
+    assert cls.generate(self, ["hello"]) == ["generated"]
+    assert _lora_requests(log) == ["LORA[%s|True]" % _lora_name()], log
+
+
+def test_a_positionally_supplied_adapter_is_not_injected_over(monkeypatch):
+    """A positionally passed lora_request must not get a keyword added on top; that is a TypeError."""
+    cls = _build_fake_trl(monkeypatch, _GENERATE_CHAT_POSITIONAL)
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    self.llm = VLLMSignatureEngine(log)
+    self.caller_lora = "CALLER_LORA"
+
+    assert cls.generate(self, [[{"role": "user", "content": "hi"}]]) == ["chatted"]
+    assert _lora_requests(log, kind = "chat") == ["CALLER_LORA"], log
+
+
+def test_an_explicit_none_adapter_is_overridden(monkeypatch):
+    """A keyword lora_request=None is overridden; the shared-weights engine has only base weights."""
+    cls = _build_fake_trl(
+        monkeypatch,
+        """
+def generate(self, prompts, **kwargs):
+    self.sync_weights()
+    return self.llm.generate(prompts, sampling_params = self.sampling_params, lora_request = None)
+""",
+    )
+    _rl_replacements().vllm_generation_init_patch()
+
+    log = []
+    self = _make_generation(cls, log)
+    self.llm = VLLMSignatureEngine(log)
+
+    assert cls.generate(self, ["hello"]) == ["generated"]
+    assert _lora_requests(log) == ["LORA[%s|True]" % _lora_name()], log
+
+
+# TRL >= 0.28 builds SamplingParams inside generate, so the trainer passes _unsloth_vllm_sampling_params.
+_GENERATE_BUILDS_SAMPLING_PARAMS = """
+def generate(self, prompts, **kwargs):
+    self.sync_weights()
+    generation_kwargs = {"n": 1, "temperature": 1.0, "min_p": 0.0, "max_tokens": 64, "logprobs": 0}
+    generation_kwargs.update(self.generation_kwargs)
+    sampling_params = SamplingParams(**generation_kwargs)
+    if self.fail:
+        raise RuntimeError("generate failed")
+    return self.llm.generate(prompts, sampling_params = sampling_params)
+"""
+
+
+class FakeSamplingParams:
+    def __init__(
+        self,
+        n = 1,
+        temperature = 1.0,
+        min_p = 0.0,
+        seed = None,
+        max_tokens = 16,
+        logprobs = None,
+        stop = None,
+        include_stop_str_in_output = False,
+    ):
+        self.n = n
+        self.temperature = temperature
+        self.min_p = min_p
+        self.seed = seed
+        self.max_tokens = max_tokens
+        self.logprobs = logprobs
+        self.stop = [] if stop is None else stop
+        self.include_stop_str_in_output = include_stop_str_in_output
+
+
+class SamplingParamsEngine(FakeEngine):
+    def generate(self, *args, **kwargs):
+        self.log.append(("sampling_params", kwargs.get("sampling_params")))
+        return ["generated"]
+
+
+def _sampling_generation(
+    monkeypatch,
+    user_sampling_params,
+    shared_weights = True,
+):
+    cls = _build_fake_trl(monkeypatch, _GENERATE_BUILDS_SAMPLING_PARAMS)
+    module = sys.modules["trl.generation.vllm_generation"]
+    module.SamplingParams = FakeSamplingParams
+    _rl_replacements().vllm_generation_init_patch()
+    log = []
+    self = _make_generation(cls, log, shared_weights = shared_weights, with_lora = shared_weights)
+    self.llm = SamplingParamsEngine(log, shared_weights = shared_weights)
+    self.generation_kwargs = {}
+    self.fail = False
+    if user_sampling_params is not None:
+        self._unsloth_vllm_sampling_params = user_sampling_params
+    return cls, module, self, log
+
+
+def _sent_sampling_params(log):
+    sent = [entry[1] for entry in log if entry[0] == "sampling_params"]
+    assert len(sent) == 1, log
+    return sent[0]
+
+
+def test_user_vllm_sampling_params_reach_the_engine(monkeypatch):
+    user = FakeSamplingParams(
+        min_p = 0.1,
+        seed = 3407,
+        temperature = 0.6,
+        stop = ["<|im_end|>"],
+        include_stop_str_in_output = True,
+    )
+    cls, module, self, log = _sampling_generation(monkeypatch, user)
+    assert cls.generate(self, ["hello"]) == ["generated"]
+    sent = _sent_sampling_params(log)
+    assert isinstance(sent, FakeSamplingParams)
+    assert sent.min_p == 0.1
+    assert sent.stop == ["<|im_end|>"]
+    assert sent.include_stop_str_in_output is True
+    assert sent.seed is None
+    assert sent.temperature == 1.0
+    assert sent.max_tokens == 64
+    assert module.SamplingParams is FakeSamplingParams
+
+
+def test_no_user_sampling_params_leaves_trl_untouched(monkeypatch):
+    cls, module, self, log = _sampling_generation(monkeypatch, None)
+    cls.generate(self, ["hello"])
+    sent = _sent_sampling_params(log)
+    assert (sent.min_p, sent.stop, sent.include_stop_str_in_output) == (0.0, [], False)
+    assert module.SamplingParams is FakeSamplingParams
+
+
+def test_server_mode_ignores_user_sampling_params(monkeypatch):
+    cls, module, self, log = _sampling_generation(
+        monkeypatch, FakeSamplingParams(min_p = 0.1), shared_weights = False
+    )
+    cls.generate(self, ["hello"])
+    assert _sent_sampling_params(log).min_p == 0.0
+    assert module.SamplingParams is FakeSamplingParams
+
+
+def test_sampling_params_restored_when_generate_raises(monkeypatch):
+    cls, module, self, log = _sampling_generation(monkeypatch, FakeSamplingParams(min_p = 0.1))
+    self.fail = True
+    with pytest.raises(RuntimeError, match = "generate failed"):
+        cls.generate(self, ["hello"])
+    assert module.SamplingParams is FakeSamplingParams

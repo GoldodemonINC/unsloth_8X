@@ -1,0 +1,234 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""Observes the idle app in a browser and fails on any poll path missing from the log budget."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from collections import Counter
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from playwright.sync_api import sync_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _playwright_robust import (  # noqa: E402
+    chromium_launch_args,
+    install_wall_clock_watchdog,
+    wait_for_health,
+)
+
+_REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_REPO / "studio" / "backend" / "tests"))
+from log_budget.session import ALL_POLLS  # noqa: E402
+
+BASE = os.environ["BASE_URL"]
+OLD = os.environ["STUDIO_OLD_PW"]
+NEW = os.environ["STUDIO_NEW_PW"]
+ART = Path(os.environ.get("PW_ART_DIR", "logs/playwright-declared-polls"))
+ART.mkdir(parents = True, exist_ok = True)
+
+SETTLE_S = float(os.environ.get("PW_POLL_SETTLE_S", "20"))
+WATCH_S = float(os.environ.get("PW_POLL_WATCH_S", "75"))
+WALL_TIMEOUT_S = SETTLE_S + WATCH_S + 180
+
+# Three identical idle requests is a timer; anything cleverer is a coin toss on a shared runner.
+POLL_THRESHOLD = 3
+
+SECTIONS = ("Model hub", "Projects", "Images", "Train", "New chat")
+
+# Measured floor: a no-GPU walk repeats exactly /api/inference/monitor and /api/export/status.
+MIN_POLLED_PATHS = int(os.environ.get("PW_POLL_MIN_PATHS", "2"))
+
+
+def info(message: str) -> None:
+    print(message, flush = True)
+
+
+def api(
+    path: str,
+    payload: dict,
+    token: str | None = None,
+) -> dict:
+    request = urllib.request.Request(
+        f"{BASE}{path}",
+        data = json.dumps(payload).encode(),
+        headers = {
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {token}"} if token else {}),
+        },
+    )
+    with urllib.request.urlopen(request, timeout = 30) as response:
+        return json.loads(response.read().decode() or "{}")
+
+
+def normalize(url: str) -> str:
+    """Path only. The query string is part of the dedup identity in the middleware, but a
+    poll declares a PATH, and a cursor or cache-buster would otherwise make every hit look
+    unique and hide the poll entirely."""
+    return urlsplit(url).path
+
+
+def studio_path(url: str, base: str) -> str | None:
+    """The path of a request this Studio serves, or None for any other origin.
+
+    The budget is about lines in this server's log. The Hub calls huggingface.co straight from
+    the browser (@huggingface/hub listModels / modelInfo), and Hugging Face's own /api/models
+    shares a path with nothing here; counted by path alone it read as an undeclared Studio poll.
+    """
+    request, studio = urlsplit(url), urlsplit(base)
+    if (request.scheme, request.netloc) != (studio.scheme, studio.netloc):
+        return None
+    return normalize(url)
+
+
+def main() -> int:
+    declared = set(ALL_POLLS)
+
+    if not wait_for_health(BASE, info = info):
+        info("FAIL backend never became healthy")
+        return 1
+
+    # Tolerate an already-rotated password so a second suite on the same instance can still log in.
+    try:
+        token = api("/api/auth/login", {"username": "unsloth", "password": OLD})["access_token"]
+    except urllib.error.HTTPError as exc:
+        if exc.code != 401:
+            raise
+        token = None
+    if token is not None:
+        try:
+            api("/api/auth/change-password", {"current_password": OLD, "new_password": NEW}, token)
+        except urllib.error.HTTPError:
+            pass
+    session = api("/api/auth/login", {"username": "unsloth", "password": NEW})
+
+    seed_js = (
+        "(() => {"
+        f"  localStorage.setItem('unsloth_auth_token', {json.dumps(session['access_token'])});"
+        f"  localStorage.setItem('unsloth_refresh_token', "
+        f"{json.dumps(session.get('refresh_token', ''))});"
+        "})();"
+    )
+
+    seen: Counter[str] = Counter()
+    # Count per dwell: a per-view fetch repeated across sections would look like a timer in the total.
+    dwell_counts: Counter[str] = Counter()
+    per_dwell_max: Counter[str] = Counter()
+    counting = False
+
+    def close_dwell() -> None:
+        for path, n in dwell_counts.items():
+            if n > per_dwell_max[path]:
+                per_dwell_max[path] = n
+        dwell_counts.clear()
+
+    with sync_playwright() as p:
+        install_wall_clock_watchdog(WALL_TIMEOUT_S, label = "declared-polls", info = info)
+        browser = p.chromium.launch(headless = True, args = chromium_launch_args())
+        context = browser.new_context(
+            viewport = {"width": 1440, "height": 900}, reduced_motion = "reduce"
+        )
+        context.add_init_script(seed_js)
+        page = context.new_page()
+
+        def on_request(request) -> None:
+            if not counting:
+                return
+            path = studio_path(request.url, BASE)
+            if path and path.startswith("/api/"):
+                seen[path] += 1
+                dwell_counts[path] += 1
+
+        page.on("request", on_request)
+        page.goto(BASE, wait_until = "domcontentloaded", timeout = 60_000)
+
+        page.wait_for_timeout(int(SETTLE_S * 1000))
+        counting = True
+
+        # Most timers belong to a section, so dwell on each long enough for a 5s poll to fire several times.
+        dwell = max(int(WATCH_S * 1000 / (len(SECTIONS) + 1)), 20_000)
+        for label in SECTIONS:
+            try:
+                page.get_by_text(label, exact = True).first.click(timeout = 8_000)
+            except Exception:
+                info(f"note: could not reach {label!r}")
+                continue
+            page.wait_for_timeout(dwell)
+            close_dwell()
+        page.wait_for_timeout(dwell)
+        close_dwell()
+        counting = False
+
+        current = normalize(page.url)
+        context.close()
+        browser.close()
+
+    if current.startswith(("/login", "/change-password")):
+        info(f"FAIL still on {current} after seeding a token; the run proved nothing")
+        return 1
+
+    polled = {path: n for path, n in per_dwell_max.items() if n >= POLL_THRESHOLD}
+    undeclared = sorted(set(polled) - declared)
+    (ART / "observed_polls.json").write_text(
+        json.dumps(
+            {
+                "watch_seconds": WATCH_S,
+                "threshold": POLL_THRESHOLD,
+                "totals": dict(sorted(seen.items())),
+                "per_dwell_max": dict(sorted(per_dwell_max.items())),
+                "polled": dict(sorted(polled.items())),
+                "undeclared": undeclared,
+            },
+            indent = 2,
+        ),
+        encoding = "utf-8",
+    )
+
+    info(
+        f"watched {WATCH_S:.0f}s: {len(seen)} distinct API paths, "
+        f"{len(polled)} repeated {POLL_THRESHOLD}x or more inside a single dwell"
+    )
+
+    if len(polled) < MIN_POLLED_PATHS:
+        info(
+            f"FAIL saw only {len(polled)} polled path(s), expected at least "
+            f"{MIN_POLLED_PATHS}; this run cannot vouch for anything"
+        )
+        for path, n in sorted(polled.items()):
+            info(f"  {path}  {n}x")
+        return 1
+
+    # Declared-but-unobserved is not a failure: some polls only run while a pane is open.
+    unobserved = sorted(declared - set(polled))
+    if unobserved:
+        info(
+            f"note: {len(unobserved)} declared polls not seen while idle "
+            f"(expected for pane-scoped and busy-only polls)"
+        )
+
+    if undeclared:
+        info("")
+        info("FAIL these paths are polled by the app but are not in the log budget:")
+        for path in undeclared:
+            per_min = polled[path] * 60.0 / (WATCH_S / (len(SECTIONS) + 1))
+            info(f"  {path}   {polled[path]}x within one dwell (~{per_min:.1f}/min)")
+        info("")
+        info("Each one needs two lines, in studio/backend/tests/log_budget/session.py:")
+        info("  add the path to IDLE_POLLS (or BUSY_POLLS if it only runs during an")
+        info("  operation) with the interval its call site declares, and give it a class")
+        info("  in studio/backend/loggers/handlers.py. A path left unclassified logs")
+        info("  every single hit.")
+        return 1
+
+    info("PASS every polled path is declared and classified")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

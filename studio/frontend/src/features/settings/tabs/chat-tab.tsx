@@ -1,0 +1,874 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+import { SegmentedPill } from "@/components/segmented-control";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+  DEFAULT_THINKING_VISIBILITY,
+  DEFAULT_TOOL_VISIBILITY,
+  type PlusMenuItemId,
+  normaliseDisplayVisibility,
+  refreshModelDisclaimerPreference,
+  requestReplyFinishedPermission,
+  saveModelDisclaimerPreference,
+  useChatPreferencesStore,
+  useChatRuntimeStore,
+  usePlusMenuPrefsStore,
+} from "@/features/chat";
+import { PASTED_TEXT_THRESHOLD_CHOICES } from "@/features/chat/utils/pasted-text";
+import { refreshContextUsage } from "@/features/chat/utils/refresh-context-usage";
+import { formatBindingLabel, isMacPlatform } from "../lib/keyboard-shortcuts";
+import { useIsAccountOwner } from "@/features/auth";
+import { useUserProfileStore } from "@/features/profile";
+import { type TranslationKey, useT } from "@/i18n";
+import { toast } from "@/lib/toast";
+import { cn } from "@/lib/utils";
+import {
+  Bookmark02Icon,
+  Download01Icon,
+  FileDatabaseIcon,
+  Folder01Icon,
+  LibrariesIcon,
+  McpServerIcon,
+  Scroll01Icon,
+  Telescope02Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { CursorInWindowIcon } from "@/lib/browser-use-icon";
+import { useNavigate } from "@tanstack/react-router";
+import { Columns2Icon } from "lucide-react";
+import { useEffect, useId, useState } from "react";
+import type { ReactNode } from "react";
+import {
+  type CurrentDatePromptSettings,
+  loadCurrentDatePrompt,
+  updateCurrentDatePrompt,
+} from "../api/current-date-prompt";
+import {
+  type ToolResultLimitSettings,
+  loadToolResultLimit,
+  toolResultLimitChoices,
+  updateToolResultLimit,
+} from "../api/tool-result-limit";
+import { ChatMenuOrderList } from "../components/chat-menu-order-list";
+import { FirstTokenTimeoutRow } from "../components/first-token-timeout-row";
+import { SettingsRow } from "../components/settings-row";
+import { ComposerSettings } from "../components/composer-settings";
+import { SettingsSection } from "../components/settings-section";
+import { useSettingsDialogStore } from "../stores/settings-dialog-store";
+
+// Adjustable "+" menu items shown in settings; the list shows them in the user's order. Icons mirror
+// the ones used in the composer + menu itself.
+const PLUS_MENU_ICON_CLASS = "size-[calc(18px*var(--ui-space-scale,1))]";
+const PLUS_MENU_SETTINGS: {
+  id: PlusMenuItemId;
+  labelKey: TranslationKey;
+  icon: ReactNode;
+}[] = [
+  {
+    id: "deepResearch",
+    labelKey: "settings.chat.menu.deepResearch",
+    icon: (
+      <HugeiconsIcon
+        icon={Telescope02Icon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "browserUse",
+    labelKey: "settings.chat.menu.browserUse",
+    icon: (
+      <HugeiconsIcon
+        icon={CursorInWindowIcon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "chatWithFiles",
+    labelKey: "settings.chat.menu.chatWithFiles",
+    icon: (
+      <HugeiconsIcon
+        icon={FileDatabaseIcon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "mcp",
+    labelKey: "settings.chat.menu.mcp",
+    icon: (
+      <HugeiconsIcon
+        icon={McpServerIcon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "skills",
+    labelKey: "settings.chat.menu.skills",
+    icon: (
+      <HugeiconsIcon
+        icon={Scroll01Icon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "savedPrompts",
+    labelKey: "settings.chat.menu.savedPrompts",
+    icon: (
+      <HugeiconsIcon
+        icon={Bookmark02Icon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "compareChat",
+    labelKey: "settings.chat.menu.compareChat",
+    icon: <Columns2Icon className={PLUS_MENU_ICON_CLASS} />,
+  },
+  {
+    id: "exportChat",
+    labelKey: "settings.chat.menu.exportChat",
+    icon: (
+      <HugeiconsIcon
+        icon={Download01Icon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+  {
+    id: "projects",
+    labelKey: "shell.navigation.projects",
+    icon: (
+      <HugeiconsIcon
+        icon={Folder01Icon}
+        strokeWidth={2}
+        className={PLUS_MENU_ICON_CLASS}
+      />
+    ),
+  },
+];
+
+// Install-wide, so owner-only: how much of one tool result the model reads.
+function ToolResultLimitRow() {
+  const t = useT();
+  const [settings, setSettings] = useState<ToolResultLimitSettings | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadToolResultLimit(t("settings.chat.toolResultLimitLoadError"))
+      .then((loaded) => {
+        if (cancelled) return;
+        setSettings(loaded);
+        setError(null);
+      })
+      .catch((loadError) => {
+        if (cancelled) return;
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : t("settings.chat.toolResultLimitLoadError"),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  const save = async (maxChars: number) => {
+    setSaving(true);
+    setError(null);
+    try {
+      setSettings(
+        await updateToolResultLimit(
+          maxChars,
+          t("settings.chat.toolResultLimitSaveError"),
+        ),
+      );
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : t("settings.chat.toolResultLimitSaveError"),
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const note = settings?.lockedByEnvironment
+    ? t("settings.chat.toolResultLimitLocked")
+    : error;
+  return (
+    <SettingsRow
+      label={t("settings.chat.toolResultLimit")}
+      description={t("settings.chat.toolResultLimitDescription", {
+        count: (
+          settings?.defaultChars ?? 16000
+        ).toLocaleString(),
+      })}
+      hint={t("settings.chat.toolResultLimitHint")}
+      below={
+        note ? (
+          <span
+            role={settings?.lockedByEnvironment ? undefined : "alert"}
+            className={cn(
+              "max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs",
+              settings?.lockedByEnvironment
+                ? "text-muted-foreground"
+                : "text-destructive",
+            )}
+          >
+            {note}
+          </span>
+        ) : null
+      }
+    >
+      <Select
+        value={settings ? String(settings.maxChars) : undefined}
+        disabled={!settings || saving || settings.lockedByEnvironment}
+        onValueChange={(value) => {
+          const next = Number(value);
+          if (settings && next !== settings.maxChars) void save(next);
+        }}
+      >
+        <SelectTrigger
+          className="w-44"
+          aria-label={t("settings.chat.toolResultLimit")}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {settings
+            ? toolResultLimitChoices(settings).map((choice) => (
+                <SelectItem key={choice} value={String(choice)}>
+                  {choice === settings.defaultChars
+                    ? t("settings.chat.toolResultLimitDefault", {
+                        count: choice.toLocaleString(),
+                      })
+                    : choice.toLocaleString()}
+                </SelectItem>
+              ))
+            : null}
+        </SelectContent>
+      </Select>
+    </SettingsRow>
+  );
+}
+
+export function ChatTab() {
+  const isOwner = useIsAccountOwner();
+  const t = useT();
+  const pillId = useId();
+  const navigate = useNavigate();
+  const resetPlusMenu = usePlusMenuPrefsStore((state) => state.resetMenu);
+  const autoTitle = useChatRuntimeStore((state) => state.autoTitle);
+  const setAutoTitle = useChatRuntimeStore((state) => state.setAutoTitle);
+  const projectAttachmentTarget = useChatRuntimeStore(
+    (state) => state.projectAttachmentTarget,
+  );
+  const setProjectAttachmentTarget = useChatRuntimeStore(
+    (state) => state.setProjectAttachmentTarget,
+  );
+  const rememberParamsPerModel = useChatRuntimeStore(
+    (state) => state.rememberParamsPerModel,
+  );
+  const setRememberParamsPerModel = useChatRuntimeStore(
+    (state) => state.setRememberParamsPerModel,
+  );
+  const autoCompactEnabled = useChatRuntimeStore(
+    (state) => state.autoCompactEnabled,
+  );
+  const setAutoCompactEnabled = useChatRuntimeStore(
+    (state) => state.setAutoCompactEnabled,
+  );
+  const keepRunningWhenTabClosed = useChatRuntimeStore(
+    (state) => state.keepRunningWhenTabClosed,
+  );
+  const setKeepRunningWhenTabClosed = useChatRuntimeStore(
+    (state) => state.setKeepRunningWhenTabClosed,
+  );
+  const showGreetingSloth = useUserProfileStore((s) => s.showGreetingSloth);
+  const setShowGreetingSloth = useUserProfileStore(
+    (s) => s.setShowGreetingSloth,
+  );
+  const searchImages = useChatRuntimeStore((state) => state.searchImages);
+  const setSearchImages = useChatRuntimeStore((state) => state.setSearchImages);
+  const hydratePersistedSettings = useChatRuntimeStore(
+    (state) => state.hydratePersistedSettings,
+  );
+  const expandQuantizations = useChatRuntimeStore(
+    (state) => state.expandQuantizations,
+  );
+  const setExpandQuantizations = useChatRuntimeStore(
+    (state) => state.setExpandQuantizations,
+  );
+  const showAllQuantizations = useChatRuntimeStore(
+    (state) => state.showAllQuantizations,
+  );
+  const setShowAllQuantizations = useChatRuntimeStore(
+    (state) => state.setShowAllQuantizations,
+  );
+  const showMemoryBar = useChatRuntimeStore((state) => state.showMemoryBar);
+  const setShowMemoryBar = useChatRuntimeStore(
+    (state) => state.setShowMemoryBar,
+  );
+  const fitOnDeviceOnly = useChatRuntimeStore((state) => state.fitOnDeviceOnly);
+  const setFitOnDeviceOnly = useChatRuntimeStore(
+    (state) => state.setFitOnDeviceOnly,
+  );
+  const showModelDisclaimer = useChatPreferencesStore(
+    (state) => state.showModelDisclaimer,
+  );
+  const showResponseModel = useChatPreferencesStore(
+    (state) => state.showResponseModel,
+  );
+  const showInlineEditResponse = useChatPreferencesStore(
+    (state) => state.showInlineEditResponse,
+  );
+  const setShowInlineEditResponse = useChatPreferencesStore(
+    (state) => state.setShowInlineEditResponse,
+  );
+  const setShowResponseModel = useChatPreferencesStore(
+    (state) => state.setShowResponseModel,
+  );
+  const autoScrollWhileGenerating = useChatPreferencesStore(
+    (state) => state.autoScrollWhileGenerating,
+  );
+  const setAutoScrollWhileGenerating = useChatPreferencesStore(
+    (state) => state.setAutoScrollWhileGenerating,
+  );
+  const showScrollToBottomButton = useChatPreferencesStore(
+    (state) => state.showScrollToBottomButton,
+  );
+  const setShowScrollToBottomButton = useChatPreferencesStore(
+    (state) => state.setShowScrollToBottomButton,
+  );
+  const notifyWhenReplyFinishes = useChatPreferencesStore(
+    (state) => state.notifyWhenReplyFinishes,
+  );
+  const setNotifyWhenReplyFinishes = useChatPreferencesStore(
+    (state) => state.setNotifyWhenReplyFinishes,
+  );
+  const thinkingVisibility = useChatPreferencesStore(
+    (state) => state.thinkingVisibility,
+  );
+  const setThinkingVisibility = useChatPreferencesStore(
+    (state) => state.setThinkingVisibility,
+  );
+  const [currentDatePrompt, setCurrentDatePrompt] =
+    useState<CurrentDatePromptSettings | null>(null);
+  const [currentDatePromptError, setCurrentDatePromptError] = useState<
+    string | null
+  >(null);
+  const [isSavingCurrentDatePrompt, setIsSavingCurrentDatePrompt] =
+    useState(false);
+  const toolVisibility = useChatPreferencesStore(
+    (state) => state.toolVisibility,
+  );
+  const setToolVisibility = useChatPreferencesStore(
+    (state) => state.setToolVisibility,
+  );
+  const foldToolActivityIntoThinking = useChatPreferencesStore(
+    (state) => state.foldToolActivityIntoThinking,
+  );
+  const setFoldToolActivityIntoThinking = useChatPreferencesStore(
+    (state) => state.setFoldToolActivityIntoThinking,
+  );
+  // Cannot coexist with always expanded. The stored preference is left alone so it comes back.
+  const foldBlockedByAlwaysExpanded = toolVisibility === "expanded";
+  const pastedTextMinChars = useChatPreferencesStore(
+    (state) => state.pastedTextMinChars,
+  );
+  const setPastedTextMinChars = useChatPreferencesStore(
+    (state) => state.setPastedTextMinChars,
+  );
+  // The platform's own paste-without-formatting chord, which the composer reads
+  // as "put it in the box" whatever this threshold says. macOS carries it on
+  // Option, that being the chord its Edit menu binds.
+  const macPlatform = isMacPlatform();
+  const plainPasteLabel = formatBindingLabel(
+    { code: "KeyV", mod: true, ctrl: false, shift: true, alt: macPlatform },
+    macPlatform,
+  );
+
+  useEffect(() => {
+    void hydratePersistedSettings();
+    refreshModelDisclaimerPreference().catch(() => undefined);
+  }, [hydratePersistedSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadCurrentDatePrompt(t("settings.chat.currentDate.loadError"))
+      .then((settings) => {
+        if (cancelled) return;
+        setCurrentDatePrompt(settings);
+        setCurrentDatePromptError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setCurrentDatePromptError(
+          error instanceof Error
+            ? error.message
+            : t("settings.chat.currentDate.loadError"),
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  const saveCurrentDatePrompt = async (enabled: boolean) => {
+    setIsSavingCurrentDatePrompt(true);
+    setCurrentDatePromptError(null);
+    try {
+      const settings = await updateCurrentDatePrompt(
+        enabled,
+        t("settings.chat.currentDate.saveError"),
+      );
+      setCurrentDatePrompt(settings);
+      void refreshContextUsage({ invalidate: true });
+    } catch (error) {
+      setCurrentDatePromptError(
+        error instanceof Error
+          ? error.message
+          : t("settings.chat.currentDate.saveError"),
+      );
+    } finally {
+      setIsSavingCurrentDatePrompt(false);
+    }
+  };
+
+  return (
+    <div className="settings-page">
+      <header className="flex flex-col gap-1">
+        <h1 className="text-xl font-semibold font-heading">
+          {t("settings.chat.title")}
+        </h1>
+      </header>
+
+      <SettingsSection title={t("settings.chat.library.label")} hideHeading>
+        <SettingsRow
+          label={t("settings.chat.library.label")}
+          description={t("settings.chat.library.description")}
+        >
+          <Button
+            variant="outline"
+            className="px-3.5"
+            onClick={() => {
+              useSettingsDialogStore.getState().closeDialog();
+              void navigate({ to: "/library", search: { show: "chats" } });
+            }}
+          >
+            <HugeiconsIcon icon={LibrariesIcon} strokeWidth={1.75} className="size-4" />
+            {t("settings.chat.library.action")}
+          </Button>
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.general.chatDefaults")}>
+        <ComposerSettings embedded={true} />
+        <SettingsRow
+          label={t("settings.chat.pastedTextThreshold")}
+          description={
+            pastedTextMinChars > 0
+              ? t("settings.chat.pastedTextShortDescription", {
+                  count: pastedTextMinChars.toLocaleString(),
+                })
+              : t("settings.chat.pastedTextOffDescription")
+          }
+          hint={t("settings.chat.pastedTextThresholdDescription", {
+            shortcut: plainPasteLabel,
+          })}
+        >
+          <Select
+            value={String(pastedTextMinChars)}
+            onValueChange={(value) => setPastedTextMinChars(Number(value))}
+          >
+            <SelectTrigger
+              className="w-36"
+              aria-label={t("settings.chat.pastedTextThreshold")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PASTED_TEXT_THRESHOLD_CHOICES.map((choice) => (
+                <SelectItem key={choice} value={String(choice)}>
+                  {choice === 0
+                    ? t("settings.chat.pastedTextThresholdOff")
+                    : choice.toLocaleString()}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.autoCompact")}
+          description={t("settings.chat.autoCompactDescription")}
+          hint={t("settings.chat.autoCompactHint")}
+        >
+          <Switch
+            aria-label={t("settings.chat.autoCompact")}
+            checked={autoCompactEnabled}
+            onCheckedChange={setAutoCompactEnabled}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.keepRunningWhenTabClosed")}
+          description={t("settings.chat.keepRunningWhenTabClosedDescription")}
+          hint={t("settings.chat.keepRunningWhenTabClosedHint")}
+        >
+          <Switch
+            aria-label={t("settings.chat.keepRunningWhenTabClosed")}
+            checked={keepRunningWhenTabClosed}
+            onCheckedChange={setKeepRunningWhenTabClosed}
+          />
+        </SettingsRow>
+        {isOwner ? <ToolResultLimitRow /> : null}
+        {isOwner ? <FirstTokenTimeoutRow /> : null}
+        <SettingsRow
+          label={t("settings.chat.autoScroll")}
+          description={t("settings.chat.autoScrollDescription")}
+        >
+          <div
+            className="hub-tab-toggle inline-flex h-8 items-center rounded-full"
+            role="group"
+            aria-label={t("settings.chat.autoScroll")}
+          >
+            {([true, false] as const).map((follow) => (
+              <button
+                key={String(follow)}
+                type="button"
+                aria-pressed={autoScrollWhileGenerating === follow}
+                onClick={() => setAutoScrollWhileGenerating(follow)}
+                className={cn(
+                  "relative inline-flex h-8 cursor-pointer items-center rounded-full px-3.5 text-ui-12 font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                  autoScrollWhileGenerating === follow
+                    ? "text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {autoScrollWhileGenerating === follow && (
+                  <SegmentedPill group={`${pillId}-auto-scroll`} />
+                )}
+                {t(
+                  follow
+                    ? "settings.chat.autoScrollAuto"
+                    : "settings.chat.autoScrollManual",
+                )}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.scrollToBottomButton")}
+          description={t("settings.chat.scrollToBottomButtonDescription")}
+        >
+          <Switch
+            aria-label={t("settings.chat.scrollToBottomButton")}
+            checked={showScrollToBottomButton}
+            onCheckedChange={setShowScrollToBottomButton}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.replyNotification")}
+          description={t("settings.chat.replyNotificationDescription")}
+        >
+          <Switch
+            aria-label={t("settings.chat.replyNotification")}
+            checked={notifyWhenReplyFinishes}
+            onCheckedChange={(checked) => {
+              setNotifyWhenReplyFinishes(checked);
+              if (!checked) return;
+              void requestReplyFinishedPermission().then((granted) => {
+                if (granted) return;
+                setNotifyWhenReplyFinishes(false);
+                toast.error(t("settings.chat.replyNotificationBlocked"));
+              });
+            }}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.chat.groups.conversations.title")}>
+        <SettingsRow
+          label={t("settings.chat.rememberParamsPerModel")}
+          description={t("settings.chat.rememberParamsPerModelDescription")}
+          hint={t("settings.chat.rememberParamsPerModelHint")}
+        >
+          <Switch
+            aria-label={t("settings.chat.rememberParamsPerModel")}
+            checked={rememberParamsPerModel}
+            onCheckedChange={setRememberParamsPerModel}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.currentDate.label")}
+          description={t("settings.chat.currentDate.description")}
+          below={
+            currentDatePromptError ? (
+              <span
+                role="alert"
+                className="max-w-[calc(260px*var(--ui-space-scale,1))] text-right text-xs text-destructive"
+              >
+                {currentDatePromptError}
+              </span>
+            ) : null
+          }
+        >
+          <Switch
+            aria-label={t("settings.chat.currentDate.label")}
+            checked={currentDatePrompt?.enabled ?? false}
+            disabled={!currentDatePrompt || isSavingCurrentDatePrompt}
+            onCheckedChange={(enabled) => void saveCurrentDatePrompt(enabled)}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.projectAttachments")}
+          description={t("settings.chat.projectAttachmentsDescription")}
+          hint={t("settings.chat.projectAttachmentsHint")}
+        >
+          <Switch
+            aria-label={t("settings.chat.projectAttachments")}
+            checked={projectAttachmentTarget === "project"}
+            onCheckedChange={(checked) =>
+              setProjectAttachmentTarget(checked ? "project" : "thread")
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.general.autoTitleNewChats")}
+          description={t("settings.general.autoTitleNewChatsDescription")}
+        >
+          <Switch
+            aria-label={t("settings.general.autoTitleNewChats")}
+            checked={autoTitle}
+            onCheckedChange={setAutoTitle}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.chat.groups.display.title")}>
+        <SettingsRow
+          label={t("settings.chat.webSearch.images")}
+          description={t("settings.chat.webSearch.imagesDescription")}
+        >
+          <Switch checked={searchImages} onCheckedChange={setSearchImages} />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.thinking.visibility")}
+          description={t("settings.chat.thinking.visibilityDescription")}
+        >
+          <Select
+            value={thinkingVisibility}
+            onValueChange={(value) =>
+              setThinkingVisibility(
+                normaliseDisplayVisibility(value, DEFAULT_THINKING_VISIBILITY),
+              )
+            }
+          >
+            <SelectTrigger
+              className="w-64"
+              aria-label={t("settings.chat.thinking.visibility")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="collapsed">
+                {t("settings.chat.visibility.collapsed")}
+              </SelectItem>
+              <SelectItem value="auto">
+                {t("settings.chat.visibility.auto")}
+              </SelectItem>
+              <SelectItem value="expanded">
+                {t("settings.chat.visibility.expanded")}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.tools.visibility")}
+          description={t("settings.chat.tools.visibilityDescription")}
+        >
+          <Select
+            value={toolVisibility}
+            onValueChange={(value) =>
+              setToolVisibility(
+                normaliseDisplayVisibility(value, DEFAULT_TOOL_VISIBILITY),
+              )
+            }
+          >
+            <SelectTrigger
+              className="w-64"
+              aria-label={t("settings.chat.tools.visibility")}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="collapsed">
+                {t("settings.chat.visibility.collapsed")}
+              </SelectItem>
+              <SelectItem value="auto">
+                {t("settings.chat.visibility.auto")}
+              </SelectItem>
+              <SelectItem value="expanded">
+                {t("settings.chat.visibility.expanded")}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.tools.foldIntoThinking")}
+          // Says why the row is off rather than letting a checked switch do nothing.
+          description={t(
+            foldBlockedByAlwaysExpanded
+              ? "settings.chat.tools.foldIntoThinkingBlocked"
+              : "settings.chat.tools.foldIntoThinkingDescription",
+          )}
+        >
+          <Switch
+            aria-label={t("settings.chat.tools.foldIntoThinking")}
+            checked={foldToolActivityIntoThinking && !foldBlockedByAlwaysExpanded}
+            disabled={foldBlockedByAlwaysExpanded}
+            onCheckedChange={setFoldToolActivityIntoThinking}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.showResponseModel")}
+          description={t("settings.chat.showResponseModelDescription")}
+        >
+          <Switch
+            aria-label={t("settings.chat.showResponseModel")}
+            checked={showResponseModel}
+            onCheckedChange={setShowResponseModel}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.inlineEditResponse")}
+          description={t("settings.chat.inlineEditResponseDescription")}
+        >
+          <Switch
+            aria-label={t("settings.chat.inlineEditResponse")}
+            checked={showInlineEditResponse}
+            onCheckedChange={setShowInlineEditResponse}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.modelDisclaimer")}
+          description={t("settings.chat.modelDisclaimerDescription")}
+        >
+          <Switch
+            aria-label={t("settings.chat.modelDisclaimer")}
+            checked={showModelDisclaimer}
+            onCheckedChange={(checked) => {
+              return saveModelDisclaimerPreference(checked).catch(() => {
+                toast.error("Could not save the model disclaimer setting.");
+              });
+            }}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.profile.greetingSloth")}
+          description={t("settings.profile.greetingSlothDescription")}
+        >
+          <Switch
+            aria-label={t("settings.profile.greetingSloth")}
+            id="profile-greeting-sloth"
+            checked={showGreetingSloth}
+            onCheckedChange={setShowGreetingSloth}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+      <SettingsSection title={t("settings.chat.modelSelection.title")}>
+        <SettingsRow
+          label={t("settings.chat.modelSelection.showMemoryBar")}
+          description={t(
+            "settings.chat.modelSelection.showMemoryBarDescription",
+          )}
+        >
+          <Switch checked={showMemoryBar} onCheckedChange={setShowMemoryBar} />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.modelSelection.expandQuantizations")}
+          description={t(
+            "settings.chat.modelSelection.expandQuantizationsDescription",
+          )}
+        >
+          <Switch
+            checked={expandQuantizations}
+            onCheckedChange={setExpandQuantizations}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.modelSelection.showAllQuantizations")}
+          description={t(
+            "settings.chat.modelSelection.showAllQuantizationsDescription",
+          )}
+        >
+          <Switch
+            checked={showAllQuantizations}
+            onCheckedChange={setShowAllQuantizations}
+          />
+        </SettingsRow>
+        <SettingsRow
+          label={t("settings.chat.modelSelection.fitOnDeviceOnly")}
+          description={t(
+            "settings.chat.modelSelection.fitOnDeviceOnlyDescription",
+          )}
+        >
+          <Switch
+            aria-label={t("settings.chat.modelSelection.fitOnDeviceOnly")}
+            checked={fitOnDeviceOnly}
+            onCheckedChange={setFitOnDeviceOnly}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
+
+      <SettingsSection
+        title={t("settings.chat.groups.menu.title")}
+        description={t("settings.chat.menu.description")}
+      >
+        <div className="pt-3">
+          <ChatMenuOrderList
+          items={Object.fromEntries(
+            PLUS_MENU_SETTINGS.map((item) => [
+              item.id,
+              { label: t(item.labelKey), icon: item.icon },
+            ]),
+          ) as Record<PlusMenuItemId, { label: string; icon: ReactNode }>}
+          />
+        </div>
+        <div className="flex justify-end pt-1">
+          <Button variant="ghost" size="sm" onClick={resetPlusMenu}>
+            {t("settings.chat.menu.reset")}
+          </Button>
+        </div>
+      </SettingsSection>
+    </div>
+  );
+}

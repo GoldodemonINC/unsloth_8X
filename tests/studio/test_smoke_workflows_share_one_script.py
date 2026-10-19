@@ -1,0 +1,207 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+
+"""The three smoke workflows must share one script: a drifted copy went unnoticed for months."""
+
+import importlib.util
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / ".github" / "scripts" / "studio_smoke" / "multi_turn_chat.py"
+LEGS = (
+    "studio-inference-smoke.yml",
+    "studio-mac-ui-smoke.yml",
+    "studio-windows-inference-smoke.yml",
+)
+
+
+def _workflow(name: str) -> str:
+    return (REPO / ".github" / "workflows" / name).read_text(encoding = "utf-8")
+
+
+@pytest.fixture(scope = "module")
+def script():
+    """The shared script, imported. It reads no environment and imports no SDK at module
+    level precisely so this is possible."""
+    assert SCRIPT.is_file(), f"{SCRIPT} is gone; the three legs have nothing to share"
+    spec = importlib.util.spec_from_file_location("multi_turn_chat", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["multi_turn_chat"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_leg_runs_the_shared_script():
+    missing = [name for name in LEGS if "studio_smoke/multi_turn_chat.py" not in _workflow(name)]
+    assert not missing, (
+        f"{missing} no longer run the shared multi-turn check. Three copies of it is how "
+        f"one of them stopped asserting determinism without anyone noticing."
+    )
+
+
+def test_no_leg_has_grown_its_own_copy_back():
+    """Reverting one leg to an inline block is the regression, and it looks additive."""
+    offenders = [name for name in LEGS if "def run_anthropic" in _workflow(name)]
+    assert not offenders, (
+        f"{offenders} carry an inline copy of the multi-turn check again. Change "
+        f"{SCRIPT.relative_to(REPO)} instead, so the other legs get the change too."
+    )
+
+
+def test_a_divergent_second_run_is_a_failure_not_a_warning(script):
+    """A divergent second run must raise, not warn; checked by behaviour so the check may be rewritten."""
+    clean = ["1 is 2", "you asked about 2", "paris", "paris"]
+    script.check("ok", clean, list(clean))
+
+    with pytest.raises(AssertionError, match = "non-deterministic"):
+        script.check("drift", clean, ["1 is 2", "you asked about 2", "paris", "london"])
+
+
+def test_trailing_whitespace_alone_is_still_tolerated(script):
+    """Comparison ignores trailing whitespace because llama-server varies a final newline between runs."""
+    clean = ["1 is 2", "you asked about 2", "paris", "paris"]
+    script.check("whitespace", clean, [t + "\n" for t in clean])
+
+
+def test_an_empty_reply_is_a_failure_in_either_run(script):
+    """Both runs must be checked for empty turns, since a stripped compare equates empty with newline."""
+    clean = ["1 is 2", "you asked about 2", "paris", "paris"]
+    with pytest.raises(AssertionError, match = "empty turn"):
+        script.check("first", ["", "b", "paris", "paris"], ["", "b", "paris", "paris"])
+    with pytest.raises(AssertionError, match = "empty turn"):
+        script.check("second", clean, ["", "b", "paris", "paris"])
+    with pytest.raises(AssertionError, match = "empty turn"):
+        script.check(
+            "whitespace vs nothing", ["\n", "b", "paris", "paris"], ["", "b", "paris", "paris"]
+        )
+
+
+def test_history_grounding_is_still_checked(script):
+    """Two of the four turns are answerable only from the earlier ones. Those checks fail
+    when history is dropped, rather than when the model is wrong about France."""
+    good2 = "you asked about 2"
+    with pytest.raises(AssertionError, match = "history reached the model"):
+        script.check("nohistory", ["1 is 2", good2, "c", "d"], ["1 is 2", good2, "c", "d"])
+
+    # 'paris' in the joined transcript proves nothing: turn 3 supplies it on its own.
+    lost_after_3 = ["1 is 2", "b", "paris", "Okay, I'm ready."]
+    with pytest.raises(AssertionError, match = "history reached the model"):
+        script.check("joined-is-not-enough", lost_after_3, list(lost_after_3))
+
+
+def test_grounding_is_asserted_on_a_turn_a_270m_model_can_carry(script):
+    """Grounding goes on the last turn: a 270M model's turn 2 may not restate the earlier answer."""
+    macos = ["58 + 27 = 95", "You haven't provided the previous question.", "paris", "paris"]
+    script.check("macos", macos, list(macos))
+
+    no_history = ["58 + 27 = 95", "the answer was 95", "paris", "Okay, I'm ready."]
+    with pytest.raises(AssertionError, match = "history reached the model"):
+        script.check("dropped", no_history, list(no_history))
+
+
+def test_turn_1_must_still_answer_with_a_number(script):
+    """Turn 1 is what makes the conversation multi-turn; a server that cannot do
+    arithmetic at all is not exercising history."""
+    broken = ["I cannot do arithmetic.", "b", "paris", "paris"]
+    with pytest.raises(AssertionError, match = "should contain a number"):
+        script.check("nonumber", broken, list(broken))
+
+
+def test_the_script_needs_no_environment_to_import(script):
+    """Nothing at import time may read env or import the SDKs, or tests cannot reach the checking half."""
+    source = SCRIPT.read_text(encoding = "utf-8")
+    head = source.split("def _server", 1)[0]
+    for forbidden in ("os.environ[", "from openai", "from anthropic"):
+        assert forbidden not in head, (
+            f"{forbidden} moved to module level in {SCRIPT.name}, so importing it now "
+            f"needs a running server or the SDKs installed, and these tests cannot run"
+        )
+
+
+def test_the_replay_retry_cannot_pass_a_truly_nondeterministic_server(script, monkeypatch):
+    """The replay retry is bounded and still fails a server that disagrees on every attempt."""
+    clean = ["58 + 27 = 95", "the answer was 95", "paris", "paris"]
+
+    calls = {"n": 0}
+
+    def always_divergent():
+        calls["n"] += 1
+        return ["58 + 27 = 95", "the answer was 95", "paris", f"paris {calls['n']}"]
+
+    monkeypatch.setattr(script, "assert_reproducible_backend", lambda: None)
+    monkeypatch.setattr(script, "run_openai", always_divergent)
+    monkeypatch.setattr(script, "run_anthropic", always_divergent)
+    with pytest.raises(AssertionError, match = "non-deterministic"):
+        script.main()
+    assert calls["n"] == 2 * script.ATTEMPTS, calls["n"]
+
+    calls["n"] = 0
+
+    def flips_once():
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return ["58 + 27 = 95", "the answer was 95", "paris", "paris!"]
+        return list(clean)
+
+    monkeypatch.setattr(script, "run_openai", flips_once)
+    monkeypatch.setattr(script, "run_anthropic", flips_once)
+    assert script.main() == 0
+
+
+def test_a_non_divergence_failure_is_not_retried(script, monkeypatch):
+    """Retrying an empty reply or a dropped history would just cost three runs and
+    still fail, and would let a broken server look intermittent."""
+    calls = {"n": 0}
+
+    def no_history():
+        calls["n"] += 1
+        return ["58 + 27 = 95", "b", "paris", "Okay, I'm ready."]
+
+    monkeypatch.setattr(script, "assert_reproducible_backend", lambda: None)
+    monkeypatch.setattr(script, "run_openai", no_history)
+    monkeypatch.setattr(script, "run_anthropic", no_history)
+    with pytest.raises(AssertionError, match = "history reached the model"):
+        script.main()
+    assert calls["n"] == 2, f"retried a non-divergence failure {calls['n']} times"
+
+
+def test_every_leg_pins_the_probe_load_to_a_reproducible_backend():
+    """Pins only the probe's load: live n-gram drafting makes the cold and warm replays diverge."""
+    for name in LEGS:
+        text = _workflow(name)
+        # rsplit: some legs also name the script in their `paths:` filter.
+        probe = text.rsplit("studio_smoke/multi_turn_chat.py", 1)[0]
+        assert '\\"speculative_type\\":\\"off\\"' in probe, (
+            f"{name} loads the multi-turn probe's model without pinning "
+            f"speculative_type=off, so a drafted batch can replace sequential decode "
+            f"between the two replays and greedy output stops being reproducible"
+        )
+        assert '\\"n_parallel\\":1' in probe, (
+            f"{name} loads the multi-turn probe's model without pinning n_parallel=1, "
+            f"so --kv-unified shares one KV pool across slots and its occupancy is "
+            f"another input to the batch"
+        )
+
+
+def test_the_probe_refuses_a_backend_that_cannot_be_reproducible(script, monkeypatch):
+    """main() refuses a non-reproducible backend before generating, so a divergence is never a mystery."""
+    clean = ["58 + 27 = 95", "the answer was 95", "paris", "paris"]
+    monkeypatch.setattr(script, "run_openai", lambda: list(clean))
+    monkeypatch.setattr(script, "run_anthropic", lambda: list(clean))
+
+    def _with(status):
+        monkeypatch.setattr(script, "_read_backend_status", lambda: status)
+
+    _with({"speculative_type": "default", "parallel_slots": 1})
+    with pytest.raises(AssertionError, match = "speculative decoding off"):
+        script.main()
+
+    _with({"speculative_type": "off", "parallel_slots": 4})
+    with pytest.raises(AssertionError, match = "one decode slot"):
+        script.main()
+
+    _with({"speculative_type": "off", "parallel_slots": 1})
+    assert script.main() == 0

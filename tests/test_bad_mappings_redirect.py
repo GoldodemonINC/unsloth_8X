@@ -1,0 +1,68 @@
+"""BAD_MAPPINGS must cover names the resolver maps to None, or oversized dynamic quants still load."""
+
+import ast
+import os
+
+import pytest
+
+_MODELS = os.path.join(os.path.dirname(__file__), os.pardir, "unsloth", "models")
+
+
+def _load_get_model_name():
+    mapper_ns = {}
+    with open(os.path.join(_MODELS, "mapper.py"), encoding = "utf-8") as f:
+        exec(compile(f.read(), "mapper.py", "exec"), mapper_ns)
+
+    with open(os.path.join(_MODELS, "loader_utils.py"), encoding = "utf-8") as f:
+        tree = ast.parse(f.read())
+
+    namespace = dict(mapper_ns)
+    namespace["SUPPORTS_FOURBIT"] = True
+    namespace["_env_says_offline"] = lambda: False
+    namespace["_get_new_mapper"] = lambda: ({}, {}, {}, {}, {})
+
+    wanted = {
+        "__get_model_name",
+        "_resolve_with_mappers",
+        "_prefer_legacy_lowercase_cache",
+        "get_model_name",
+    }
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) == "BAD_MAPPINGS" for target in node.targets
+        ):
+            exec(compile(ast.Module([node], []), "<bad_mappings>", "exec"), namespace)
+        elif isinstance(node, ast.FunctionDef) and node.name in wanted:
+            exec(compile(ast.Module([node], []), node.name, "exec"), namespace)
+
+    return namespace["get_model_name"], namespace["BAD_MAPPINGS"]
+
+
+def test_bad_mappings_redirect_every_listed_name():
+    get_model_name, bad_mappings = _load_get_model_name()
+    assert bad_mappings, "BAD_MAPPINGS should not be empty"
+    for name, expected in bad_mappings.items():
+        assert get_model_name(name, load_in_4bit = True) == expected, name
+
+
+def test_bad_mapping_redirects_keep_canonical_repo_case():
+    get_model_name, _ = _load_get_model_name()
+    assert get_model_name("Qwen/Qwen3-32B", load_in_4bit = True) == "unsloth/Qwen3-32B-bnb-4bit"
+    assert get_model_name("Qwen/Qwen3-30B-A3B", load_in_4bit = True) == "unsloth/Qwen3-30B-A3B"
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("upstage/SOLAR-10.7B-v1.0", "upstage/SOLAR-10.7B-v1.0"),
+        ("allenai/Llama-3.1-Tulu-3-8B", "unsloth/Llama-3.1-Tulu-3-8B"),
+        ("unsloth/Llama-3.1-Tulu-3-8B", "unsloth/Llama-3.1-Tulu-3-8B"),
+        ("allenai/Llama-3.1-Tulu-3-70B", "allenai/Llama-3.1-Tulu-3-70B"),
+        ("NousResearch/Hermes-3-Llama-3.1-405B", "NousResearch/Hermes-3-Llama-3.1-405B"),
+        ("open-thoughts/OpenThinker-7B", "open-thoughts/OpenThinker-7B"),
+        ("mistralai/Pixtral-12B-Base-2409", "unsloth/Pixtral-12B-Base-2409-bnb-4bit"),
+    ],
+)
+def test_4bit_load_avoids_unpublished_bnb_repos(name, expected):
+    get_model_name, _ = _load_get_model_name()
+    assert get_model_name(name, load_in_4bit = True) == expected
