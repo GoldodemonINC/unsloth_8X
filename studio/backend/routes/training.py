@@ -481,13 +481,71 @@ def _continue_from_adapter_allowed(request: TrainingStartRequest) -> bool:
 
     Only the CUDA trainer keeps an adapter it loaded; the embedding, decision and Apple Silicon
     (MLX) runners always build a fresh one on top, so those still need a base model."""
-    if request.training_type not in ("LoRA/QLoRA", "Continued Pretraining"):
+    if request.training_type not in (
+        "LoRA/QLoRA",
+        "Continued Pretraining",
+        "Policy Alignment",
+    ):
         return False
     if getattr(request, "is_embedding", False) or getattr(request, "is_decision", False):
         return False
     from core.training.training import should_use_mlx_training_backend
 
     return not should_use_mlx_training_backend()
+
+
+def _validate_advanced_request(request: TrainingStartRequest) -> None:
+    """Reject an Advanced Studio block that would fail after the model has loaded."""
+    advanced = getattr(request, "advanced", None)
+    if advanced is None:
+        if request.training_type == "Policy Alignment":
+            raise HTTPException(
+                status_code = 400,
+                detail = "Policy Alignment needs an advanced.rl block.",
+            )
+        return
+    from core.advanced import blending, curriculum, eval_harness, layer_lr, qat, rl
+
+    try:
+        if advanced.qat and advanced.qat.enabled:
+            qat.validate_qat_config(advanced.qat.model_dump())
+        if advanced.layer_lr and advanced.layer_lr.enabled:
+            layer_lr.validate_layer_lr_config(
+                float(request.learning_rate),
+                {
+                    "zone_multipliers": advanced.layer_lr.zone_multipliers,
+                    "layer_multipliers": advanced.layer_lr.layer_multipliers,
+                    "depth_curve": advanced.layer_lr.depth_curve,
+                },
+            )
+        if advanced.curriculum and advanced.curriculum.enabled:
+            curriculum.build_curriculum_plan(
+                advanced.curriculum.cadence,
+                total_steps = request.max_steps or None,
+                datasets = advanced.curriculum.datasets,
+            )
+        if advanced.blend and advanced.blend.enabled:
+            blending.validate_blend_slots(
+                [slot.model_dump() for slot in advanced.blend.slots],
+                batch_size = request.batch_size,
+            )
+        if advanced.auto_eval and advanced.auto_eval.enabled:
+            if not advanced.auto_eval.suites:
+                raise ValueError("Auto-eval needs at least one benchmark suite.")
+            eval_harness.build_eval_plan(
+                advanced.auto_eval.suites,
+                baseline_model = request.model_name,
+                candidate_model = "pending-output",
+                eval_dataset = advanced.auto_eval.eval_dataset,
+                limit = advanced.auto_eval.limit,
+                batch_size = advanced.auto_eval.batch_size,
+            )
+        if advanced.rl or request.training_type == "Policy Alignment":
+            rl_config = advanced.rl.model_dump() if advanced.rl else {}
+            method = rl_config.pop("method", "dpo")
+            rl.validate_rl_config(method, rl_config)
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
 
 
 # The names PEFT and Unsloth's loader open; numbered adapter shards are not loaded.
@@ -1360,6 +1418,11 @@ def _validate_training_platform(request: TrainingStartRequest) -> None:
         raise HTTPException(
             status_code = 400,
             detail = "Continued Pretraining is not supported for MLX training yet.",
+        )
+    if request.training_type == "Policy Alignment":
+        raise HTTPException(
+            status_code = 400,
+            detail = "Policy Alignment (DPO/GRPO) is not supported on the MLX backend yet.",
         )
     if request.is_embedding:
         raise HTTPException(
@@ -2262,6 +2325,8 @@ async def start_training(
             device_backend = device_backend,
         )
 
+        _validate_advanced_request(request)
+
         training_kwargs = {
             "model_name": model_preflight.model_name,
             "project_name": request.project_name,
@@ -2359,6 +2424,11 @@ async def start_training(
             "subject": current_subject,
             "gpu_ids": request.gpu_ids,
             "s3_config": request.s3_config.model_dump() if request.s3_config else None,
+            "advanced": (
+                request.advanced.model_dump(exclude_none = True)
+                if request.advanced is not None
+                else None
+            ),
         }
 
         # Latest-sidecar models size and train 16-bit (same flip as chat load): 4-bit is disabled for brand-new

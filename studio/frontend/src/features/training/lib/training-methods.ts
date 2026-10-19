@@ -13,6 +13,7 @@ const BACKEND_TRAINING_TYPE: Record<TrainingMethod, string> = {
   lora: "LoRA/QLoRA",
   full: "Full Finetuning",
   cpt: "Continued Pretraining",
+  rl: "Policy Alignment",
 };
 
 const TRAINING_METHOD_LABELS: Record<TrainingMethod, string> = {
@@ -20,6 +21,7 @@ const TRAINING_METHOD_LABELS: Record<TrainingMethod, string> = {
   lora: "LoRA",
   full: "Full",
   cpt: "CPT",
+  rl: "RL",
 };
 
 export function toBackendTrainingType(trainingMethod: TrainingMethod): string {
@@ -41,7 +43,7 @@ export function isTrainingMethodSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
 ): boolean {
-  return deviceType !== "mac" || trainingMethod !== "cpt";
+  return deviceType !== "mac" || (trainingMethod !== "cpt" && trainingMethod !== "rl");
 }
 
 export function isTrainingModelTypeSupportedOnDevice(
@@ -72,6 +74,9 @@ export function parseBackendTrainingMethod(
 ): TrainingMethod {
   if (trainingType === "Continued Pretraining") {
     return "cpt";
+  }
+  if (trainingType === "Policy Alignment") {
+    return "rl";
   }
   if (trainingType === "LoRA/QLoRA") {
     return loadIn4Bit ? "qlora" : "lora";

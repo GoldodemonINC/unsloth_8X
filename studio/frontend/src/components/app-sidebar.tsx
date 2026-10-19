@@ -3407,6 +3407,23 @@ export function AppSidebar() {
         preloadSilently(router.preloadRoute({ to: "/studio" }));
       },
     },
+    merge: {
+      icon: LayerIcon,
+      label: t("shell.navigation.merge"),
+      active: pathname === "/merge" || pathname.startsWith("/merge/"),
+      disabled: chatOnlyMeasured,
+      tooltip: trainDisabledHint,
+      pending: capabilitiesUnknown,
+      pendingTooltip: t("shell.navigation.trainChecking"),
+      onClick: () => {
+        if (chatOnlyMeasured) return;
+        navigateFromRow({ to: "/merge" });
+        closeMobileIfOpen();
+      },
+      onIntent: () => {
+        preloadSilently(router.preloadRoute({ to: "/merge" }));
+      },
+    },
     // A host with no video device at all is disabled with a hint instead of bouncing off the root guard.
     video: {
       icon: FlimSlateIcon,

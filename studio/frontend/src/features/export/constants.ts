@@ -341,6 +341,7 @@ export const METHOD_LABELS: Record<TrainingMethod, string> = {
   lora: "LoRA",
   full: "Full Fine-tune",
   cpt: "Continued Pretraining",
+  rl: "Policy Alignment",
 };
 
 export const GUIDE_STEPS = [

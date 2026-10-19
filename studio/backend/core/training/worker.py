@@ -182,7 +182,11 @@ def _untrainable_model_format_error(config: dict) -> str | None:
     if model_format == "adapter":
         # LoRA / CPT may continue from a saved adapter; full finetune still cannot (#13140).
         # The embedding, decision and MLX runners wrap a fresh adapter; only the CUDA trainer continues one.
-        if config.get("training_type") in ("LoRA/QLoRA", "Continued Pretraining") and not (
+        if config.get("training_type") in (
+            "LoRA/QLoRA",
+            "Continued Pretraining",
+            "Policy Alignment",
+        ) and not (
             config.get("is_embedding", False)
             or config.get("is_decision", False)
             or _uses_mlx_training_backend()
@@ -4734,6 +4738,23 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
             )
         return
 
+    if config.get("training_type") == "Policy Alignment":
+        try:
+            from core.advanced.rl_trainer import run_policy_alignment
+
+            run_policy_alignment(event_queue, stop_queue, config)
+        except Exception as exc:  # noqa: BLE001 - reported to the UI
+            logger.error("Policy Alignment failed: %s", exc)
+            event_queue.put(
+                {
+                    "type": "error",
+                    "error": f"Policy Alignment failed: {exc}",
+                    "stack": traceback.format_exc(limit = 20),
+                    "ts": time.time(),
+                }
+            )
+        return
+
     trainer = UnslothTrainer()
 
     trainer.add_progress_callback(_create_trainer_progress_callback(event_queue))
@@ -4799,6 +4820,80 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
             snapshot = getattr(trainer, "dataset_snapshot_path", None)
             if snapshot:
                 config["dataset_snapshot_path"] = snapshot
+
+            # Advanced Studio dataset streams: load each blender slot through the
+            # same formatter, concatenate them, and hand the worker a layout the
+            # batch sampler uses for ratios / curriculum cadence.
+            advanced = config.get("advanced") or {}
+            blend_cfg = advanced.get("blend") or {}
+            curriculum_cfg = advanced.get("curriculum") or {}
+            slots = blend_cfg.get("slots") if blend_cfg.get("enabled") else None
+            if (
+                (blend_cfg.get("enabled") or curriculum_cfg.get("enabled"))
+                and slots
+                and len(slots) > 1
+                and isinstance(loaded_dataset, dict)
+            ):
+                try:
+                    from datasets import concatenate_datasets
+
+                    parts = []
+                    layout = []
+                    offset = 0
+                    for slot in slots:
+                        source = str(slot.get("dataset") or "").strip()
+                        is_local = bool(source) and Path(source).exists()
+                        result = trainer.load_and_format_dataset(
+                            dataset_source = None if is_local else (source or None),
+                            format_type = config.get("format_type", ""),
+                            local_datasets = [source] if is_local else None,
+                            local_eval_datasets = None,
+                            custom_format_mapping = config.get("custom_format_mapping"),
+                            subset = slot.get("subset"),
+                            train_split = slot.get("split") or "train",
+                            eval_split = None,
+                            dataset_streaming = False,
+                            eval_steps = 0,
+                            is_cpt = is_cpt_for_dataset,
+                            hf_token = hf_token,
+                        )
+                        if not result:
+                            raise RuntimeError(
+                                f"Could not load dataset stream {slot.get('name')!r}."
+                            )
+                        info, _unused_eval = result
+                        stream = info.get("dataset") if isinstance(info, dict) else info
+                        if stream is None:
+                            raise RuntimeError(
+                                f"Dataset stream {slot.get('name')!r} formatted to nothing."
+                            )
+                        length = len(stream)
+                        layout.append(
+                            {
+                                "name": str(slot.get("name") or f"stream{len(layout) + 1}"),
+                                "start": offset,
+                                "length": length,
+                            }
+                        )
+                        parts.append(stream)
+                        offset += length
+                    if len(parts) > 1:
+                        merged = concatenate_datasets(parts)
+                        loaded_dataset["dataset"] = merged
+                        advanced["_stream_layout"] = layout
+                        config["advanced"] = advanced
+                        logger.info(
+                            "Advanced streams loaded: %s",
+                            ", ".join(
+                                f"{item['name']}={item['length']}" for item in layout
+                            ),
+                        )
+                except Exception as exc:  # noqa: BLE001 - fall back to the base dataset
+                    trainer._record_warning(
+                        f"Dataset blending could not be applied; training on the base "
+                        f"dataset instead: {exc}"
+                    )
+
             return loaded_dataset, loaded_eval_dataset
 
         _send_status(event_queue, "Detecting model type...")
@@ -5280,6 +5375,7 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
             lr_scheduler_type = config.get("lr_scheduler_type", "linear"),
             is_cpt = is_cpt,
             resume_from_checkpoint = resume_from_checkpoint,
+            advanced = config.get("advanced"),
         )
 
         _tqdm_stop.set()
@@ -5309,6 +5405,20 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
                 }
             )
         else:
+            if output_dir and not stopped_in_training:
+                try:
+                    from core.advanced.integration import run_auto_eval
+
+                    run_auto_eval(
+                        advanced = config.get("advanced"),
+                        baseline_model = config.get("actual_model_repo_id")
+                        or config.get("model_name"),
+                        candidate_model = output_dir,
+                        output_dir = output_dir,
+                        event_queue = event_queue,
+                    )
+                except Exception as exc:  # noqa: BLE001 - post-run, never fatal
+                    logger.warning("Auto-eval could not start: %s", exc)
             saved_output_dir = (
                 None if stopped_in_training and not trainer.save_on_stop else output_dir
             )

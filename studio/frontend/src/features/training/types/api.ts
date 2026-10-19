@@ -3,6 +3,7 @@
 
 import type { ModelInventoryFormat } from "@/features/hub";
 import type { S3Config } from "@/types/training";
+import type { AdvancedTrainingRequest } from "@/features/advanced/types";
 
 export interface TrainingStartRequest {
   model_name: string;
@@ -87,6 +88,8 @@ export interface TrainingStartRequest {
   resume_from_checkpoint?: string | null;
   /** Omitted unless the user turned drafter training on (requests stay byte-identical otherwise). */
   drafter?: DrafterTrainingRequest;
+  /** Omitted unless an Advanced Studio setting is enabled. */
+  advanced?: AdvancedTrainingRequest;
 }
 
 export interface DrafterTrainingRequest {

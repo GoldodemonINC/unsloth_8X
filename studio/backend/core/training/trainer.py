@@ -4326,6 +4326,35 @@ class UnslothTrainer:
         if released:
             logger.info(f"Online tokenization: shut down {released} DataLoader workers\n")
 
+    def _apply_advanced_to_trainer(self) -> None:
+        """Layer-wise LR and stream cadence are installed per trainer instance."""
+        config = getattr(self, "_advanced_config", None)
+        trainer = getattr(self, "trainer", None)
+        if not config or trainer is None:
+            return
+        if getattr(self, "_advanced_applied_to", None) is trainer:
+            return
+        self._advanced_applied_to = trainer
+        try:
+            from core.advanced import integration
+
+            base_lr = float(getattr(getattr(trainer, "args", None), "learning_rate", 2e-4))
+            report = integration.patch_layer_lr(trainer, self.model, config, base_lr)
+            if report is not None:
+                logger.info("Layer-wise learning rates enabled")
+            sampler = integration.patch_stream_sampler(
+                trainer,
+                config,
+                batch_size = int(
+                    getattr(getattr(trainer, "args", None), "train_batch_size", 1) or 1
+                ),
+                seed = int(getattr(getattr(trainer, "args", None), "seed", 3407) or 3407),
+            )
+            if sampler is not None:
+                logger.info("Advanced stream sampler enabled")
+        except Exception as error:  # noqa: BLE001 - degrade to a normal run
+            self._record_warning(f"Advanced training settings were not applied: {error}")
+
     def _preflight_first_batch(self) -> Optional[str]:
         """Validate the first real batch before train(). A base model whose chat template renders empty
         yields empty float32 input_ids that crash the embedding on step 1; catch it here. Returns
@@ -4425,6 +4454,27 @@ class UnslothTrainer:
 
             self._update_progress(is_training = True, error = None)
 
+            # Advanced Studio: QAT is installed on the prepared model before the
+            # trainer's forward pass runs, so every step sees fake-quantized weights.
+            self._advanced_config = training_args.get("advanced") or None
+            self._advanced_qat = None
+            if self._advanced_config:
+                try:
+                    from core.advanced import integration
+
+                    self._advanced_qat = integration.install_qat(
+                        self.model, self._advanced_config
+                    )
+                    if self._advanced_qat is not None:
+                        logger.info(
+                            "QAT simulation enabled (%s, group=%s) on %d layers",
+                            self._advanced_qat.config.format,
+                            self._advanced_qat.config.group_size,
+                            len(self._advanced_qat.modules),
+                        )
+                except Exception as error:  # noqa: BLE001 - never block training
+                    self._record_warning(f"QAT could not be enabled: {error}")
+
             if training_args.get("enable_wandb", False) and training_args.get("wandb_token"):
                 os.environ["WANDB_API_KEY"] = training_args["wandb_token"]
                 import wandb
@@ -4472,6 +4522,7 @@ class UnslothTrainer:
                 )
                 self._update_progress(total_steps = total, status_message = "Starting CSM training...")
                 logger.info(f"CSM training config: {config}\n")
+                self._apply_advanced_to_trainer()
                 self.trainer.train(
                     resume_from_checkpoint = training_args.get("resume_from_checkpoint")
                 )
@@ -4517,6 +4568,7 @@ class UnslothTrainer:
                 )
                 self._update_progress(total_steps = total, status_message = "Starting SNAC training...")
                 logger.info(f"SNAC training config: {config}\n")
+                self._apply_advanced_to_trainer()
                 self.trainer.train(
                     resume_from_checkpoint = training_args.get("resume_from_checkpoint")
                 )
@@ -4572,6 +4624,7 @@ class UnslothTrainer:
                     total_steps = total, status_message = "Starting Whisper training..."
                 )
                 logger.info(f"Whisper training config: {config}\n")
+                self._apply_advanced_to_trainer()
                 self.trainer.train(
                     resume_from_checkpoint = training_args.get("resume_from_checkpoint")
                 )
@@ -5210,6 +5263,7 @@ class UnslothTrainer:
             self._update_progress(total_steps = total_steps, status_message = "Starting training...")
             logger.info("Starting training...\n")
             try:
+                self._apply_advanced_to_trainer()
                 self.trainer.train(
                     resume_from_checkpoint = training_args.get("resume_from_checkpoint")
                 )

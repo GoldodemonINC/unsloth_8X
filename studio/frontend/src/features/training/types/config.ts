@@ -16,6 +16,7 @@ import type {
   DecisionLayout,
 } from "../api/models-api";
 import type { DrafterCapability } from "./api";
+import type { AdvancedTrainingState } from "@/features/advanced/types";
 
 export type LoraVariant = "lora" | "rslora" | "loftq" | "dora";
 
@@ -181,6 +182,8 @@ export interface TrainingConfigState {
   maxPositionEmbeddings: number | null;
   visionImageSize: number | null;
   s3Config: S3Config | null;
+  /** Advanced Studio block: QAT, curriculum, layer LR, blending, auto-eval, RL. */
+  advanced: AdvancedTrainingState;
 }
 
 export type AdvancedSettingsBaseline = Partial<
@@ -312,6 +315,7 @@ export interface TrainingConfigActions {
   setFinetuneMLPModules: (value: boolean) => void;
   setTargetModules: (value: string[]) => void;
   setS3Config: (value: S3Config | null) => void;
+  setAdvanced: (patch: Partial<AdvancedTrainingState>) => void;
   restoreRunConfig: (config: Record<string, unknown>) => void;
   reset: () => void;
   resetToModelDefaults: () => void;

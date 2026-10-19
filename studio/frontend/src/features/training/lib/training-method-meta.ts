@@ -9,6 +9,7 @@ export const TRAINING_METHOD_ORDER: readonly TrainingMethod[] = [
   "lora",
   "full",
   "cpt",
+  "rl",
 ];
 
 interface TrainingMethodMeta {
@@ -43,5 +44,11 @@ export const TRAINING_METHOD_META: Record<TrainingMethod, TrainingMethodMeta> =
       hintKey: "studio.methods.cpt.hint",
       noteKey: "studio.methods.cpt.note",
       dotClass: "bg-violet-500/70",
+    },
+    rl: {
+      labelKey: "studio.methods.rl.label",
+      hintKey: "studio.methods.rl.hint",
+      noteKey: "studio.methods.rl.note",
+      dotClass: "bg-rose-500/70",
     },
   };

@@ -45,6 +45,7 @@ import { DatasetSourceToggleAction } from "../sections/dataset-source-toggle";
 import { FieldHint } from "../sections/field-hint";
 import { ParamsSection } from "../sections/params-section";
 import { ConfigActions } from "./config-actions";
+import { AdvancedTrainingSection } from "@/features/advanced/components/advanced-training-section";
 import type { ParamMode } from "./training-param-mode";
 
 function SectionBox({
@@ -450,6 +451,8 @@ export function TrainingWizard({
       >
         <ParamsSection mode={paramMode} />
       </SectionBox>
+
+      <AdvancedTrainingSection />
 
       <SectionBox
         title={t("studio.wizard.configTitle")}

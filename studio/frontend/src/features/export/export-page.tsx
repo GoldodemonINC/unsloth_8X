@@ -75,6 +75,8 @@ import { ExportRunPanel } from "./components/export-run-panel";
 import { ImageLoraExportCard } from "./components/image-lora-export-card";
 import { MethodPicker } from "./components/method-picker";
 import { Q4nxConvertCard } from "./components/q4nx-convert-card";
+import { CheckpointSplitterCard } from "@/features/advanced/components/checkpoint-splitter-card";
+import { StudioModeNav } from "@/features/studio/studio-mode-nav";
 import { QuantPicker } from "./components/quant-picker";
 import {
   EXPORT_METHODS,
@@ -1056,13 +1058,16 @@ export function ExportPage() {
       <main className="mx-auto max-w-7xl 3xl:max-w-[calc(1440px*var(--ui-space-scale,1))] 4xl:max-w-[calc(1760px*var(--ui-space-scale,1))] px-5 py-8 max-sm:px-4 sm:px-9">
         <GuidedTour {...tour.tourProps} />
 
-        <div className="mb-8 flex flex-col gap-0.5">
-          <h1 className="text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
-            Export Model
-          </h1>
-          <p className="text-sm text-muted-foreground">
-            Export fine-tuned or base models for deployment
-          </p>
+        <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+          <div className="flex flex-col gap-0.5">
+            <h1 className="text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
+              Export Model
+            </h1>
+            <p className="text-sm text-muted-foreground">
+              Export fine-tuned or base models for deployment
+            </p>
+          </div>
+          <StudioModeNav />
         </div>
 
         <SectionCard
@@ -2098,6 +2103,7 @@ export function ExportPage() {
         </SectionCard>
         <ImageLoraExportCard preselect={preselectImageLora} />
         <Q4nxConvertCard />
+        <CheckpointSplitterCard />
       </main>
     </div>
   );

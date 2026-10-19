@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { DEFAULT_HYPERPARAMS } from "@/config/training";
+import { DEFAULT_ADVANCED_TRAINING, DEFAULT_LAYER_ZONE_MULTIPLIERS } from "@/features/advanced/types";
 import { getLocale, translate } from "@/i18n";
 import type { DatasetFormat } from "@/types/training";
 import { isRawTextDatasetFormat } from "../lib/training-methods";
@@ -111,6 +112,12 @@ export const initialTrainingConfigState: TrainingConfigState = {
   datasetCheckFailed: false,
   maxPositionEmbeddings: null,
   drafterCapability: null,
+  advanced: {
+    ...DEFAULT_ADVANCED_TRAINING,
+    layerLrZones: { ...DEFAULT_LAYER_ZONE_MULTIPLIERS },
+    blendSlots: [],
+    autoEvalSuites: [...DEFAULT_ADVANCED_TRAINING.autoEvalSuites],
+  },
   ...DEFAULT_HYPERPARAMS,
 };
 export function hasSeparateStreamingEvalSplit(

@@ -1030,7 +1030,8 @@ class _MLXTrainerAdapter:
             **self._model_config,
             **self._dataset_config,
             **training_args,
-            "training_type": (
+            "training_type": training_args.get("training_type")
+            or (
                 "Continued Pretraining"
                 if self.is_cpt
                 else "LoRA/QLoRA"

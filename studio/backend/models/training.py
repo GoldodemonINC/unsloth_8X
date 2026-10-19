@@ -136,6 +136,90 @@ class DrafterTrainingConfig(BaseModel):
         return value
 
 
+
+class QatTrainingConfig(BaseModel):
+    """Quantization-aware training simulation, applied inside the forward pass."""
+
+    enabled: bool = False
+    format: Literal["int4", "nf4", "nvfp4"] = "int4"
+    group_size: Literal[16, 32, 64, 128, 256] = 128
+    tensor_scale: Optional[float] = Field(None, gt = 0)
+    skip: Optional[List[str]] = None
+    min_numel: int = Field(4096, ge = 0)
+
+
+class CurriculumTrainingConfig(BaseModel):
+    """Alternating curriculum co-training cadence (e.g. reasoning:2,code:1)."""
+
+    enabled: bool = False
+    cadence: str = Field("reasoning:2,code:1", min_length = 1, max_length = 512)
+    datasets: Optional[List[str]] = None
+
+
+class LayerLrTrainingConfig(BaseModel):
+    """Per-zone learning-rate multipliers over the decoder stack."""
+
+    enabled: bool = False
+    zone_multipliers: Dict[str, float] = Field(default_factory = dict)
+    layer_multipliers: Dict[str, float] = Field(default_factory = dict)
+    depth_curve: Optional[List[float]] = Field(None, min_length = 2, max_length = 2)
+
+
+class BlendSlotConfig(BaseModel):
+    name: str = Field(..., min_length = 1, max_length = 64)
+    dataset: Optional[str] = None
+    subset: Optional[str] = None
+    split: Optional[str] = None
+    ratio: float = Field(1.0, ge = 0.0, le = 1000.0)
+    rows: Optional[int] = Field(None, ge = 0)
+
+
+class BlendTrainingConfig(BaseModel):
+    """Multiple dataset streams interleaved on the fly by ratio."""
+
+    enabled: bool = False
+    slots: List[BlendSlotConfig] = Field(default_factory = list, max_length = 16)
+
+
+class AutoEvalTrainingConfig(BaseModel):
+    """Post-run benchmark comparison against the baseline checkpoint."""
+
+    enabled: bool = False
+    suites: List[str] = Field(default_factory = list)
+    eval_dataset: Optional[str] = None
+    limit: Optional[int] = Field(None, gt = 0)
+    batch_size: int = Field(8, gt = 0)
+
+
+class PolicyAlignmentConfig(BaseModel):
+    """DPO / GRPO settings for the Policy Alignment training mode."""
+
+    method: Literal["dpo", "grpo"] = "dpo"
+    beta: float = Field(0.1, gt = 0, le = 1.0)
+    label_smoothing: float = Field(0.0, ge = 0, lt = 0.5)
+    learning_rate: float = Field(5e-6, gt = 0, le = 1e-2)
+    num_generations: int = Field(4, ge = 2, le = 64)
+    max_completion_length: int = Field(512, ge = 16, le = 32768)
+    temperature: float = Field(0.9, ge = 0.1, le = 2.0)
+    top_p: float = Field(0.95, gt = 0, le = 1.0)
+    clip_ratio: float = Field(0.2, gt = 0, lt = 1.0)
+    kl_coefficient: float = Field(0.0, ge = 0, le = 1.0)
+    reward_preset: str = Field("exact_match", max_length = 64)
+    reward_weights: Optional[Dict[str, float]] = None
+    reference_model: Optional[str] = None
+
+
+class AdvancedTrainingConfig(BaseModel):
+    """The Advanced Studio block attached to a training request."""
+
+    qat: Optional[QatTrainingConfig] = None
+    curriculum: Optional[CurriculumTrainingConfig] = None
+    layer_lr: Optional[LayerLrTrainingConfig] = None
+    blend: Optional[BlendTrainingConfig] = None
+    auto_eval: Optional[AutoEvalTrainingConfig] = None
+    rl: Optional[PolicyAlignmentConfig] = None
+
+
 class TrainingStartRequest(BaseModel):
     """Request schema for starting training"""
 
@@ -156,9 +240,15 @@ class TrainingStartRequest(BaseModel):
         pattern = TRAINING_REQUEST_ID_PATTERN,
         description = "Opaque client-generated identifier used to reconcile an ambiguous start response",
     )
-    training_type: Literal["LoRA/QLoRA", "Full Finetuning", "Continued Pretraining"] = Field(
+    training_type: Literal[
+        "LoRA/QLoRA", "Full Finetuning", "Continued Pretraining", "Policy Alignment"
+    ] = Field(
         ...,
-        description = "Training type: 'LoRA/QLoRA', 'Full Finetuning', or 'Continued Pretraining'",
+        description = "Training type: LoRA/QLoRA, Full Finetuning, Continued Pretraining, or Policy Alignment",
+    )
+    advanced: Optional[AdvancedTrainingConfig] = Field(
+        None,
+        description = "Advanced Studio settings: QAT, curriculum, layer-wise LR, dataset blending, auto-eval, RL.",
     )
     hf_token: Optional[str] = Field(None, description = "HuggingFace token")
     load_in_4bit: bool = Field(True, description = "Load model in 4-bit quantization")
@@ -770,6 +860,21 @@ class TrainingStartRequest(BaseModel):
             raise ValueError("drafter training is only available for text generation models.")
         if getattr(self, "training_type", None) == "Continued Pretraining":
             raise ValueError("drafter training is not available for continued pretraining.")
+        return self
+
+    @model_validator(mode = "after")
+    def _validate_policy_alignment(self) -> "TrainingStartRequest":
+        if getattr(self, "training_type", None) != "Policy Alignment":
+            return self
+        if getattr(self, "is_embedding", False) or getattr(self, "is_decision", False):
+            raise ValueError("Policy Alignment is only available for text generation models.")
+        if not getattr(self, "use_lora", False):
+            raise ValueError("Policy Alignment trains adapters; set use_lora to true.")
+        advanced = getattr(self, "advanced", None)
+        if advanced is None or advanced.rl is None:
+            raise ValueError(
+                "Policy Alignment needs an advanced.rl block (method, beta, reward settings)."
+            )
         return self
 
 

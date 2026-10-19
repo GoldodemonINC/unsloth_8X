@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import {
+  LayerIcon,
   ChefHatIcon,
   DashboardCircleIcon,
   Download01Icon,
@@ -39,6 +40,7 @@ const ITEM_META: Record<
   hub: { icon: DashboardCircleIcon, labelKey: "shell.navigation.hub" },
   images: { icon: Image03Icon, labelKey: "shell.navigation.images" },
   train: { icon: TestTubeOutlineIcon, labelKey: "shell.navigation.train" },
+  merge: { icon: LayerIcon, labelKey: "shell.navigation.merge" },
   video: { icon: FlimSlateIcon, labelKey: "shell.navigation.video" },
   audio: { icon: AiSpeechIcon, labelKey: "shell.navigation.audio" },
   recipes: { icon: ChefHatIcon, labelKey: "shell.navigation.recipes" },

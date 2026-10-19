@@ -8,6 +8,7 @@ import {
 import type { SystemInfoResponse } from "@/hooks/use-system";
 import { drafterEligible, drafterRequestFrom } from "../lib/drafter-config";
 import type { TrainingStartRequest } from "../types/api";
+import { buildAdvancedRequest } from "@/features/advanced/types";
 import type { TrainingConfigState } from "../types/config";
 
 function parseSliceValue(value: string | null): number | null {
@@ -51,7 +52,8 @@ export function trainingLoadsIn4Bit(
 ): boolean {
   const isCpt = config.trainingMethod === "cpt";
   const adapterMethod = config.trainingMethod !== "full";
-  const isQloraMethod = config.trainingMethod === "qlora";
+  const isQloraMethod =
+    config.trainingMethod === "qlora" || config.trainingMethod === "rl";
   const isFourBitModel = (config.selectedModel ?? "")
     .toLowerCase()
     .includes("4bit");
@@ -217,6 +219,11 @@ export function buildTrainingStartPayload(
     }
   }
 
+  const advanced = buildAdvancedRequest(config.advanced, {
+    batchSize: config.batchSize,
+    isPolicyAlignment: trainingMethod === "rl",
+  });
+
   return {
     model_name: config.selectedModel ?? "",
     project_name: (config.projectName || "").trim() || null,
@@ -322,6 +329,9 @@ export function buildTrainingStartPayload(
     // Spread only when sent: a run without a drafter posts exactly the fields it did before.
     ...(sendsDrafter(config, system)
       ? { drafter: drafterRequestFrom(config) }
+      : {}),
+    ...(advanced
+      ? { advanced }
       : {}),
   };
 }

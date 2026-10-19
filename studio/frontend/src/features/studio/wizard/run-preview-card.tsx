@@ -23,7 +23,10 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactElement, type ReactNode, useMemo } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useTrainingResourceDisplayNames } from "../hooks/use-training-resource-display-names";
-import { countNonDefaultAdvancedSettings } from "./advanced-settings-summary";
+import {
+  countEnabledAdvancedFeatures,
+  countNonDefaultAdvancedSettings,
+} from "./advanced-settings-summary";
 import type { ParamMode } from "./training-param-mode";
 
 const LEARNING_RATE_ZERO_RE = /\.?0+e/;
@@ -385,7 +388,10 @@ export function RunPreviewCard({
   const { isReady, hasModel, hasDataset } = useTrainingReadiness();
   const resourceNotices = useTrainingResourceNotices();
   const nonDefaultAdvancedSettings = useTrainingConfigStore((state) =>
-    countNonDefaultAdvancedSettings(state, state.advancedSettingsBaseline),
+    countNonDefaultAdvancedSettings(state, state.advancedSettingsBaseline) +
+    countEnabledAdvancedFeatures(state.advanced) +
+    // RL always posts an alignment block, so it is never "Defaults".
+    (state.trainingMethod === "rl" ? 1 : 0),
   );
   const resourceDisplayNames = useTrainingResourceDisplayNames({
     selectedModel,

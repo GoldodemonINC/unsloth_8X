@@ -342,6 +342,7 @@ from pathlib import Path
 from datetime import datetime
 
 from routes import (
+    advanced_router,
     auth_router,
     chat_history_router,
     data_recipe_router,
@@ -1881,6 +1882,7 @@ app.include_router(engines_router, prefix = "/api/engines", tags = ["engines"])
 app.include_router(whisper_router, prefix = "/api/whisper", tags = ["whisper"])
 app.include_router(npu_router, prefix = "/api/npu", tags = ["npu"])
 app.include_router(export_router, prefix = "/api/export", tags = ["export"])
+app.include_router(advanced_router, prefix = "/api/advanced", tags = ["advanced"])
 app.include_router(external_import_router, prefix = "/api/import", tags = ["import"])
 app.include_router(rag_router, prefix = "/api/rag", tags = ["rag"])
 app.include_router(training_history_router, prefix = "/api/train", tags = ["training-history"])

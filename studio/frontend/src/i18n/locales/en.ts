@@ -780,6 +780,7 @@ export const en = {
       library: "Library",
       hub: "Model hub",
       train: "Train",
+      merge: "Merge",
       recipes: "Recipes",
       images: "Images",
       video: "Video",
@@ -3486,6 +3487,11 @@ export const en = {
         label: "Continued pretraining",
         hint: "Continued pretraining for new domains or languages.",
         note: "continued",
+      },
+      rl: {
+        label: "Policy Alignment / RL",
+        hint: "DPO or GRPO: shape behaviour with preferences or reward scores.",
+        note: "RL",
       },
     },
     subtitles: {

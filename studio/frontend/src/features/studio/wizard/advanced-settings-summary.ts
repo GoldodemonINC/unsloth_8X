@@ -6,6 +6,7 @@ import {
   DEFAULT_HYPERPARAMS,
   resolveCptTargetModules,
 } from "@/config/training";
+import type { AdvancedTrainingState } from "@/features/advanced/types";
 import type {
   AdvancedSettingsBaseline,
   TrainingConfigState,
@@ -150,4 +151,23 @@ export function countNonDefaultAdvancedSettings(
     return scalarCount;
   }
   return scalarCount + countNonDefaultLoraSettings(state, baseline);
+}
+
+/**
+ * Advanced Studio features the run will actually use. They ride alongside the
+ * hyperparameter count so the run preview does not claim "Defaults" while QAT,
+ * a curriculum, blended streams or an auto-eval suite are switched on.
+ */
+export function countEnabledAdvancedFeatures(
+  advanced: AdvancedTrainingState | undefined,
+): number {
+  if (!advanced) return 0;
+  const flags = [
+    advanced.qatEnabled,
+    advanced.curriculumEnabled,
+    advanced.layerLrEnabled,
+    advanced.blendEnabled,
+    advanced.autoEvalEnabled,
+  ];
+  return flags.filter(Boolean).length;
 }

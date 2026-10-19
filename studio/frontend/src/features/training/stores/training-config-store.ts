@@ -11,6 +11,7 @@ import { getHfToken } from "@/features/hub";
 import { translate } from "@/i18n";
 import { toast } from "@/lib/toast";
 import { isAdapterMethod } from "@/types/training";
+import { advancedStateFromRunConfig } from "@/features/advanced/types";
 import type { ModelType, TrainingMethod } from "@/types/training";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
@@ -1668,6 +1669,16 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
           setUserEdit({ targetModules });
         },
         setS3Config: (s3Config) => setUserEdit({ s3Config }),
+        setAdvanced: (patch) =>
+          setUserEdit((state) => ({
+            advanced: {
+              ...state.advanced,
+              ...patch,
+              layerLrZones: patch.layerLrZones
+                ? { ...state.advanced.layerLrZones, ...patch.layerLrZones }
+                : state.advanced.layerLrZones,
+            },
+          })),
         restoreRunConfig: (config) => {
           const selections = runConfigDraftSelections(config);
           const hyperparameters = mapBackendModelConfigToTrainingPatch({
@@ -1687,6 +1698,10 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
               config.early_stopping_patience,
             ),
             ...drafterStateFrom(config.drafter),
+            advanced: advancedStateFromRunConfig(
+              config.advanced,
+              get().advanced,
+            ),
           });
           // Fetch capabilities without replacing the saved recipe.
           loadAndApplyModelDefaults(selections.selectedModel, {
