@@ -289,14 +289,23 @@ def plan_blend(request: BlendRequest) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _require_local_checkpoint(path: str, label: str) -> None:
-    from core.advanced import merge
-
-    if Path(path).expanduser().exists() or merge.hf_repo_id(path) is not None:
+def _require_checkpoint_source(path: str, label: str, *, allow_hub: bool = True) -> None:
+    """Reject a merge/split source that is neither local nor (optionally) a Hub repo."""
+    if Path(path).expanduser().exists():
         return
+    if allow_hub:
+        from core.advanced import merge
+
+        if merge.hf_repo_id(path) is not None:
+            return
+    expected = (
+        "an existing path or a Hugging Face repo id"
+        if allow_hub
+        else "an existing local checkpoint path"
+    )
     raise HTTPException(
         status_code = 400,
-        detail = f"{label} is neither an existing path nor a Hugging Face repo id: {path}.",
+        detail = f"{label} must be {expected}: {path}.",
     )
 
 
@@ -340,8 +349,8 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
 def run_merge(request: MergeRunRequest) -> dict[str, Any]:
     from core.advanced import merge
 
-    _require_local_checkpoint(request.model_a, "Model A")
-    _require_local_checkpoint(request.model_b, "Model B")
+    _require_checkpoint_source(request.model_a, "Model A")
+    _require_checkpoint_source(request.model_b, "Model B")
     output = Path(request.output_dir).expanduser()
     for source in (request.model_a, request.model_b):
         try:
@@ -374,7 +383,7 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
     from core.advanced import merge, moe
 
     for index, source in enumerate(request.models):
-        _require_local_checkpoint(source, f"Model {index + 1}")
+        _require_checkpoint_source(source, f"Model {index + 1}")
 
     def work() -> dict[str, Any]:
         snapshots = [
@@ -416,7 +425,7 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
 def split_plan(request: SplitPlanRequest) -> dict[str, Any]:
     from core.advanced import splitter
 
-    _require_local_checkpoint(request.source, "Checkpoint")
+    _require_checkpoint_source(request.source, "Checkpoint", allow_hub = False)
     try:
         return splitter.plan_only(
             request.source,
@@ -434,7 +443,7 @@ def split_plan(request: SplitPlanRequest) -> dict[str, Any]:
 def split_run(request: SplitRunRequest) -> dict[str, Any]:
     from core.advanced import splitter
 
-    _require_local_checkpoint(request.source, "Checkpoint")
+    _require_checkpoint_source(request.source, "Checkpoint", allow_hub = False)
     output = Path(request.output_dir).expanduser()
 
     def work() -> dict[str, Any]:
