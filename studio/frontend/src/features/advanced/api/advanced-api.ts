@@ -21,7 +21,12 @@ export interface AdvancedCapabilities {
   }>;
   eval_harness: { available: boolean; install_hint: string };
   memory: {
-    gpus: Array<{ index: number; total_bytes: number; free_bytes: number; name: string }>;
+    gpus: Array<{
+      index: number;
+      total_bytes: number;
+      free_bytes: number;
+      name: string;
+    }>;
     system_ram_total_bytes: number;
     system_ram_free_bytes: number;
     disk_free_bytes: number;
@@ -102,6 +107,26 @@ export interface AdvancedJob {
   };
   /** Path to the run_manifest.json written beside the artifacts, when there is one. */
   run_manifest?: string | null;
+  /** Step the job published for the progress bar; null until it resolves a source. */
+  progress?: {
+    stage:
+      | "queued"
+      | "resolving"
+      | "scanning"
+      | "merging"
+      | "finalizing"
+      | "completed"
+      | "failed";
+    done?: number;
+    total?: number;
+    message?: string;
+    blended_tensors?: number;
+    copied_tensors?: number;
+    skipped_tensors?: number;
+    bytes_written?: number;
+    shards?: number;
+    updated_at?: number;
+  } | null;
   result: Record<string, unknown> | null;
   error: string | null;
 }
@@ -125,7 +150,10 @@ export interface MergeModelSpec {
 }
 
 export interface MergePlanResponse {
-  models: [MergeModelSpec, MergeModelSpec];
+  /** One entry per parent, in request order (2 to 6). */
+  models: MergeModelSpec[];
+  /** Each parent planned against the first, which is the merge's target. */
+  alignments?: MergePlanResponse["alignment"][];
   alignment: {
     mode: "identical" | "cross_scale" | "cross_architecture";
     target_hidden: number | null;
@@ -250,7 +278,12 @@ export function planLayerLr(body: {
   base_learning_rate: number;
   num_layers?: number | null;
   zone_multipliers?: Record<string, number>;
+  kind_multipliers?: Record<string, number>;
+  /** Per-layer overrides; without these the plan would not match the run. */
+  layer_multipliers?: Record<string, number>;
   depth_curve?: [number, number] | null;
+  /** A local checkpoint whose parameter names fill in the per-layer rows. */
+  model?: string | null;
 }) {
   return request<{
     config: Record<string, unknown>;
@@ -260,6 +293,22 @@ export function planLayerLr(body: {
       start: number | null;
       end: number | null;
     }>;
+    num_layers?: number | null;
+    notes?: string[];
+    preview?: {
+      multipliers: Record<string, number>;
+      kind_multipliers: Record<string, number>;
+      entries?: Array<{
+        name: string;
+        zone: string;
+        kind: string;
+        layer: number | null;
+        multiplier: number;
+        lr: number;
+        numel: number;
+        trainable: boolean;
+      }>;
+    };
   }>("/layer-lr/plan", { method: "POST", body: JSON.stringify(body) });
 }
 
@@ -275,8 +324,7 @@ export function planBlend(body: {
 }
 
 export function planMerge(body: {
-  model_a: string;
-  model_b: string;
+  models: string[];
   top_k: number;
   temperature: number;
   hf_token?: string | null;
@@ -285,12 +333,15 @@ export function planMerge(body: {
 }
 
 export function runMerge(body: {
-  model_a: string;
-  model_b: string;
+  /** 2 to 6 parents. */
+  models: string[];
+  /** One weight per parent; normalized server-side. */
+  weights?: number[] | null;
   /** A bare name lands under the backend's outputs root; absolute is used as-is. */
   output_dir?: string | null;
   method: MergeMethod;
-  weight: number;
+  /** Two-parent shorthand, ignored when ``weights`` is given. */
+  weight?: number;
   density: number;
   max_shard_gb: number;
   hf_token?: string | null;
@@ -303,13 +354,15 @@ export function runMerge(body: {
 
 /** The pre-merge gates: tokenizer agreement, pickle weights, remote code. */
 export function validateMerge(body: {
-  model_a: string;
-  model_b: string;
+  models: string[];
   hf_token?: string | null;
   allow_remote_code?: boolean;
   allow_non_safetensors?: boolean;
 }): Promise<MergeValidation> {
-  return request("/merge/validate", { method: "POST", body: JSON.stringify(body) });
+  return request("/merge/validate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 /** CPU structural merge-eval: loadable, index/files agree, no NaN, tokenizer present. */
@@ -347,6 +400,29 @@ export function runSplit(body: {
   prefer?: "ram" | "vram" | "auto";
 }): Promise<AdvancedJob> {
   return request("/split/run", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** A past merge or MMoE run, read from the manifest beside its output. */
+export interface MergeHistoryEntry {
+  dir: string;
+  name: string;
+  stage: string | null;
+  created_at: string | null;
+  run_id: string | null;
+  models: string[];
+  method: string | null;
+  weights: number[] | null;
+  density: number | null;
+  top_k: number | null;
+  temperature: number | null;
+  total_bytes: number | null;
+  tokenizer_override: boolean;
+}
+
+export function fetchMergeHistory(
+  limit = 20,
+): Promise<{ entries: MergeHistoryEntry[] }> {
+  return request(`/merge/history?limit=${limit}`);
 }
 
 export function fetchJob(jobId: string): Promise<AdvancedJob> {

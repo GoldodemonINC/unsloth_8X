@@ -16,6 +16,17 @@ export const LAYER_ZONES = [
 ] as const;
 export type LayerZone = (typeof LAYER_ZONES)[number];
 
+/** Second axis: what a weight *is*, independent of where it sits. */
+export const LAYER_PARAM_KINDS = [
+  "attention",
+  "mlp",
+  "norm",
+  "moe_expert",
+  "moe_router",
+  "hybrid_block",
+] as const;
+export type LayerParamKind = (typeof LAYER_PARAM_KINDS)[number];
+
 export const RL_METHODS = ["dpo", "grpo"] as const;
 export type RlMethod = (typeof RL_METHODS)[number];
 
@@ -30,6 +41,49 @@ export type RewardPreset = (typeof REWARD_PRESETS)[number];
 
 export const MERGE_METHODS = ["linear", "slerp", "ties", "dare"] as const;
 export type MergeMethod = (typeof MERGE_METHODS)[number];
+
+/** Which module families a MoE finetune teaches. Null keeps Studio's default list. */
+export const MOE_EXPERT_SCOPES = [
+  "experts_and_attention",
+  "experts_only",
+  "experts_and_router",
+  "router_only",
+] as const;
+export type MoeExpertScope = (typeof MOE_EXPERT_SCOPES)[number];
+
+export const MOE_SCOPE_LABELS: Record<MoeExpertScope, string> = {
+  experts_and_attention: "Experts + attention",
+  experts_only: "Experts only",
+  experts_and_router: "Experts + router",
+  router_only: "Router only",
+};
+
+export const MOE_SCOPE_DESCRIPTIONS: Record<MoeExpertScope, string> = {
+  experts_and_attention:
+    "Studio's default: attention projections and every expert train. Widest change, most capacity.",
+  experts_only:
+    "Freezes attention and trains the routed experts, so the model learns new knowledge with its routing and attention left as they were.",
+  experts_and_router:
+    "Trains the experts and the router that picks them, so the routing can shift toward the new data. Attention stays frozen.",
+  router_only:
+    "Trains only the router. Cheap for re-balancing which experts answer a style of prompt, and changes no weights inside an expert.",
+};
+
+/** What a scope actually freezes and trains, for the summary line. */
+export function moeScopeTargets(scope: MoeExpertScope): {
+  attention: boolean;
+  experts: boolean;
+  router: boolean;
+} {
+  return {
+    attention: scope === "experts_and_attention",
+    experts:
+      scope === "experts_only" ||
+      scope === "experts_and_attention" ||
+      scope === "experts_and_router",
+    router: scope === "experts_and_router" || scope === "router_only",
+  };
+}
 
 export type BlendSlotSource = "huggingface" | "local";
 
@@ -58,6 +112,7 @@ export interface AdvancedTrainingState {
   // Feature 5: layer-wise LR
   layerLrEnabled: boolean;
   layerLrZones: Record<LayerZone, number>;
+  layerLrKinds: Record<LayerParamKind, number>;
   layerLrDepthCurveEnabled: boolean;
   layerLrDepthStart: number;
   layerLrDepthEnd: number;
@@ -91,6 +146,15 @@ export const DEFAULT_LAYER_ZONE_MULTIPLIERS: Record<LayerZone, number> = {
   adapter: 1,
 };
 
+export const DEFAULT_LAYER_KIND_MULTIPLIERS: Record<LayerParamKind, number> = {
+  attention: 1,
+  mlp: 1,
+  norm: 1,
+  moe_expert: 1,
+  moe_router: 1,
+  hybrid_block: 1,
+};
+
 export function newBlendSlot(index: number): BlendSlotState {
   return {
     id: `slot-${index}-${Math.random().toString(36).slice(2, 8)}`,
@@ -112,6 +176,7 @@ export const DEFAULT_ADVANCED_TRAINING: AdvancedTrainingState = {
   curriculumCadence: "reasoning:2,code:1",
   layerLrEnabled: false,
   layerLrZones: { ...DEFAULT_LAYER_ZONE_MULTIPLIERS },
+  layerLrKinds: { ...DEFAULT_LAYER_KIND_MULTIPLIERS },
   layerLrDepthCurveEnabled: false,
   layerLrDepthStart: 0.5,
   layerLrDepthEnd: 1,
@@ -145,6 +210,7 @@ export interface CurriculumRequest {
 export interface LayerLrRequest {
   enabled: boolean;
   zone_multipliers: Partial<Record<LayerZone, number>>;
+  kind_multipliers?: Partial<Record<LayerParamKind, number>>;
   depth_curve: [number, number] | null;
 }
 
@@ -214,9 +280,17 @@ export function buildAdvancedRequest(
     };
   }
   if (state.layerLrEnabled) {
+    // Only send kinds that differ from neutral, so a zone-only config keeps
+    // posting the exact payload it did before module groups existed.
+    const kinds = Object.fromEntries(
+      Object.entries(
+        state.layerLrKinds ?? DEFAULT_LAYER_KIND_MULTIPLIERS,
+      ).filter(([, value]) => value !== 1),
+    ) as Partial<Record<LayerParamKind, number>>;
     request.layer_lr = {
       enabled: true,
       zone_multipliers: { ...state.layerLrZones },
+      ...(Object.keys(kinds).length > 0 ? { kind_multipliers: kinds } : {}),
       depth_curve: state.layerLrDepthCurveEnabled
         ? [state.layerLrDepthStart, state.layerLrDepthEnd]
         : null,
@@ -273,11 +347,15 @@ export function advancedStateFromRunConfig(
   const qat = config.qat as Record<string, unknown> | undefined;
   if (qat) {
     next.qatEnabled = qat.enabled === true;
-    if (typeof qat.format === "string" && QAT_FORMATS.includes(qat.format as QatFormat)) {
+    if (
+      typeof qat.format === "string" &&
+      QAT_FORMATS.includes(qat.format as QatFormat)
+    ) {
       next.qatFormat = qat.format as QatFormat;
     }
     if (typeof qat.group_size === "number") {
-      next.qatGroupSize = qat.group_size as AdvancedTrainingState["qatGroupSize"];
+      next.qatGroupSize =
+        qat.group_size as AdvancedTrainingState["qatGroupSize"];
     }
   }
   const curriculum = config.curriculum as Record<string, unknown> | undefined;
@@ -290,9 +368,19 @@ export function advancedStateFromRunConfig(
   const layerLr = config.layer_lr as Record<string, unknown> | undefined;
   if (layerLr) {
     next.layerLrEnabled = layerLr.enabled === true;
-    const zones = layerLr.zone_multipliers as Record<string, number> | undefined;
+    const zones = layerLr.zone_multipliers as
+      | Record<string, number>
+      | undefined;
     if (zones) {
       next.layerLrZones = { ...next.layerLrZones, ...zones };
+    }
+    next.layerLrKinds = { ...DEFAULT_LAYER_KIND_MULTIPLIERS };
+    const kinds = layerLr.kind_multipliers as
+      | Record<string, number>
+      | undefined;
+    for (const kind of LAYER_PARAM_KINDS) {
+      const value = kinds?.[kind];
+      if (typeof value === "number") next.layerLrKinds[kind] = value;
     }
     const curve = layerLr.depth_curve as [number, number] | null | undefined;
     if (Array.isArray(curve) && curve.length === 2) {
@@ -333,7 +421,8 @@ export function advancedStateFromRunConfig(
     if (typeof rl.kl_coefficient === "number") {
       next.rlKlCoefficient = rl.kl_coefficient;
     }
-    if (typeof rl.learning_rate === "number") next.rlLearningRate = rl.learning_rate;
+    if (typeof rl.learning_rate === "number")
+      next.rlLearningRate = rl.learning_rate;
     if (typeof rl.num_generations === "number") {
       next.rlNumGenerations = rl.num_generations;
     }
