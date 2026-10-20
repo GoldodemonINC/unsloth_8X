@@ -12660,3 +12660,56 @@ def fix_transformers_bailing_hybrid_low_rank_query():
 
     __init__._unsloth_low_rank_query = True
     cls.__init__ = __init__
+
+
+# ---------------------------------------------------------------------------
+# unsloth_zoo streaming dataset batch size
+# ---------------------------------------------------------------------------
+# unsloth-zoo #993 replaced direct reads of `dataset._ex_iterable.batch_size` with
+# `_iterable_batch_size(dataset)`: a fresh streaming IterableDataset can hold an iterable that
+# carries no batch_size, and `.map()` only needs the default of 1000.
+#
+# A partial install can carry the new call sites without the new helper (a source tree copied
+# over an older wheel, an editable checkout next to a stale site-packages, a wheel built from a
+# branch mid-merge). Every streaming run then dies on its first mapped batch with
+# `NameError: name '_iterable_batch_size' is not defined` -- which is why streaming looks
+# intermittent rather than broken. The call sites resolve the name from the module globals at
+# call time, so installing the missing global repairs them without touching the file.
+_ITERABLE_BATCH_SIZE_DEFAULT = 1000
+
+
+def _iterable_batch_size(dataset, default = _ITERABLE_BATCH_SIZE_DEFAULT):
+    """The batch size a streaming dataset was mapped with, or datasets' own default.
+
+    `batch_size` can be missing (ArrowExamplesIterable built by a fresh stream), 0, or a value
+    that is not an int; all three mean "let datasets use 1000".
+    """
+    iterable = getattr(dataset, "_ex_iterable", None)
+    try:
+        batch_size = int(getattr(iterable, "batch_size", None))
+    except (TypeError, ValueError):
+        batch_size = 0
+    return batch_size if batch_size > 0 else default
+
+
+def fix_unsloth_zoo_iterable_batch_size():
+    """Define the helper a mixed unsloth-zoo build calls but does not carry.
+
+    Returns True when the repair was installed. A zoo that already defines it -- every release
+    after #993 -- is left untouched, so a correct install never sees this code at all.
+    """
+    try:
+        from unsloth_zoo import dataset_utils
+    except Exception:
+        return False
+    existing = getattr(dataset_utils, "_iterable_batch_size", None)
+    # A stale `from ... import` binding could be None; anything callable is the real helper.
+    if callable(existing):
+        return False
+    dataset_utils._iterable_batch_size = _iterable_batch_size
+    logger.warning(
+        "Unsloth: this unsloth-zoo calls `_iterable_batch_size` without defining it, which "
+        "breaks every streaming dataset. Installed the missing helper for this process; "
+        "`pip install --upgrade --force-reinstall --no-cache-dir unsloth-zoo` fixes the install."
+    )
+    return True

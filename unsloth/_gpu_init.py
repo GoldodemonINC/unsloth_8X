@@ -364,6 +364,7 @@ from .import_fixes import (
     patch_ipykernel_hf_xet,
     patch_trackio,
     patch_datasets,
+    fix_unsloth_zoo_iterable_batch_size,
     patch_psutil_cpu_freq,
     patch_enable_input_require_grads,
     patch_unsafe_trainer_rng_load,
@@ -459,6 +460,10 @@ ignore_logger_messages()
 patch_ipykernel_hf_xet()
 patch_trackio()
 patch_datasets()
+# After `import unsloth_zoo` above: a zoo whose streaming call sites carry the helper without
+# defining it dies on the first mapped batch, and every `import unsloth` streaming run goes
+# through this path.
+fix_unsloth_zoo_iterable_batch_size()
 # Apple Silicon M4+ only: psutil <= 7.2.2 reads the clock 1000x too small.
 patch_psutil_cpu_freq()
 patch_enable_input_require_grads()
@@ -521,6 +526,7 @@ del ignore_logger_messages
 del patch_ipykernel_hf_xet
 del patch_trackio
 del patch_datasets
+del fix_unsloth_zoo_iterable_batch_size
 del patch_psutil_cpu_freq
 del patch_enable_input_require_grads
 del fix_openenv_no_vllm
