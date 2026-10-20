@@ -31,6 +31,23 @@ from typing import Any, Iterable, Mapping, Sequence
 
 ZONES = ("embedding", "early", "middle", "late", "head", "adapter")
 
+# Second grouping axis: the structural role of a parameter, independent of its
+# depth. Zones answer *where* a weight sits; kinds answer *what* it is. Keeping
+# them separate means "slow attention, fast MLP" and "protected early layers"
+# compose instead of competing for the same multiplier. ``other`` is the neutral
+# bucket for weights the name rules do not recognise (and for adapters, whose
+# speed is already the zone axis' job).
+PARAM_KINDS = (
+    "attention",
+    "mlp",
+    "norm",
+    "moe_expert",
+    "moe_router",
+    "hybrid_block",
+    "other",
+)
+_NEUTRAL_KINDS: dict[str, float] = {kind: 1.0 for kind in PARAM_KINDS}
+
 _EMBED_MARKERS = (
     "embed_tokens",
     "wte",
@@ -71,6 +88,11 @@ class LayerLrConfig:
             "head": 1.0,
             "adapter": 1.0,
         }
+    )
+    # Multiplier per structural kind (attention / mlp / norm / MoE / hybrid).
+    # Neutral by default: a run that only sets zones behaves exactly as before.
+    kind_multipliers: dict[str, float] = field(
+        default_factory=lambda: dict(_NEUTRAL_KINDS)
     )
     # Per-layer multiplier overrides keyed by layer index (0-based).
     layer_multipliers: dict[int, float] = field(default_factory=dict)
@@ -116,6 +138,16 @@ def validate_layer_lr_config(
     unknown = [zone for zone in zone_values if zone not in ZONES]
     if unknown:
         raise ValueError(f"Unknown layer zones: {', '.join(unknown)}.")
+    kind_values = payload.get("kind_multipliers") or {}
+    if not isinstance(kind_values, Mapping):
+        raise ValueError(
+            "kind_multipliers must be an object of parameter kind -> multiplier."
+        )
+    kinds: dict[str, float] = dict(_NEUTRAL_KINDS)
+    for kind, value in kind_values.items():
+        if kind not in PARAM_KINDS:
+            raise ValueError(f"Unknown parameter kinds: {kind}.")
+        kinds[kind] = _validate_multiplier(value, f"{kind} multiplier")
     per_layer_raw = payload.get("layer_multipliers") or {}
     if not isinstance(per_layer_raw, Mapping):
         raise ValueError("layer_multipliers must be an object of layer index -> multiplier.")
@@ -140,6 +172,7 @@ def validate_layer_lr_config(
     return LayerLrConfig(
         base_learning_rate=base,
         zone_multipliers=zones,
+        kind_multipliers=kinds,
         layer_multipliers=per_layer,
         depth_curve=curve_tuple,
     )
@@ -236,10 +269,21 @@ def zone_breakdown(num_layers: int) -> list[dict[str, Any]]:
     ]
 
 
-def resolve_multiplier(
+def module_kind(name: str) -> str:
+    """The kind-multiplier bucket of a parameter (``other`` when neutral).
+
+    ``param_kind`` also reports ``adapter`` / ``head`` / ``embedding``; those are
+    already zones, so they collapse into ``other`` here rather than being
+    multiplied twice.
+    """
+    kind = param_kind(name)
+    return kind if kind in _NEUTRAL_KINDS else "other"
+
+
+def _zone_multiplier(
     name: str, config: LayerLrConfig, num_layers: int | None
 ) -> tuple[str, float]:
-    """Return ``(zone, multiplier)`` for one parameter name."""
+    """Depth-axis assignment only: ``(zone, zone * curve multiplier)``."""
     index = layer_index(name)
     if any(marker in name.lower() for marker in _ADAPTER_MARKERS):
         return "adapter", config.zone_multipliers.get("adapter", 1.0)
@@ -266,6 +310,28 @@ def resolve_multiplier(
     return zone, multiplier
 
 
+def resolve_assignment(
+    name: str, config: LayerLrConfig, num_layers: int | None
+) -> tuple[str, str, float]:
+    """Return ``(zone, kind, multiplier)`` for one parameter name.
+
+    The multiplier is the product of the depth axis (zone, per-layer override
+    or curve) and the structural axis (kind). A neutral kind table leaves the
+    depth axis untouched, so zone-only configs keep their exact LRs.
+    """
+    zone, multiplier = _zone_multiplier(name, config, num_layers)
+    kind = module_kind(name)
+    return zone, kind, multiplier * config.kind_multipliers.get(kind, 1.0)
+
+
+def resolve_multiplier(
+    name: str, config: LayerLrConfig, num_layers: int | None
+) -> tuple[str, float]:
+    """Return ``(zone, multiplier)`` for one parameter name."""
+    zone, _, multiplier = resolve_assignment(name, config, num_layers)
+    return zone, multiplier
+
+
 def build_param_groups(
     named_parameters: Iterable[tuple[str, Any]],
     config: LayerLrConfig,
@@ -273,26 +339,27 @@ def build_param_groups(
     num_layers: int | None = None,
     weight_decay: float = 0.0,
 ) -> list[dict[str, Any]]:
-    """Build optimizer param groups with per-zone learning rates.
+    """Build optimizer param groups with per-zone, per-kind learning rates.
 
     Every parameter lands in exactly one group. Groups are keyed by
-    ``(zone, multiplier)`` so the optimizer sees a small, stable list instead of
-    one group per parameter.
+    ``(zone, kind, multiplier)`` so the optimizer sees a small, stable list
+    instead of one group per parameter.
     """
-    groups: dict[tuple[str, float], dict[str, Any]] = {}
-    counts: dict[tuple[str, float], int] = {}
+    groups: dict[tuple[str, str, float], dict[str, Any]] = {}
+    counts: dict[tuple[str, str, float], int] = {}
     for name, parameter in named_parameters:
         if not getattr(parameter, "requires_grad", True):
             continue
-        zone, multiplier = resolve_multiplier(name, config, num_layers)
+        zone, kind, multiplier = resolve_assignment(name, config, num_layers)
         lr = config.base_learning_rate * multiplier
-        key = (zone, round(lr, 12))
+        key = (zone, kind, round(lr, 12))
         group = groups.get(key)
         if group is None:
             group = {
                 "lr": lr,
                 "weight_decay": weight_decay,
                 "zone": zone,
+                "kind": kind,
                 "multiplier": multiplier,
                 "param_names": [],
                 "params": [],
@@ -342,13 +409,13 @@ def zone_map(
     sample_limit: int = 8,
     include_frozen: bool = False,
 ) -> dict[str, Any]:
-    """Every parameter's zone, with proof that each one landed in exactly one.
+    """Every parameter's zone and kind, with proof that each one landed once.
 
-    ``build_param_groups`` groups by ``(zone, lr)``, so a parameter that silently
-    matched no zone -- or two -- was previously invisible until the loss curve
-    looked wrong. This returns the full classification plus a coverage block:
-    ``exact_one_zone`` is the assertion the test suite checks, and
-    ``unclassified`` names anything that fell through.
+    ``build_param_groups`` groups by ``(zone, kind, lr)``, so a parameter that
+    silently matched no zone -- or two -- was previously invisible until the
+    loss curve looked wrong. This returns the full classification plus a
+    coverage block: ``exact_one_zone`` is the assertion the test suite checks,
+    and ``unclassified`` names anything that fell through.
 
     Frozen parameters are excluded from the optimizer groups by design; they are
     still classified here (``include_frozen``) so the preview can show them.
@@ -367,6 +434,17 @@ def zone_map(
         }
         for zone in ZONES
     }
+    per_kind: dict[str, dict[str, Any]] = {
+        kind: {
+            "kind": kind,
+            "multiplier": config.kind_multipliers.get(kind, 1.0),
+            "params": 0,
+            "numel": 0,
+            "zones": {},
+            "sample": [],
+        }
+        for kind in PARAM_KINDS
+    }
     seen: set[str] = set()
     duplicates: list[str] = []
     unclassified: list[str] = []
@@ -382,25 +460,32 @@ def zone_map(
         seen.add(name)
         if not trainable and not include_frozen:
             continue
-        zone, multiplier = resolve_multiplier(name, config, num_layers)
+        zone, kind, multiplier = resolve_assignment(name, config, num_layers)
         if zone not in per_zone:
             unclassified.append(name)
             continue
-        kind = param_kind(name)
+        reported_kind = param_kind(name)
         bucket = per_zone[zone]
         bucket["params"] += 1
         bucket["numel"] += size
         if trainable:
             bucket["trainable"] += 1
-        bucket["kinds"][kind] = bucket["kinds"].get(kind, 0) + 1
+        bucket["kinds"][reported_kind] = bucket["kinds"].get(reported_kind, 0) + 1
         if len(bucket["sample"]) < sample_limit:
             bucket["sample"].append(name)
+        kind_bucket = per_kind[kind]
+        kind_bucket["params"] += 1
+        kind_bucket["numel"] += size
+        kind_bucket["zones"][zone] = kind_bucket["zones"].get(zone, 0) + 1
+        if len(kind_bucket["sample"]) < sample_limit:
+            kind_bucket["sample"].append(name)
         assigned_numel += size
         entries.append(
             {
                 "name": name,
                 "zone": zone,
-                "kind": kind,
+                "kind": reported_kind,
+                "kind_group": kind,
                 "layer": layer_index(name),
                 "multiplier": multiplier,
                 "lr": config.base_learning_rate * multiplier,
@@ -410,11 +495,19 @@ def zone_map(
         )
 
     zones = [bucket for bucket in per_zone.values() if bucket["params"] or bucket["zone"] in ("head", "embedding")]
+    # Only kinds that actually own parameters (plus the neutral bucket) are
+    # listed, so a dense model does not show empty MoE rows.
+    kinds = [
+        bucket
+        for bucket in per_kind.values()
+        if bucket["params"] or bucket["kind"] == "other"
+    ]
     exact_one_zone = (
         not duplicates and not unclassified and all(entry["zone"] in per_zone for entry in entries)
     )
     return {
         "zones": zones,
+        "kinds": kinds,
         "entries": entries,
         "coverage": {
             "params": len(entries),
@@ -429,6 +522,7 @@ def zone_map(
         "num_layers": num_layers,
         "zone_definition_hash_inputs": {
             "zone_multipliers": dict(config.zone_multipliers),
+            "kind_multipliers": dict(config.kind_multipliers),
             "layer_multipliers": {str(k): v for k, v in config.layer_multipliers.items()},
             "depth_curve": list(config.depth_curve) if config.depth_curve else None,
         },
@@ -445,6 +539,7 @@ def zone_preview(
     payload: dict[str, Any] = {
         "layer_strip": zone_breakdown(num_layers) if num_layers else [],
         "multipliers": dict(config.zone_multipliers),
+        "kind_multipliers": dict(config.kind_multipliers),
         "layer_multipliers": {str(k): v for k, v in config.layer_multipliers.items()},
         "depth_curve": list(config.depth_curve) if config.depth_curve else None,
     }
@@ -453,6 +548,7 @@ def zone_preview(
             ((name, 1) for name in param_names), config, num_layers = num_layers
         )
         payload["zone_map"] = mapped["zones"]
+        payload["kind_map"] = mapped["kinds"]
         payload["coverage"] = mapped["coverage"]
         payload["entries"] = mapped["entries"]
     return payload
@@ -463,6 +559,7 @@ def summarize_groups(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "groups": [
             {
                 "zone": group.get("zone"),
+                "kind": group.get("kind"),
                 "lr": group.get("lr"),
                 "multiplier": group.get("multiplier"),
                 "param_count": group.get("param_count"),
