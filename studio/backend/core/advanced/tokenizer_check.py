@@ -52,6 +52,12 @@ _TOKEN_FILES = (
     "config.json",
 )
 
+# What the Hub preview fetches, in the order it tries them. These are a few KB
+# each: bos/eos/pad are named in them, so the gate can run before the multi-GB
+# weights come down. ``tokenizer.json`` is deliberately excluded -- it is ~11 MB
+# and only needed when no smaller file resolves an id.
+_HUB_METADATA_FILES = _TOKEN_FILES
+
 
 class TokenizerConflictError(ValueError):
     """Two checkpoints disagree about a special token the merge cannot reconcile."""
@@ -147,6 +153,41 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _hub_download(repo_id: str, filename: str, token: str | None) -> str:
+    """One file from the Hub, behind a hook so the preview is testable offline."""
+    from huggingface_hub import hf_hub_download  # noqa: PLC0415 - optional dependency
+
+    return hf_hub_download(repo_id = repo_id, filename = filename, token = token)
+
+
+def _hub_metadata_dir(repo: str, token: str | None) -> Path:
+    """Download only a Hub repo's small tokenizer/config JSONs, and return their folder.
+
+    The returned path is the Hub cache snapshot, so the very same
+    :func:`fingerprint_tokenizer` runs against a remote parent and a local one --
+    there is no second, drifting code path for "remote".
+    """
+    first_error: str | None = None
+    root: Path | None = None
+    for name in _HUB_METADATA_FILES:
+        try:
+            root = Path(_hub_download(repo, name, token)).parent
+            break
+        except Exception as error:  # noqa: BLE001 - HTTP/auth errors are user-facing
+            first_error = first_error or f"{name}: {error}"
+    if root is None:
+        raise ValueError(
+            f"Could not read tokenizer metadata for {repo!r} from the Hugging Face Hub "
+            f"({first_error}). A gated or private repo needs a Hugging Face token."
+        )
+    for name in _HUB_METADATA_FILES:
+        try:
+            _hub_download(repo, name, token)
+        except Exception:  # noqa: BLE001 - a missing optional file is not a failure
+            continue
+    return root
 
 
 def _checkpoint_root(source: str | Path) -> Path:
@@ -272,8 +313,14 @@ def _ids_from_tokenizer_json(root: Path, wanted: Iterable[str]) -> dict[str, int
     return found
 
 
-def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
-    """Read one checkpoint's tokenizer identity, tolerating missing files."""
+def fingerprint_tokenizer(
+    source: str | Path, *, label: str | None = None
+) -> TokenizerFingerprint:
+    """Read one checkpoint's tokenizer identity, tolerating missing files.
+
+    ``label`` overrides the reported source, so a Hub preview reports
+    ``hf://org/name`` instead of the cache hash folder it was read from.
+    """
     root = _checkpoint_root(source)
     files = tuple(name for name in _TOKEN_FILES if (root / name).is_file())
 
@@ -360,7 +407,7 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
     )
 
     return TokenizerFingerprint(
-        source = str(root),
+        source = label or str(root),
         tokenizer_class = str(tokenizer_class) if tokenizer_class else None,
         vocab_size = vocab_size,
         special = special,
@@ -428,13 +475,36 @@ def _same_role(left: SpecialToken, right: SpecialToken) -> tuple[list[str], list
     return problems, []
 
 
+def fingerprint_source(
+    source: str | Path, *, token: str | None = None
+) -> TokenizerFingerprint:
+    """Fingerprint a local checkpoint, or a Hub repo's metadata without its weights."""
+    path = Path(source).expanduser()
+    if path.exists():
+        return fingerprint_tokenizer(path)
+    from .merge import hf_repo_id  # noqa: PLC0415 - avoids an import cycle
+
+    repo = hf_repo_id(str(source))
+    if repo is None:
+        raise ValueError(
+            f"No checkpoint at {source!r}. Give a local directory or a Hugging Face "
+            "repo id such as unsloth/Llama-3.2-1B."
+        )
+    return fingerprint_tokenizer(
+        _hub_metadata_dir(repo, token), label = f"hf://{repo}"
+    )
+
+
 def compare_tokenizers(
-    sources: Sequence[str | Path], *, label: str = "merge"
+    sources: Sequence[str | Path],
+    *,
+    label: str = "merge",
+    token: str | None = None,
 ) -> TokenizerCheck:
     """Compare every parent's tokenizer; conflicts are fatal, the rest are warnings."""
     if len(sources) < 2:
         raise ValueError("A tokenizer comparison needs at least two checkpoints.")
-    fingerprints = [fingerprint_tokenizer(source) for source in sources]
+    fingerprints = [fingerprint_source(source, token = token) for source in sources]
     base = fingerprints[0]
 
     conflicts: list[str] = []
@@ -506,6 +576,11 @@ def compare_tokenizers(
             )
 
     if conflicts:
+        # Whichever way a conflict resolves, the result carries one parent's files.
+        notes.append(
+            f"The merged folder copies the first parent's ({Path(base.source).name}) "
+            "tokenizer files, so its special tokens are the ones the result uses."
+        )
         status = "conflict"
     elif warnings:
         status = "warning"
@@ -524,10 +599,13 @@ def compare_tokenizers(
 
 
 def check_before_merge(
-    sources: Sequence[str | Path], *, allow_conflict: bool = False
+    sources: Sequence[str | Path],
+    *,
+    allow_conflict: bool = False,
+    token: str | None = None,
 ) -> TokenizerCheck:
     """The mandatory gate: raise on a conflict unless explicitly overridden."""
-    report = compare_tokenizers(sources, label = "merge")
+    report = compare_tokenizers(sources, label = "merge", token = token)
     if report.status == "conflict" and not allow_conflict:
         raise TokenizerConflictError(
             "Merge refused: the parents' tokenizers disagree on a special token, so the "
@@ -562,6 +640,8 @@ def verify_output(output_dir: str | Path, expected: TokenizerFingerprint) -> dic
     }
 
 
-def validate_sources(sources: Iterable[str | Path]) -> dict[str, Any]:
-    """Public entry point behind ``POST /merge/validate``."""
-    return compare_tokenizers(list(sources)).to_dict()
+def validate_sources(
+    sources: Iterable[str | Path], *, token: str | None = None
+) -> dict[str, Any]:
+    """Compare a batch of sources; local paths only unless ``token`` is given."""
+    return compare_tokenizers(list(sources), token = token).to_dict()

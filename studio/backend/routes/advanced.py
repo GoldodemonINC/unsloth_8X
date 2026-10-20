@@ -76,6 +76,7 @@ class LayerLrRequest(BaseModel):
     base_learning_rate: float = 2e-4
     num_layers: Optional[int] = None
     zone_multipliers: Optional[dict[str, float]] = None
+    kind_multipliers: Optional[dict[str, float]] = None
     layer_multipliers: Optional[dict[str, float]] = None
     depth_curve: Optional[list[float]] = None
     # Optional real parameter names, so the preview shows the actual zone map.
@@ -90,9 +91,12 @@ class BlendRequest(BaseModel):
 
 
 class MergePlanRequest(BaseModel):
-    # A local directory or a Hugging Face repo id (org/name).
-    model_a: str
-    model_b: str
+    # A local directory or a Hugging Face repo id (org/name). ``models`` is the
+    # current shape (2 to 6 parents); the pair is still accepted so older
+    # callers keep working.
+    model_a: Optional[str] = None
+    model_b: Optional[str] = None
+    models: Optional[list[str]] = Field(None, min_length = 2, max_length = 6)
     top_k: int = 2
     router_hidden: Optional[int] = None
     temperature: float = 1.0
@@ -102,8 +106,13 @@ class MergePlanRequest(BaseModel):
 
 
 class MergeRunRequest(BaseModel):
-    model_a: str
-    model_b: str
+    # ``models`` merges 2 to 6 parents; a pair in model_a/model_b still works.
+    model_a: Optional[str] = None
+    model_b: Optional[str] = None
+    models: Optional[list[str]] = Field(None, min_length = 2, max_length = 6)
+    # One weight per entry in ``models``, normalized server-side. ``weight`` is
+    # the two-parent shorthand (it means [1 - weight, weight]).
+    weights: Optional[list[float]] = Field(None, min_length = 2, max_length = 6)
     # Blank or a bare name lands in the Studio outputs folder; see ``_output_dir``.
     output_dir: Optional[str] = None
     method: Literal["linear", "slerp", "ties", "dare"] = "linear"
@@ -119,8 +128,9 @@ class MergeRunRequest(BaseModel):
 
 
 class MergeValidateRequest(BaseModel):
-    model_a: str
-    model_b: str
+    model_a: Optional[str] = None
+    model_b: Optional[str] = None
+    models: Optional[list[str]] = Field(None, min_length = 2, max_length = 6)
     hf_token: Optional[str] = None
     allow_remote_code: bool = False
     allow_non_safetensors: bool = False
@@ -132,7 +142,10 @@ class MergeEvalRequest(BaseModel):
 
 
 class MoeRunRequest(BaseModel):
-    models: list[str] = Field(..., min_length = 2, max_length = 8)
+    # The same 2..6 parent window the weight-space merge accepts; Studio's page
+    # cannot offer a seventh slot, and an unbounded list would make the router
+    # projection the size of the sum of its experts.
+    models: list[str] = Field(..., min_length = 2, max_length = 6)
     output_dir: Optional[str] = None
     top_k: int = 2
     router_hidden: Optional[int] = None
@@ -196,6 +209,43 @@ def _merge_default_name(model_a: str, model_b: str) -> str:
     from utils.paths import default_merge_dir_name
 
     return default_merge_dir_name(model_a, model_b)
+
+
+def _merge_sources(
+    model_a: Optional[str], model_b: Optional[str], models: Optional[list[str]]
+) -> list[str]:
+    """The parent list a merge request names, newest shape first.
+
+    ``models`` wins when present; the pair is the fallback so an older client
+    keeps working. Blank entries are rejected rather than silently dropped: a
+    merge that quietly loses a parent is worse than a 400.
+    """
+    raw = list(models) if models else [model_a or "", model_b or ""]
+    sources = [source.strip() for source in raw]
+    if len(sources) < 2:
+        raise HTTPException(status_code = 400, detail = "A merge needs at least two models.")
+    if any(not source for source in sources):
+        raise HTTPException(status_code = 400, detail = "Every merge slot needs a model.")
+    if len(set(sources)) != len(sources):
+        raise HTTPException(status_code = 400, detail = "Each merge slot must be a different model.")
+    return sources
+
+
+def _merge_labels(count: int) -> list[str]:
+    """Display labels: the familiar A/B pair, numbered slots beyond it."""
+    if count == 2:
+        return ["Model A", "Model B"]
+    return [f"Model {index + 1}" for index in range(count)]
+
+
+def _merge_default_name_for(sources: list[str]) -> str:
+    """Default output folder for an N-way merge: first and last parent, plus N."""
+    if len(sources) == 2:
+        return _merge_default_name(sources[0], sources[1])
+    suffix = f"-{len(sources)}way"
+    from utils.paths import default_merge_dir_name
+
+    return default_merge_dir_name(sources[0], sources[-1])[: 150 - len(suffix)] + suffix
 
 
 def _free_output_dir(name: str) -> Path:
@@ -296,6 +346,7 @@ def _start_job(
     *,
     output_dir: Optional[str] = None,
     sources: Optional[list[str]] = None,
+    with_progress: bool = False,
 ) -> dict[str, Any]:
     """Reserve resources, then run *work* on a thread.
 
@@ -325,6 +376,9 @@ def _start_job(
         "run_manifest": None,
         "result": None,
         "error": None,
+        # Long jobs (a merge over many parents) publish a step here so the page
+        # can show a bar instead of a spinner. None means "not reporting yet".
+        "progress": None,
     }
     with _JOBS_LOCK:
         _JOBS[job_id] = record
@@ -336,9 +390,12 @@ def _start_job(
             for stale in finished[: len(_JOBS) - _MAX_JOBS]:
                 _JOBS.pop(stale["job_id"], None)
 
+    def _report_progress(payload: dict[str, Any]) -> None:
+        record["progress"] = {**payload, "updated_at": time.time()}
+
     def _runner() -> None:
         try:
-            result = work()
+            result = work(_report_progress) if with_progress else work()
             record["result"] = result
             record["status"] = "completed"
             if isinstance(result, dict):
@@ -346,6 +403,11 @@ def _start_job(
         except Exception as error:  # noqa: BLE001 - surfaced through the job record
             record["error"] = str(error)
             record["status"] = "failed"
+            record["progress"] = {
+                "stage": "failed",
+                "message": str(error),
+                "updated_at": time.time(),
+            }
         finally:
             record["finished_at"] = time.time()
             resources.BROKER.release(job_id)
@@ -458,6 +520,7 @@ def capabilities() -> dict[str, Any]:
         "rl_methods": list(rl.RL_METHODS),
         "reward_presets": list(rl.REWARD_PRESETS),
         "layer_zones": list(layer_lr.ZONES),
+        "layer_param_kinds": list(layer_lr.PARAM_KINDS),
         "eval_suites": eval_harness.list_suites(),
         "eval_harness": eval_harness.harness_available(),
         "memory": memory.to_dict(),
@@ -521,6 +584,20 @@ def output_locations() -> dict[str, Any]:
         "outputs_root": str(outputs_root()),
         "exports_root": str(exports_root()),
     }
+
+
+@router.get("/merge/history")
+def merge_history(limit: int = 20) -> dict[str, Any]:
+    """Recent merges and MMoE bundles, newest first, read from their run manifests.
+
+    The Merge page reloads a past run's parents and settings from here, so a merge
+    can be reproduced without retyping five repo ids from a folder name.
+    """
+    from core.advanced.merge_history import list_merge_runs
+    from utils.paths import outputs_root
+
+    bounded = max(1, min(int(limit), 100))
+    return {"entries": list_merge_runs(outputs_root(), limit = bounded)}
 
 
 def _module_available(name: str) -> bool:
@@ -608,6 +685,7 @@ def plan_layer_lr(request: LayerLrRequest) -> dict[str, Any]:
             request.base_learning_rate,
             {
                 "zone_multipliers": request.zone_multipliers,
+                "kind_multipliers": request.kind_multipliers,
                 "layer_multipliers": request.layer_multipliers,
                 "depth_curve": request.depth_curve,
             },
@@ -706,21 +784,18 @@ def _require_checkpoint_source(path: str, label: str, *, allow_hub: bool = True)
     )
 
 
-def _local_tokenizer_preview(sources: list[str]) -> dict[str, Any]:
-    """Tokenizer comparison for sources that are already on disk."""
-    missing = [source for source in sources if not Path(source).expanduser().exists()]
-    if missing:
-        return {
-            "status": "not_checked",
-            "ok": None,
-            "reason": (
-                "Tokenizer check runs on local checkpoints; "
-                + ", ".join(missing[:2])
-                + " has not been downloaded yet. It runs automatically before any merge."
-            ),
-        }
+def _tokenizer_preview(sources: list[str], token: str | None = None) -> dict[str, Any]:
+    """Tokenizer comparison for local checkpoints *and* Hub repos.
+
+    A Hub parent is compared from its config/tokenizer JSONs alone (a few KB), so
+    the disagreement that would refuse the merge is visible on Inspect -- before
+    the weights are downloaded and before ``Run merge`` is pressed. Without this
+    the UI could not offer the override the refusal message tells you to use.
+    """
     try:
-        return tokenizer_check.compare_tokenizers(sources, label = "merge").to_dict()
+        return tokenizer_check.compare_tokenizers(
+            sources, label = "merge", token = token
+        ).to_dict()
     except ValueError as error:
         return {"status": "not_checked", "ok": None, "reason": str(error)}
 
@@ -737,9 +812,9 @@ def validate_merge(request: MergeValidateRequest) -> dict[str, Any]:
         allow_remote_code = request.allow_remote_code,
         allow_non_safetensors = request.allow_non_safetensors,
     )
-    sources = [request.model_a, request.model_b]
+    sources = _merge_sources(request.model_a, request.model_b, request.models)
     inspections: list[dict[str, Any]] = []
-    for label, source in zip(("Model A", "Model B"), sources):
+    for label, source in zip(_merge_labels(len(sources)), sources):
         if Path(source).expanduser().exists():
             try:
                 inspections.append(
@@ -772,7 +847,7 @@ def validate_merge(request: MergeValidateRequest) -> dict[str, Any]:
                     "notes": ["Not downloaded yet; the policy is applied when it is."],
                 }
             )
-    tokenizer = _local_tokenizer_preview(sources)
+    tokenizer = _tokenizer_preview(sources, request.hf_token)
     blocked = any(item.get("blocked") for item in inspections)
     result: dict[str, Any] = {
         "ok": (not blocked) and tokenizer.get("status") != "conflict",
@@ -784,7 +859,11 @@ def validate_merge(request: MergeValidateRequest) -> dict[str, Any]:
     if tokenizer.get("status") == "conflict":
         result["blocked_reason"] = (
             "The parents' tokenizers disagree on a special token; the merge would refuse "
-            "to write. " + " ".join(tokenizer.get("conflicts") or [])
+            "to write. "
+            + " ".join(tokenizer.get("conflicts") or [])
+            + " Build it anyway with the override (allow_tokenizer_conflict in the API) "
+            "if that is the eos/pad you want the result to use, or align the parents' "
+            "special tokens first."
         )
     return result
 
@@ -806,23 +885,25 @@ def eval_merged_model(request: MergeEvalRequest) -> dict[str, Any]:
 def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
     from core.advanced import merge
 
+    sources = _merge_sources(request.model_a, request.model_b, request.models)
     try:
-        spec_a = merge.probe_model_spec(request.model_a, token = request.hf_token)
-        spec_b = merge.probe_model_spec(request.model_b, token = request.hf_token)
-        alignment = merge.plan_alignment(spec_a, spec_b)
+        specs = [
+            merge.probe_model_spec(source, token = request.hf_token)
+            for source in sources
+        ]
+        # The same group target the merge itself aligns to, so the preview and
+        # the run agree even when 3+ parents disagree on a dimension.
+        alignments = merge.plan_alignment_many(specs)
         layer_range = None
         if request.layer_start is not None or request.layer_end is not None:
             layer_range = (
                 request.layer_start or 0,
                 request.layer_end
                 if request.layer_end is not None
-                else min(
-                    spec_a.num_layers or 0,
-                    spec_b.num_layers or 0,
-                ),
+                else min(spec.num_layers or 0 for spec in specs),
             )
         moe = merge.plan_moe_merge(
-            [spec_a, spec_b],
+            specs,
             top_k = request.top_k,
             router_hidden = request.router_hidden,
             temperature = request.temperature,
@@ -830,15 +911,25 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
         )
     except ValueError as error:
         raise HTTPException(status_code = 400, detail = str(error)) from error
-    suggested = _free_output_dir(_merge_default_name(request.model_a, request.model_b))
+    suggested = _free_output_dir(_merge_default_name_for(sources))
     estimate = resources.estimate(
-        "merge", sources = [request.model_a, request.model_b], output_dir = suggested
+        "merge", sources = sources, output_dir = suggested
     )
     return {
-        "models": [spec_a.to_dict(), spec_b.to_dict()],
-        "alignment": alignment.to_dict(),
+        "models": [spec.to_dict() for spec in specs],
+        # The pair summary stays a pair comparison (its notes are the "2048 vs
+        # 1024" lines the cards render); the per-parent list carries the group
+        # target every parent is actually cropped to.
+        "alignment": (
+            merge.plan_alignment(specs[0], specs[1]) if len(specs) == 2 else alignments[1]
+        ).to_dict(),
+        "alignments": [alignment.to_dict() for alignment in alignments],
         "moe": moe.to_dict(),
-        "recommended_mode": "mmoe" if alignment.mmoe_required else "standard",
+        "recommended_mode": (
+            "mmoe"
+            if any(alignment.mmoe_required for alignment in alignments[1:])
+            else "standard"
+        ),
         # Prefilled into the output field so a merge lands in the folder Studio scans.
         "suggested_output_dir": str(suggested),
         # Plan before compute: peak memory, the output folder, and the tokenizer verdict.
@@ -848,7 +939,7 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
             "streaming": True,
             "model_bytes": estimate["model_bytes"],
         },
-        "tokenizer": _local_tokenizer_preview([request.model_a, request.model_b]),
+        "tokenizer": _tokenizer_preview(sources, request.hf_token),
     }
 
 
@@ -856,8 +947,22 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
 def run_merge(request: MergeRunRequest) -> dict[str, Any]:
     from core.advanced import merge
 
-    _require_checkpoint_source(request.model_a, "Model A")
-    _require_checkpoint_source(request.model_b, "Model B")
+    sources = _merge_sources(request.model_a, request.model_b, request.models)
+    for label, source in zip(_merge_labels(len(sources)), sources):
+        _require_checkpoint_source(source, label)
+    weights = request.weights
+    if weights is None:
+        # The pair shorthand: [1 - w, w]. An N-way merge with no weights is even.
+        weights = [1.0 - request.weight, request.weight] if len(sources) == 2 else None
+    if weights is not None and len(weights) != len(sources):
+        raise HTTPException(
+            status_code = 400,
+            detail = f"Expected {len(sources)} weights, got {len(weights)}.",
+        )
+    if weights is not None and sum(weights) <= 0:
+        raise HTTPException(
+            status_code = 400, detail = "Merge weights must sum to a positive number."
+        )
     policy = _loading_policy(
         allow_remote_code = request.allow_remote_code,
         allow_non_safetensors = request.allow_non_safetensors,
@@ -865,38 +970,39 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
     output = _output_dir(
         request.output_dir,
         kind = "merged",
-        default_name = _merge_default_name(request.model_a, request.model_b),
+        default_name = _merge_default_name_for(sources),
     )
-    for source in (request.model_a, request.model_b):
+    for source in sources:
         try:
             if output.resolve() == Path(source).expanduser().resolve():
                 raise HTTPException(
                     status_code = 400,
-                    detail = "The output directory must differ from both source checkpoints.",
+                    detail = "The output directory must differ from every source checkpoint.",
                 )
         except OSError:
             continue
 
-    def work() -> dict[str, Any]:
-        return merge.merge_checkpoints(
-            request.model_a,
-            request.model_b,
+    def work(progress) -> dict[str, Any]:
+        return merge.merge_checkpoints_many(
+            sources,
             str(output),
             method = request.method,
-            weight = request.weight,
+            weights = weights,
             density = request.density,
             seed = request.seed,
             max_shard_bytes = int(request.max_shard_gb * 1024**3),
             token = request.hf_token,
             policy = policy,
             allow_tokenizer_conflict = request.allow_tokenizer_conflict,
+            progress = progress,
         )
 
     return _start_job(
         "merge",
         work,
         output_dir = str(output),
-        sources = [request.model_a, request.model_b],
+        sources = sources,
+        with_progress = True,
     )
 
 
@@ -913,7 +1019,7 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
     output = _output_dir(
         request.output_dir,
         kind = "moe",
-        default_name = _merge_default_name(request.models[0], request.models[1]),
+        default_name = _merge_default_name_for(list(request.models)),
     )
 
     def work() -> dict[str, Any]:
@@ -1127,6 +1233,7 @@ def job_status(job_id: str) -> dict[str, Any]:
             "output_dir",
             "library_visible",
             "resources",
+            "progress",
             "run_manifest",
             "result",
             "error",

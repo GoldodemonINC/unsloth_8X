@@ -65,20 +65,34 @@ def patch_layer_lr(trainer, model, advanced: Mapping[str, Any] | None, base_lr: 
     def _optimizer_factory(*args, **kwargs):
         optimizer = original(*args, **kwargs)
         name_by_param = {id(param): name for name, param in model.named_parameters()}
-        groups: list[dict[str, Any]] = []
+        # One group per (zone, kind, lr), not one per parameter: the LR scheduler
+        # steps every group each iteration, so a per-parameter explosion (tens of
+        # thousands on a 256-expert MoE) is pure overhead for identical math.
+        groups: dict[tuple[str, str, float], dict[str, Any]] = {}
         for group in optimizer.param_groups:
             options = {key: value for key, value in group.items() if key != "params"}
+            group_lr = float(group.get("lr", base_lr))
+            group_initial = options.get("initial_lr")
             for parameter in group["params"]:
                 name = name_by_param.get(id(parameter), "")
-                zone, multiplier = layer_lr.resolve_multiplier(name, resolved, total_layers)
-                new_group = dict(options)
-                new_group["params"] = [parameter]
-                new_group["lr"] = float(group.get("lr", base_lr)) * multiplier
-                if "initial_lr" in options:
-                    new_group["initial_lr"] = float(options["initial_lr"]) * multiplier
-                new_group["_zone"] = zone
-                groups.append(new_group)
-        optimizer.param_groups = groups
+                zone, kind, multiplier = layer_lr.resolve_assignment(
+                    name, resolved, total_layers
+                )
+                lr = group_lr * multiplier
+                key = (zone, kind, round(lr, 12))
+                merged = groups.get(key)
+                if merged is None:
+                    merged = dict(options)
+                    merged["params"] = []
+                    merged["lr"] = lr
+                    if group_initial is not None:
+                        merged["initial_lr"] = float(group_initial) * multiplier
+                    merged["_zone"] = zone
+                    merged["_kind"] = kind
+                    merged["_multiplier"] = multiplier
+                    groups[key] = merged
+                merged["params"].append(parameter)
+        optimizer.param_groups = list(groups.values())
         return optimizer
 
     trainer.create_optimizer = _optimizer_factory
@@ -86,6 +100,12 @@ def patch_layer_lr(trainer, model, advanced: Mapping[str, Any] | None, base_lr: 
         "enabled": True,
         "total_layers": total_layers,
         "zones": resolved.to_dict(),
+        # Only the kinds that actually move, so a zone-only run reports none.
+        "kinds": {
+            kind: value
+            for kind, value in resolved.kind_multipliers.items()
+            if value != 1.0
+        },
     }
 
 

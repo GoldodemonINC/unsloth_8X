@@ -360,6 +360,40 @@ def _min_positive(*values: int | None) -> int | None:
     return min(present) if present else None
 
 
+def common_target_spec(specs: Sequence[ModelSpec]) -> ModelSpec:
+    """The shape all parents meet at: the smallest dimension of any of them.
+
+    A pair can use ``plan_alignment(specs[0], specs[1])`` because both sides are
+    in that one plan. Three or more parents cannot: parent 2 and parent 3 would
+    each be cropped to a different target, so their tensors could never be added
+    to the same key. This derives one target for the whole group first, and the
+    first parent is aligned to it too, which is also what makes a cross-scale
+    pair blend instead of silently copying the larger parent.
+
+    The architecture comes from the first parent: it decides whether a plan is
+    cross-architecture (MMoE territory), not the shape.
+    """
+    first = specs[0]
+    return ModelSpec(
+        source=first.source,
+        architecture=first.architecture,
+        hidden_size=_min_positive(*(spec.hidden_size for spec in specs)),
+        num_layers=_min_positive(*(spec.num_layers for spec in specs)),
+        num_heads=_min_positive(*(spec.num_heads for spec in specs)),
+        intermediate_size=_min_positive(*(spec.intermediate_size for spec in specs)),
+        vocab_size=_min_positive(*(spec.vocab_size for spec in specs)),
+        parameter_count=None,
+    )
+
+
+def plan_alignment_many(specs: Sequence[ModelSpec]) -> list[AlignmentPlan]:
+    """One plan per parent, every one resolving to the same target shape."""
+    if not specs:
+        raise ValueError("A merge needs at least two checkpoints.")
+    target = common_target_spec(specs)
+    return [plan_alignment(target, spec) for spec in specs]
+
+
 # ---------------------------------------------------------------------------
 # Tensor alignment and blending
 # ---------------------------------------------------------------------------
@@ -461,9 +495,15 @@ def blend_tensors(
     if method == "slerp":
         if len(arrays) == 2:
             return _slerp_pair(arrays[0], arrays[1], _normalized_weight(weights, 2)[1])
+        # Beyond a pair, SLERP is applied as a running blend: each parent takes
+        # its share of the running result, so a 4-way merge with weights is the
+        # weighted average of the arcs rather than an even one.
+        norm = _normalized_weight(weights, len(arrays))
         result = arrays[0]
+        taken = norm[0]
         for index in range(1, len(arrays)):
-            t = 1.0 / (index + 1)
+            taken += norm[index]
+            t = norm[index] / taken if taken > 0 else 1.0 / (index + 1)
             result = _slerp_pair(result, arrays[index], t)
         return result
     if method == "ties":
@@ -683,69 +723,94 @@ def inspect_checkpoint(directory: str) -> dict[str, Any]:
     }
 
 
-def merge_checkpoints(
-    model_a: str,
-    model_b: str,
+MAX_MERGE_MODELS = 6
+
+
+def merge_checkpoints_many(
+    sources: Sequence[str],
     output_dir: str,
     *,
     method: str = "linear",
-    weight: float = 0.5,
+    weights: Sequence[float] | None = None,
     density: float = 0.5,
     seed: int = 3407,
     max_shard_bytes: int = 4 * 1024 * 1024 * 1024,
     token: str | None = None,
     policy: Any = None,
     allow_tokenizer_conflict: bool = False,
+    progress: Any = None,
 ) -> dict[str, Any]:
-    """Stream two safetensors checkpoints into an aligned merged model.
+    """Stream 2 to 6 safetensors checkpoints into one aligned merged model.
 
-    Sources may be local directories or Hub repo ids (a snapshot is downloaded
-    first). Only one tensor pair is resident at a time, so a merge on a CPU host
-    peaks at one tensor pair rather than both parents; shards are written as
-    they fill, each one atomically.
+    Every source is aligned against the first one, so a N-way merge never has to
+    agree on shapes pairwise. Only one tensor set is resident at a time, so the
+    peak is one tensor per parent rather than every checkpoint at once; shards
+    are written as they fill, each one atomically.
 
-    Two gates run **before the output folder is created**, so a refused merge
-    leaves nothing behind:
+    Weights are normalized over the sources that actually own a tensor, so a key
+    missing from one parent reweights the survivors instead of being blended as
+    if that parent had a zero tensor there.
 
-    * the loading policy (safetensors-only, remote code opt-in),
-    * the tokenizer check (disagreeing bos/eos/pad refuses the merge).
-
-    The returned report is written to ``merge_report.json`` and a
-    ``run_manifest.json`` records the run.
+    ``progress`` is called with ``{"stage", "done", "total", ...}`` dictionaries:
+    the merge page polls that through the job record, the way training reports
+    its own step.
     """
     from . import licenses  # noqa: PLC0415
     from . import policy as policy_module  # noqa: PLC0415 - avoids an import cycle
     from . import run_manifest, tokenizer_check  # noqa: PLC0415
 
+    count = len(sources)
+    if count < 2:
+        raise ValueError("A merge needs at least two checkpoints.")
+    if count > MAX_MERGE_MODELS:
+        raise ValueError(
+            f"At most {MAX_MERGE_MODELS} checkpoints can be merged at once; got {count}."
+        )
+    normalized = _normalized_weight(weights, count)
+
+    def report(stage: str, **extra: Any) -> None:
+        if progress is None:
+            return
+        try:
+            progress({"stage": stage, **extra})
+        except Exception:  # noqa: BLE001 - a progress callback must never fail a merge
+            pass
+
     active_policy = policy or policy_module.DEFAULT_POLICY
-    model_a = resolve_checkpoint_source(model_a, token = token)
-    model_b = resolve_checkpoint_source(model_b, token = token)
+    report(stage = "resolving", done = 0, total = count,
+           message = "Resolving checkpoints")
+    resolved = [resolve_checkpoint_source(source, token = token) for source in sources]
     policy_report = [
-        policy_module.enforce_source_policy(model_a, active_policy, label = "Model A"),
-        policy_module.enforce_source_policy(model_b, active_policy, label = "Model B"),
+        policy_module.enforce_source_policy(resolved[i], active_policy, label = f"Model {i + 1}")
+        for i in range(count)
     ]
-    spec_a = probe_model_spec(model_a)
-    spec_b = probe_model_spec(model_b)
-    plan = plan_alignment(spec_a, spec_b)
+    specs = [probe_model_spec(source) for source in resolved]
+    # One target for the whole group, with the first parent aligned to it as
+    # well: a per-pair target would leave parent 2 and parent 3 cropped to
+    # different widths, so no key could ever be blended across all of them.
+    plans = plan_alignment_many(specs)
 
     # The quiet failure: weights blend fine, the tokenizer does not.
     tokenizer_report = tokenizer_check.check_before_merge(
-        [model_a, model_b], allow_conflict = allow_tokenizer_conflict
+        resolved, allow_conflict = allow_tokenizer_conflict
     )
 
-    entries_a, _ = _open_state(model_a)
-    entries_b, _ = _open_state(model_b)
+    report(stage = "scanning", done = 0, total = count,
+           message = "Reading shard indexes")
+    entries = [_open_state(source)[0] for source in resolved]
 
     out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents = True, exist_ok = True)
 
-    keys = sorted(set(entries_a) | set(entries_b))
+    keys = sorted(set().union(*(set(entry) for entry in entries)))
+    total_keys = max(len(keys), 1)
     shard: dict[str, Any] = {}
     shard_bytes = 0
     shard_index = 1
     weight_map: dict[str, str] = {}
     blended = copied = skipped = 0
     total_bytes = 0
+    report_every = max(1, total_keys // 100)
 
     def flush() -> None:
         nonlocal shard, shard_bytes, shard_index
@@ -760,36 +825,40 @@ def merge_checkpoints(
         shard_bytes = 0
         shard_index += 1
 
-    for key in keys:
-        in_a, in_b = key in entries_a, key in entries_b
-        if in_a and in_b:
-            left = _read_tensor(entries_a, key)
-            right = _read_tensor(entries_b, key)
-            # Blend in float32, then hand the result back in the dtype the pair
-            # was stored in, so a bf16 merge stays bf16 on disk.
-            left_array = tensor_io.to_float32(left)
-            right_array = tensor_io.to_float32(right)
-            if left_array.shape != right_array.shape:
-                left_array = _align_for_key(left_array, key, plan)
-                right_array = _align_for_key(right_array, key, plan)
-            if left_array.shape == right_array.shape and tensor_io.is_floating(left):
+    for position, key in enumerate(keys, start = 1):
+        present = [index for index, entry in enumerate(entries) if key in entry]
+        if len(present) > 1:
+            tensors = [_read_tensor(entries[index], key) for index in present]
+            arrays = [tensor_io.to_float32(tensor) for tensor in tensors]
+            # Every owner, the first included, moves to the group's target, so
+            # the aligned shapes agree whenever the tensors can be blended.
+            aligned = [
+                _align_for_key(array, key, plans[index])
+                for array, index in zip(arrays, present)
+            ]
+            # Blend in float32, then hand the result back in the dtype the first
+            # owner stored it in, so a bf16 merge stays bf16 on disk.
+            if (
+                all(array.shape == aligned[0].shape for array in aligned)
+                and tensor_io.is_floating(tensors[0])
+            ):
                 merged = tensor_io.cast_like(
                     blend_tensors(
-                        [left_array, right_array],
-                        method=method,
-                        weights=[1.0 - weight, weight],
-                        density=density,
-                        seed=seed,
+                        aligned,
+                        method = method,
+                        weights = [normalized[index] for index in present],
+                        density = density,
+                        seed = seed,
                     ),
-                    left,
+                    tensors[0],
                 )
                 blended += 1
             else:
                 # Integer bookkeeping tensors (positions, token ids) must not be averaged.
-                merged = left
+                merged = tensors[0]
                 skipped += 1
         else:
-            merged = _read_tensor(entries_a if in_a else entries_b, key)
+            merged = _read_tensor(entries[present[0]], key)
             copied += 1
 
         nbytes = tensor_io.nbytes(merged)
@@ -798,15 +867,31 @@ def merge_checkpoints(
         shard[key] = merged
         shard_bytes += nbytes
         total_bytes += nbytes
+        if position % report_every == 0 or position == total_keys:
+            report(
+                stage = "merging",
+                done = position,
+                total = total_keys,
+                message = f"{position}/{total_keys} tensors",
+                blended_tensors = blended,
+                copied_tensors = copied,
+                skipped_tensors = skipped,
+                bytes_written = total_bytes,
+                shards = shard_index - 1,
+            )
     flush()
 
+    report(stage = "finalizing", done = total_keys, total = total_keys,
+           message = "Writing index, config and tokenizer")
     index = {"metadata": {"total_size": total_bytes}, "weight_map": weight_map}
     (out / "model.safetensors.index.json").write_text(
-        json.dumps(index, indent=2), encoding="utf-8"
+        json.dumps(index, indent = 2), encoding = "utf-8"
     )
-    # Carry the base config and tokenizer files through so the result loads.
+    # Carry the base config and tokenizer files through so the result loads. The
+    # first parent that has each file wins, which is why the tokenizer check runs
+    # before any of this.
     for name in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
-        for source in (model_a, model_b):
+        for source in resolved:
             candidate = Path(source) / name
             if candidate.is_file():
                 try:
@@ -818,13 +903,17 @@ def merge_checkpoints(
     # The output inherits one parent's tokenizer files; confirm it really did.
     output_tokenizer = tokenizer_check.verify_output(out, tokenizer_report.fingerprints[0])
 
-    report = {
+    report_block = {
         "status": "completed",
         "output_dir": str(out),
         "method": method,
-        "weight": weight,
-        "models": [spec_a.to_dict(), spec_b.to_dict()],
-        "alignment": plan.to_dict(),
+        "model_count": count,
+        # Kept for the two-model report shape the UI and older manifests read.
+        "weight": normalized[1] if count == 2 else None,
+        "weights": list(normalized),
+        "models": [spec.to_dict() for spec in specs],
+        "alignment": plans[1].to_dict() if count > 1 else plans[0].to_dict(),
+        "alignments": [plan.to_dict() for plan in plans],
         "tokenizer": {
             **tokenizer_report.to_dict(),
             "summary": tokenizer_report.summary(),
@@ -838,14 +927,13 @@ def merge_checkpoints(
             "remote_code": [
                 warning
                 for warning in (
-                    policy_module.remote_code_warning(model_a),
-                    policy_module.remote_code_warning(model_b),
+                    policy_module.remote_code_warning(source) for source in resolved
                 )
                 if warning
             ],
         },
-        # What the merged result may be used for is a property of both parents.
-        "licenses": licenses.to_report_block([model_a, model_b]),
+        # What the merged result may be used for is a property of every parent.
+        "licenses": licenses.to_report_block(resolved),
         "metrics": {
             "blended_tensors": blended,
             "copied_tensors": copied,
@@ -858,15 +946,16 @@ def merge_checkpoints(
         "merge",
         config={
             "method": method,
-            "weight": weight,
+            "model_count": count,
+            "weights": list(normalized),
             "density": density,
             "max_shard_bytes": max_shard_bytes,
-            "alignment": plan.to_dict(),
+            "alignment": plans[1].to_dict() if count > 1 else None,
         },
         seeds={"seed": seed},
         inputs={
-            "model_a": run_manifest.checkpoint_digest(model_a),
-            "model_b": run_manifest.checkpoint_digest(model_b),
+            (f"model_{index + 1}" if count > 2 else ("model_a" if index == 0 else "model_b")): run_manifest.checkpoint_digest(source)
+            for index, source in enumerate(resolved)
         },
         artifacts={
             "output_dir": str(out),
@@ -893,12 +982,44 @@ def merge_checkpoints(
         "override_used": bool(allow_tokenizer_conflict)
         and tokenizer_report.status == "conflict",
     }
-    manifest["licenses"] = report["licenses"]
+    manifest["licenses"] = report_block["licenses"]
     run_manifest.write_manifest(out, manifest)
-    report["run_manifest"] = str(out / run_manifest.MANIFEST_NAME)
-    report["manifest_id"] = manifest["run_id"]
-    policy_module.atomic_write_json(out / "merge_report.json", report)
-    return report
+    report_block["run_manifest"] = str(out / run_manifest.MANIFEST_NAME)
+    report_block["manifest_id"] = manifest["run_id"]
+    policy_module.atomic_write_json(out / "merge_report.json", report_block)
+    report(stage = "completed", done = total_keys, total = total_keys, message = "Merge complete")
+    return report_block
+
+
+def merge_checkpoints(
+    model_a: str,
+    model_b: str,
+    output_dir: str,
+    *,
+    method: str = "linear",
+    weight: float = 0.5,
+    density: float = 0.5,
+    seed: int = 3407,
+    max_shard_bytes: int = 4 * 1024 * 1024 * 1024,
+    token: str | None = None,
+    policy: Any = None,
+    allow_tokenizer_conflict: bool = False,
+    progress: Any = None,
+) -> dict[str, Any]:
+    """Two-parent merge, expressed as the general case with ``[1 - w, w]``."""
+    return merge_checkpoints_many(
+        [model_a, model_b],
+        output_dir,
+        method = method,
+        weights = [1.0 - float(weight), float(weight)],
+        density = density,
+        seed = seed,
+        max_shard_bytes = max_shard_bytes,
+        token = token,
+        policy = policy,
+        allow_tokenizer_conflict = allow_tokenizer_conflict,
+        progress = progress,
+    )
 
 
 # ---------------------------------------------------------------------------

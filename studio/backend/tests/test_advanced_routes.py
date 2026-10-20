@@ -18,6 +18,7 @@ import pytest
 fastapi = pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
+from core.advanced import tokenizer_check  # noqa: E402
 from routes import advanced  # noqa: E402
 
 
@@ -33,8 +34,18 @@ def started_jobs(monkeypatch) -> list[dict]:
     """Capture what a run route hands the job registry instead of really running it."""
     jobs: list[dict] = []
 
-    def fake_start_job(kind, work, *, output_dir = None, sources = None):
-        jobs.append({"kind": kind, "output_dir": output_dir, "sources": sources})
+    def fake_start_job(
+        kind, work, *, output_dir = None, sources = None, with_progress = False
+    ):
+        jobs.append(
+            {
+                "kind": kind,
+                "output_dir": output_dir,
+                "sources": sources,
+                "with_progress": with_progress,
+                "work": work,
+            }
+        )
         return {
             "job_id": "job-1",
             "kind": kind,
@@ -46,6 +57,7 @@ def started_jobs(monkeypatch) -> list[dict]:
             "library_visible": advanced._library_visible(
                 Path(output_dir) if output_dir else None
             ),
+            "progress": None,
             "result": None,
             "error": None,
         }
@@ -478,6 +490,42 @@ def test_merge_validate_blocks_conflicting_tokenizers(client: TestClient, tmp_pa
     assert "refuse to write" in body["blocked_reason"]
 
 
+def test_merge_validate_sees_a_hub_conflict_before_the_weights_download(
+    client: TestClient, tmp_path: Path, monkeypatch
+):
+    """A Hub parent is checked from its JSON metadata, so Inspect can show the block.
+
+    Previously a repo id reported ``not_checked`` here, so the UI never rendered the
+    override it needs, while ``merge/run`` refused inside the job -- a dead end.
+    """
+    a = _tokenized_checkpoint(
+        tmp_path / "a", eos = "<|endoftext|>", eos_id = 151643, pad = "<|endoftext|>", pad_id = 151643
+    )
+    b = _tokenized_checkpoint(
+        tmp_path / "b", eos = "<|im_end|>", eos_id = 151645, pad = "<|im_end|>", pad_id = 151645
+    )
+    roots = {"org/a": a, "org/b": b}
+
+    def fake_download(repo_id: str, filename: str, token: str | None) -> str:
+        target = Path(roots[repo_id]) / filename
+        if not target.is_file():
+            raise FileNotFoundError(filename)
+        return str(target)
+
+    monkeypatch.setattr(tokenizer_check, "_hub_download", fake_download)
+
+    body = client.post(
+        "/api/advanced/merge/validate",
+        json={"model_a": "hf://org/a", "model_b": "hf://org/b", "hf_token": "hf_test"},
+    ).json()
+
+    assert body["tokenizer"]["status"] == "conflict"
+    assert body["tokenizer"]["ok"] is False
+    assert body["blocked"] is True
+    # The refusal has to name the way forward, since the UI renders it verbatim.
+    assert "allow_tokenizer_conflict" in body["blocked_reason"]
+
+
 def test_merge_validate_passes_matching_tokenizers(client: TestClient, tmp_path: Path):
     a = _tokenized_checkpoint(tmp_path / "a")
     b = _tokenized_checkpoint(tmp_path / "b")
@@ -521,6 +569,43 @@ def test_layer_lr_plan_returns_a_checked_zone_map(client: TestClient):
     assert body["coverage"]["exact_one_zone"] is True
     assert body["preview"]["zone_map"]
     assert body["zone_definition_hash"]
+
+
+def test_layer_lr_plan_reports_module_kind_groups(client: TestClient):
+    body = client.post(
+        "/api/advanced/layer-lr/plan",
+        json={
+            "base_learning_rate": 2e-4,
+            "num_layers": 6,
+            "zone_multipliers": {"early": 0.5},
+            "kind_multipliers": {"attention": 0.5, "mlp": 2.0},
+            "param_names": [
+                "model.layers.0.self_attn.q_proj.weight",
+                "model.layers.0.mlp.down_proj.weight",
+                "model.norm.weight",
+            ],
+        },
+    ).json()
+    assert body["preview"]["kind_multipliers"]["attention"] == 0.5
+    kinds = {entry["kind"]: entry for entry in body["preview"]["kind_map"]}
+    assert kinds["attention"]["params"] == 1
+    assert kinds["mlp"]["params"] == 1
+    attention = next(
+        entry for entry in body["preview"]["entries"] if entry["kind"] == "attention"
+    )
+    # zone 0.5 * kind 0.5 on a 2e-4 base.
+    assert attention["multiplier"] == pytest.approx(0.25)
+    assert attention["lr"] == pytest.approx(5e-5)
+    assert body["coverage"]["exact_one_zone"] is True
+
+
+def test_layer_lr_plan_rejects_unknown_kinds(client: TestClient):
+    response = client.post(
+        "/api/advanced/layer-lr/plan",
+        json={"kind_multipliers": {"attn": 0.5}},
+    )
+    assert response.status_code == 400
+    assert "Unknown parameter kinds" in response.json()["detail"]
 
 
 def test_qat_validate_measures_at_the_export_quant(client: TestClient, tmp_path: Path):
@@ -611,3 +696,123 @@ def test_merge_run_hands_its_sources_to_the_broker(client: TestClient, tmp_path:
         "/api/advanced/merge/run", json={"model_a": model_a, "model_b": model_b}
     )
     assert started_jobs[-1]["sources"] == [model_a, model_b]
+
+
+# ---------------------------------------------------------------------------
+# N-way merges (2 to 6 parents)
+# ---------------------------------------------------------------------------
+
+
+def _n_checkpoints(tmp_path: Path, count: int) -> list[str]:
+    return [
+        _tokenized_checkpoint(tmp_path / f"parent{index}") for index in range(count)
+    ]
+
+
+def test_merge_plan_reports_every_parent(client: TestClient, tmp_path: Path):
+    models = _n_checkpoints(tmp_path, 3)
+    body = client.post(
+        "/api/advanced/merge/plan",
+        json={"models": models, "top_k": 2, "temperature": 1.0},
+    ).json()
+
+    assert len(body["models"]) == 3
+    assert len(body["alignments"]) == 3
+    assert len(body["moe"]["experts"]) == 3
+    # The pair summary is still there for the cards that read it.
+    assert body["alignment"]["mode"] == "identical"
+
+
+def test_merge_run_accepts_six_parents(client: TestClient, tmp_path: Path, started_jobs):
+    models = _n_checkpoints(tmp_path, 6)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={
+            "models": models,
+            "weights": [1, 1, 1, 1, 1, 1],
+            "method": "linear",
+            "density": 0.5,
+            "max_shard_gb": 4,
+        },
+    )
+
+    assert response.status_code == 200
+    assert started_jobs[0]["sources"] == models
+    # The page needs a progress stream for a run this long.
+    assert started_jobs[0]["with_progress"] is True
+
+
+def test_merge_run_rejects_seven_parents(client: TestClient, tmp_path: Path):
+    models = _n_checkpoints(tmp_path, 7)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={"models": models, "method": "linear", "density": 0.5, "max_shard_gb": 4},
+    )
+    assert response.status_code == 422
+
+
+def test_merge_run_rejects_duplicate_parents(client: TestClient, tmp_path: Path, started_jobs):
+    models = _n_checkpoints(tmp_path, 2)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={
+            "models": [models[0], models[0]],
+            "method": "linear",
+            "density": 0.5,
+            "max_shard_gb": 4,
+        },
+    )
+    assert response.status_code == 400
+    assert "different model" in response.json()["detail"]
+    assert started_jobs == []
+
+
+def test_merge_run_rejects_a_weight_per_wrong_parent_count(
+    client: TestClient, tmp_path: Path, started_jobs
+):
+    models = _n_checkpoints(tmp_path, 3)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={
+            "models": models,
+            "weights": [1, 1],
+            "method": "linear",
+            "density": 0.5,
+            "max_shard_gb": 4,
+        },
+    )
+    assert response.status_code == 400
+    assert "Expected 3 weights" in response.json()["detail"]
+    assert started_jobs == []
+
+
+def test_merge_validate_checks_every_parent(client: TestClient, tmp_path: Path):
+    models = _n_checkpoints(tmp_path, 3)
+    body = client.post(
+        "/api/advanced/merge/validate", json={"models": models}
+    ).json()
+    assert len(body["sources"]) == 3
+    assert body["tokenizer"]["status"] == "ok"
+
+
+def test_start_job_publishes_merge_progress(client: TestClient):
+    """The merge page's bar reads /jobs/{id}.progress, so the runner must fill it."""
+    import time
+
+    def work(progress):
+        progress({"stage": "merging", "done": 1, "total": 4, "message": "1/4 tensors"})
+        return {"ok": True}
+
+    record = advanced._start_job("merge", work, with_progress = True)
+    job = record
+    for _ in range(200):
+        job = advanced._job(record["job_id"])
+        if job["status"] != "running":
+            break
+        time.sleep(0.01)
+
+    assert job["status"] == "completed"
+    assert job["progress"]["stage"] == "merging"
+    assert job["progress"]["done"] == 1
+    assert job["progress"]["total"] == 4
+    assert "updated_at" in job["progress"]

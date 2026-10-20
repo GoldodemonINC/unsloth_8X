@@ -52,6 +52,48 @@ def test_alignment_modes():
     assert any("MMoE" in warning for warning in cross_arch.warnings)
 
 
+def test_every_parent_in_a_merge_plans_to_the_same_target():
+    """3+ parents need one target, or their tensors never share a shape.
+
+    Planning each parent against the first gave parent 2 a 1024-wide target and
+    parent 3 a 1536-wide one, so a key owned by all three could not be added up
+    and the merge quietly copied a single parent instead.
+    """
+    specs = [
+        _spec("qwen2", 2048, 32, 16, 8192, 151000),
+        _spec("qwen2", 1024, 24, 16, 4096, 151000),
+        _spec("qwen2", 1536, 28, 16, 6144, 151000),
+    ]
+    plans = merge.plan_alignment_many(specs)
+
+    assert len(plans) == 3
+    # The smallest dimension any parent has, for every parent.
+    assert {plan.target_hidden for plan in plans} == {1024}
+    assert {plan.target_layers for plan in plans} == {24}
+    assert {plan.target_intermediate for plan in plans} == {4096}
+    # The largest parent has to move too; leaving it at its own width was the bug.
+    assert plans[0].hidden_strategy == "crop"
+    assert plans[0].mode == "cross_scale"
+
+
+def test_a_shared_shape_group_plans_as_identical():
+    specs = [_spec("llama", 2048, 24, 16, 8192, 32000) for _ in range(4)]
+    plans = merge.plan_alignment_many(specs)
+    assert {plan.mode for plan in plans} == {"identical"}
+    assert plans[0].target_hidden == 2048
+
+
+def test_a_cross_architecture_parent_still_recommends_mmoe():
+    specs = [
+        _spec("llama", 2048, 24, 16, 8192, 32000),
+        _spec("llama", 2048, 24, 16, 8192, 32000),
+        _spec("qwen3", 2048, 24, 16, 8192, 32000),
+    ]
+    plans = merge.plan_alignment_many(specs)
+    assert [plan.mmoe_required for plan in plans] == [False, False, True]
+    assert any("MMoE" in warning for warning in plans[2].warnings)
+
+
 def test_align_tensor_crop_pad_and_svd():
     arr = np.arange(12, dtype=np.float32).reshape(3, 4)
     cropped = merge.align_tensor(arr, (2, 3))
@@ -366,3 +408,113 @@ def test_merge_bfloat16_aligns_mismatched_rows(tmp_path: Path):
     # Rows the small model never had stay at half the full model's value.
     expected_tail = full["model.embed_tokens.weight"][12:].to(torch.float32) * 0.5
     assert torch.allclose(merged[12:].to(torch.float32), expected_tail, atol = 1e-2)
+
+
+# ---------------------------------------------------------------------------
+# N-way merges (2 to 6 parents)
+# ---------------------------------------------------------------------------
+
+
+def _values_checkpoint(tmp_path: Path, name: str, value: float, *, with_probe: bool = True) -> Path:
+    torch = pytest.importorskip("torch")
+    # Match the config _write_bf16_checkpoint writes (vocab 16, hidden 8), so the
+    # alignment plan is the identity and the test measures the blend, not padding.
+    tensors = {"model.embed_tokens.weight": torch.full((16, 8), float(value))}
+    if with_probe:
+        tensors["model.norm.weight"] = torch.full((8,), float(value))
+    return _write_bf16_checkpoint(tmp_path / name, tensors)
+
+
+def _merged_float(out: Path, key: str = "model.embed_tokens.weight"):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors import safe_open
+
+    weight_map = json.loads(
+        (out / "model.safetensors.index.json").read_text(encoding = "utf-8")
+    )["weight_map"]
+    with safe_open(str(out / weight_map[key]), framework = "pt") as handle:
+        tensor = handle.get_tensor(key).to("cpu", torch.float32)
+    return tensor
+
+
+def test_three_way_merge_uses_normalized_weights(tmp_path: Path):
+    pytest.importorskip("torch")
+    a = _values_checkpoint(tmp_path, "a", 1.0)
+    b = _values_checkpoint(tmp_path, "b", 2.0)
+    c = _values_checkpoint(tmp_path, "c", 6.0)
+    out = tmp_path / "merged"
+
+    report = merge.merge_checkpoints_many(
+        [str(a), str(b), str(c)], str(out), method = "linear", weights = [1, 1, 2]
+    )
+
+    assert report["status"] == "completed"
+    assert report["model_count"] == 3
+    assert report["weights"] == [0.25, 0.25, 0.5]
+    assert len(report["models"]) == 3
+    assert len(report["alignments"]) == 3
+    assert report["metrics"]["blended_tensors"] == 2
+    # 0.25*1 + 0.25*2 + 0.5*6 = 3.75
+    assert _merged_float(out).mean().item() == pytest.approx(3.75, abs = 2e-2)
+
+
+def test_a_key_missing_from_one_parent_is_reweighted_not_zeroed(tmp_path: Path):
+    torch = pytest.importorskip("torch")
+    a = _values_checkpoint(tmp_path, "a", 1.0, with_probe = False)
+    b = _values_checkpoint(tmp_path, "b", 3.0, with_probe = False)
+    # The third parent owns only the norm tensor, so it contributes nothing to
+    # the embed blend: [1, 1, 2] becomes [0.5, 0.5] there.
+    c = _write_bf16_checkpoint(
+        tmp_path / "c", {"model.norm.weight": torch.full((8,), 9.0)}
+    )
+    out = tmp_path / "merged"
+
+    merge.merge_checkpoints_many(
+        [str(a), str(b), str(c)], str(out), method = "linear", weights = [1, 1, 2]
+    )
+
+    assert _merged_float(out).mean().item() == pytest.approx(2.0, abs = 2e-2)
+    # The norm tensor exists only in the third parent, so it is copied through.
+    assert _merged_float(out, "model.norm.weight").mean().item() == pytest.approx(
+        9.0, abs = 2e-2
+    )
+
+
+def test_merge_progress_reports_stages_and_tensor_counts(tmp_path: Path):
+    pytest.importorskip("torch")
+    a = _values_checkpoint(tmp_path, "a", 1.0)
+    b = _values_checkpoint(tmp_path, "b", 2.0)
+    events: list[dict] = []
+
+    merge.merge_checkpoints_many(
+        [str(a), str(b)],
+        str(tmp_path / "merged"),
+        method = "linear",
+        progress = events.append,
+    )
+
+    stages = [event["stage"] for event in events]
+    assert stages[0] == "resolving"
+    assert "merging" in stages
+    assert stages[-1] == "completed"
+    merging = [event for event in events if event["stage"] == "merging"]
+    assert merging[-1]["done"] == merging[-1]["total"]
+    assert merging[-1]["blended_tensors"] == 2
+    assert merging[-1]["bytes_written"] > 0
+
+
+def test_merge_rejects_a_bad_parent_count_or_weight_list(tmp_path: Path):
+    pytest.importorskip("torch")
+    a = _values_checkpoint(tmp_path, "a", 1.0)
+    b = _values_checkpoint(tmp_path, "b", 2.0)
+    with pytest.raises(ValueError, match = "at least two"):
+        merge.merge_checkpoints_many([str(a)], str(tmp_path / "one"))
+    with pytest.raises(ValueError, match = "At most"):
+        merge.merge_checkpoints_many(
+            [str(a)] * 7, str(tmp_path / "seven")
+        )
+    with pytest.raises(ValueError, match = "Expected 2 weights"):
+        merge.merge_checkpoints_many(
+            [str(a), str(b)], str(tmp_path / "bad-weights"), weights = [1.0]
+        )

@@ -220,7 +220,12 @@ def zone_definition_hash(config: Mapping[str, Any] | None) -> str | None:
         return None
     relevant = {
         key: config.get(key)
-        for key in ("zone_multipliers", "layer_multipliers", "depth_curve")
+        for key in (
+            "zone_multipliers",
+            "kind_multipliers",
+            "layer_multipliers",
+            "depth_curve",
+        )
     }
     return hash_payload(relevant)
 

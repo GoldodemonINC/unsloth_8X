@@ -377,3 +377,74 @@ def test_merge_above_one_child_reads_tokenizer_from_a_hub_cache_layout(tmp_path:
     fingerprint = tokenizer_check.fingerprint_tokenizer(tmp_path / "cache")
     assert fingerprint.source == str(snapshot)
     assert fingerprint.special["bos_token"].token_id == 1
+
+
+def test_hub_parents_are_compared_from_metadata_without_weights(
+    tmp_path: Path, monkeypatch
+):
+    """The refusal has to be visible on Inspect, before the snapshot is downloaded.
+
+    This is the reported Qwen2 pair: identical shapes and vocabulary, but one
+    parent declares ``<|endoftext|>`` as eos/pad and the other ``<|im_end|>``.
+    If the preview could not read a Hub parent, the UI had no conflict to show,
+    so the override its own error message recommends was unreachable.
+    """
+    pytest.importorskip("numpy")
+    pytest.importorskip("safetensors")
+    a = _write_checkpoint(
+        tmp_path / "a",
+        eos = "<|endoftext|>",
+        eos_id = 151643,
+        pad = "<|endoftext|>",
+        pad_id = 151643,
+    )
+    b = _write_checkpoint(
+        tmp_path / "b",
+        eos = "<|im_end|>",
+        eos_id = 151645,
+        pad = "<|im_end|>",
+        pad_id = 151645,
+    )
+    roots = {"org/a": a, "org/b": b}
+    requested: list[str] = []
+
+    def fake_download(repo_id: str, filename: str, token: str | None) -> str:
+        requested.append(f"{repo_id}/{filename}")
+        target = roots[repo_id] / filename
+        if not target.is_file():
+            # What hf_hub_download does for a file a repo does not ship.
+            raise FileNotFoundError(filename)
+        return str(target)
+
+    monkeypatch.setattr(tokenizer_check, "_hub_download", fake_download)
+
+    report = tokenizer_check.compare_tokenizers(
+        ["hf://org/a", "hf://org/b"], token = "hf_test"
+    )
+
+    assert report.status == "conflict"
+    assert any(
+        "eos_token" in conflict and "151643" in conflict and "151645" in conflict
+        for conflict in report.conflicts
+    )
+    # The result carries one parent's tokenizer; say which, since that decides
+    # what the merged model will stop on.
+    assert any("first parent" in note for note in report.notes)
+    # Reported by repo id, not by the cache folder it was read from.
+    assert report.fingerprints[0].source == "hf://org/a"
+    # Metadata only: no weight file was ever requested.
+    assert requested
+    assert not any(name.endswith(".safetensors") for name in requested)
+
+
+def test_unreadable_hub_metadata_explains_that_a_token_is_needed(monkeypatch):
+    def deny(repo_id: str, filename: str, token: str | None) -> str:
+        raise RuntimeError("401 Client Error: Invalid username or password")
+
+    monkeypatch.setattr(tokenizer_check, "_hub_download", deny)
+
+    with pytest.raises(ValueError) as error:
+        tokenizer_check.fingerprint_source("hf://gated/private-model")
+    message = str(error.value)
+    assert "gated/private-model" in message
+    assert "Hugging Face token" in message
