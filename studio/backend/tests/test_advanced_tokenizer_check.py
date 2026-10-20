@@ -21,13 +21,15 @@ def _write_checkpoint(
     directory: Path,
     *,
     bos: str = "<s>",
-    bos_id: int = 1,
+    bos_id: int | None = 1,
     eos: str = "</s>",
-    eos_id: int = 2,
+    eos_id: int | None = 2,
     pad: str | None = None,
     pad_id: int | None = None,
     vocab: int = 32,
     template: str | None = None,
+    include_ids: bool = True,
+    added: dict[str, int] | None = None,
 ) -> Path:
     """A tiny but complete checkpoint: config, tokenizer files and one shard."""
     np = pytest.importorskip("numpy")
@@ -35,32 +37,35 @@ def _write_checkpoint(
     from safetensors.numpy import save_file
 
     directory.mkdir(parents = True, exist_ok = True)
-    (directory / "config.json").write_text(
-        json.dumps(
-            {
-                "model_type": "qwen2",
-                "hidden_size": 8,
-                "num_hidden_layers": 1,
-                "num_attention_heads": 2,
-                "intermediate_size": 8,
-                "vocab_size": vocab,
-                "bos_token_id": bos_id,
-                "eos_token_id": eos_id,
-            }
-        ),
-        encoding = "utf-8",
-    )
+    model_config: dict[str, object] = {
+        "model_type": "qwen2",
+        "hidden_size": 8,
+        "num_hidden_layers": 1,
+        "num_attention_heads": 2,
+        "intermediate_size": 8,
+        "vocab_size": vocab,
+    }
+    if include_ids:
+        model_config["bos_token_id"] = bos_id
+        model_config["eos_token_id"] = eos_id
+    (directory / "config.json").write_text(json.dumps(model_config), encoding = "utf-8")
     special: dict[str, object] = {"bos_token": bos, "eos_token": eos}
-    config_tokens: dict[str, object] = {"bos_token_id": bos_id, "eos_token_id": eos_id}
+    config_tokens: dict[str, object] = {"tokenizer_class": "Qwen2Tokenizer"}
+    if include_ids:
+        config_tokens["bos_token_id"] = bos_id
+        config_tokens["eos_token_id"] = eos_id
     if pad is not None:
         special["pad_token"] = pad
-        config_tokens["pad_token_id"] = pad_id
+        if include_ids:
+            config_tokens["pad_token_id"] = pad_id
     if template is not None:
         config_tokens["chat_template"] = template
     (directory / "special_tokens_map.json").write_text(json.dumps(special), encoding = "utf-8")
     (directory / "tokenizer_config.json").write_text(
-        json.dumps({"tokenizer_class": "Qwen2Tokenizer", **config_tokens}), encoding = "utf-8"
+        json.dumps(config_tokens), encoding = "utf-8"
     )
+    if added is not None:
+        (directory / "added_tokens.json").write_text(json.dumps(added), encoding = "utf-8")
     save_file(
         {"model.embed_tokens.weight": np.zeros((vocab, 8), dtype = np.float32)},
         str(directory / "model.safetensors"),
@@ -111,6 +116,62 @@ def test_pad_present_on_one_parent_is_a_warning_not_a_conflict(tmp_path: Path):
     assert report.status == "warning"
     assert any("pad_token" in warning for warning in report.warnings)
     assert not report.conflicts
+
+
+def test_the_same_id_under_different_labels_does_not_conflict(tmp_path: Path):
+    """Qwen checkpoints label id 151643 both ``<|endoftext|>`` and ``<|end_of_text|>``.
+
+    The vocabulary index is what the model emits, so the labels disagreeing is a
+    note, not a reason to refuse a merge.
+    """
+    a = _write_checkpoint(tmp_path / "a", eos = "<|endoftext|>", eos_id = 151643)
+    b = _write_checkpoint(tmp_path / "b", eos = "<|end_of_text|>", eos_id = 151643)
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "ok"
+    assert report.conflicts == ()
+    assert any("different labels" in note for note in report.notes)
+
+
+def test_added_tokens_prove_two_labels_are_the_same_token(tmp_path: Path):
+    """With no id in either config, ``added_tokens.json`` resolves the label to an id."""
+    payload = {"<|endoftext|>": 151643, "<|end_of_text|>": 151643}
+    a = _write_checkpoint(
+        tmp_path / "a",
+        eos = "<|endoftext|>",
+        eos_id = None,
+        include_ids = False,
+        added = payload,
+    )
+    b = _write_checkpoint(
+        tmp_path / "b",
+        eos = "<|end_of_text|>",
+        eos_id = None,
+        include_ids = False,
+        added = payload,
+    )
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "ok"
+    assert report.fingerprints[0].special["eos_token"].token_id == 151643
+
+
+def test_an_unresolvable_label_difference_still_conflicts(tmp_path: Path):
+    a = _write_checkpoint(
+        tmp_path / "a", eos = "<eos-a>", eos_id = None, include_ids = False
+    )
+    b = _write_checkpoint(
+        tmp_path / "b", eos = "<eos-b>", eos_id = None, include_ids = False
+    )
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "conflict"
+    assert any("cannot be proven equal" in conflict for conflict in report.conflicts)
+
+
+def test_different_eos_ids_explain_why_it_matters(tmp_path: Path):
+    a = _write_checkpoint(tmp_path / "a", eos = "<|endoftext|>", eos_id = 151643)
+    b = _write_checkpoint(tmp_path / "b", eos = "<|endoftext|>", eos_id = 151645)
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "conflict"
+    assert any("Generation would stop" in conflict for conflict in report.conflicts)
 
 
 def test_different_bos_ids_conflict(tmp_path: Path):

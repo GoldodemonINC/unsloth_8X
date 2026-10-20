@@ -208,18 +208,32 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
     tokenizer_config = _read_json(root / "tokenizer_config.json") or {}
     model_config = _read_json(root / "config.json") or {}
 
+    # ``added_tokens.json`` maps a token string to its vocabulary id. It is the
+    # authority when a config names a token but does not give its id, and it is
+    # what proves two differently-labelled tokens are the same token.
+    added = _read_json(root / "added_tokens.json")
+    added_map: dict[str, int] = (
+        {
+            str(key): int(value)
+            for key, value in added.items()
+            if isinstance(value, int) and not isinstance(value, bool)
+        }
+        if isinstance(added, dict)
+        else {}
+    )
+    added_count = len(added) if isinstance(added, dict) else None
+
     special: dict[str, SpecialToken] = {}
     for role in ALL_ROLES:
         token, token_id = _role_from_config(special_map, role)
         config_token, config_id = _role_from_config(tokenizer_config, role)
         token = token if token is not None else config_token
         token_id = token_id if token_id is not None else config_id
+        if token_id is None and token is not None:
+            token_id = added_map.get(token)
         if role in ("bos_token", "eos_token") and token_id is None:
             token_id = _first_int(model_config, role if role.endswith("_id") else f"{role}_id")
         special[role] = SpecialToken(role = role, token = token, token_id = token_id)
-
-    added = _read_json(root / "added_tokens.json")
-    added_count = len(added) if isinstance(added, dict) else None
 
     template = tokenizer_config.get("chat_template")
     if template is None:
@@ -267,18 +281,31 @@ def _describe(token: SpecialToken) -> str:
     return "not set"
 
 
-def _same_role(left: SpecialToken, right: SpecialToken) -> list[str]:
-    """Reasons this role disagrees, as user-facing sentences (empty when it agrees)."""
+def _same_role(left: SpecialToken, right: SpecialToken) -> tuple[list[str], list[str]]:
+    """Compare one role, returning ``(problems, notes)``.
+
+    The **id** is what changes behaviour: it is the vocabulary index the model
+    actually emits. Two parents that declare the same id under different labels
+    (``<|endoftext|>`` vs ``<|end_of_text|>``, both 151643) tokenize and generate
+    identically, so that is a note, not a conflict. Only ids that differ -- or
+    unlabelled tokens with no id to resolve -- are a real disagreement.
+    """
+    if left.token_id is not None and right.token_id is not None:
+        if left.token_id != right.token_id:
+            return [f"id {left.token_id} vs {right.token_id}"], []
+        if left.token is not None and right.token is not None and left.token != right.token:
+            return [], [
+                f"both use id {left.token_id} with different labels "
+                f"({left.token!r} vs {right.token!r}); behaviour is identical"
+            ]
+        return [], []
     problems: list[str] = []
     if left.token is not None and right.token is not None and left.token != right.token:
-        problems.append(f"token {left.token!r} vs {right.token!r}")
-    if (
-        left.token_id is not None
-        and right.token_id is not None
-        and left.token_id != right.token_id
-    ):
-        problems.append(f"id {left.token_id} vs {right.token_id}")
-    return problems
+        problems.append(
+            f"token {left.token!r} vs {right.token!r} (no vocabulary id recorded for "
+            "at least one side, so they cannot be proven equal)"
+        )
+    return problems, []
 
 
 def compare_tokenizers(
@@ -301,12 +328,20 @@ def compare_tokenizers(
             if not left.declared and not right.declared:
                 continue
             if left.declared and right.declared:
-                problems = _same_role(left, right)
+                problems, agreements = _same_role(left, right)
+                notes.extend(f"{role}: {note}" for note in agreements)
                 if problems:
                     text = (
                         f"{role} disagrees between the parents: {_describe(left)} vs "
                         f"{_describe(right)} ({' and '.join(problems)})."
                     )
+                    if role == "eos_token":
+                        text += (
+                            " Generation would stop at a different token for each parent's "
+                            "text, which is the silent failure this check exists to catch."
+                        )
+                    elif role == "pad_token":
+                        text += " Batches would be padded with a different real token."
                     if role in CRITICAL_ROLES:
                         conflicts.append(text)
                     else:
