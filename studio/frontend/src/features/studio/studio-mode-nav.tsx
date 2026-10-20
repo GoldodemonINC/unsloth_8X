@@ -5,9 +5,10 @@ import { Link, useRouterState } from "@tanstack/react-router";
 import { cn } from "@/lib/utils";
 import type { ReactElement } from "react";
 
+// Merging Studio is reached from the sidebar only; it is a different job from
+// training and exporting, not a third tab of the same one.
 const MODES = [
   { to: "/studio", label: "Training Studio", match: "/studio" },
-  { to: "/merge", label: "Merging Studio", match: "/merge" },
   { to: "/export", label: "Export / VRAM Fit", match: "/export" },
 ] as const;
 

@@ -12,6 +12,7 @@ import type { ReactElement } from "react";
 import { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { ChartsSection } from "./sections/charts-section";
+import { type AppliedLayerLr, LayerLrPanel } from "./sections/layer-lr-panel";
 import { OffloadPanel } from "./sections/offload-panel";
 import { ProgressSection } from "./sections/progress-section";
 import {
@@ -21,7 +22,7 @@ import {
 import { TrainingStartOverlay } from "./training-start-overlay";
 
 /** Retry budget for the run-config lookup. The row is inserted at start_training(), but a
-* lookup issued in the same instant can still miss it; a few short retries cover that. */
+ * lookup issued in the same instant can still miss it; a few short retries cover that. */
 const RUN_CONFIG_FETCH_RETRIES = 5;
 const RUN_CONFIG_FETCH_RETRY_MS = 1000;
 
@@ -87,6 +88,11 @@ export function LiveTrainingView(): ReactElement {
     jobId: string;
     override: RunConfigOverride | undefined;
   } | null>(null);
+  // The saved run config itself, so the Layer LR panel reads what the run was
+  // started with rather than the form the user may have edited since.
+  const [runConfig, setRunConfig] = useState<Record<string, unknown> | null>(
+    null,
+  );
   // Retry budget for the transient 404 below, keyed by job so a new run starts fresh.
   const [fetchAttempt, setFetchAttempt] = useState<{
     jobId: string;
@@ -105,6 +111,7 @@ export function LiveTrainingView(): ReactElement {
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     getTrainingRun(jobId, controller.signal)
       .then((detail) => {
+        setRunConfig(detail.config);
         setFetchedRunConfig({
           jobId,
           override: mapRunConfigToOverride(detail.config),
@@ -128,6 +135,22 @@ export function LiveTrainingView(): ReactElement {
     };
   }, [runtime.jobId, fetchedRunConfig, fetchAttempt]);
   const runConfigOverride = activeRunOverride(fetchedRunConfig, runtime.jobId);
+
+  const savedLayerLr = (
+    runConfig?.advanced as { layer_lr?: AppliedLayerLr } | undefined
+  )?.layer_lr;
+  const baseLearningRate = Number(
+    runConfig?.learning_rate ?? runConfigOverride?.learningRate ?? 0,
+  );
+  // The planner reads tensor names off disk, so a Hub model is only useful once
+  // the run recorded where it was cached; otherwise it shows the zone table.
+  const planModel =
+    typeof runConfig?.model_local_path === "string" &&
+    runConfig.model_local_path.length > 0
+      ? runConfig.model_local_path
+      : typeof runConfig?.model_name === "string"
+        ? runConfig.model_name
+        : (runtime.startModelName ?? null);
 
   const activeProjectName =
     runtime.startProjectName !== null
@@ -196,6 +219,14 @@ export function LiveTrainingView(): ReactElement {
             configOverride={runConfigOverride}
           />
         </div>
+        <LayerLrPanel
+          baseLearningRate={
+            Number.isFinite(baseLearningRate) ? baseLearningRate : 0
+          }
+          layerLr={savedLayerLr}
+          model={planModel}
+          liveLearningRate={runtime.currentLearningRate}
+        />
         <OffloadPanel isTrainingRunning={viewData.isTrainingRunning} />
         <ChartsSection
           currentStep={viewData.currentStep}
