@@ -1,0 +1,275 @@
+{
+  "recipe": {
+    "model_providers": [
+      {
+        "name": "openai-compatible",
+        "endpoint": "",
+        "provider_type": "openai",
+        "extra_headers": {},
+        "extra_body": {}
+      }
+    ],
+    "mcp_providers": [],
+    "model_configs": [
+      {
+        "alias": "teacher-model",
+        "model": "",
+        "provider": "openai-compatible",
+        "inference_parameters": {
+          "temperature": 0.7
+        }
+      }
+    ],
+    "tool_configs": [],
+    "columns": [
+      {
+        "column_type": "sampler",
+        "name": "domain",
+        "drop": false,
+        "sampler_type": "category",
+        "params": {
+          "values": [
+            "support reply",
+            "technical explanation",
+            "procedure",
+            "summary"
+          ]
+        }
+      },
+      {
+        "column_type": "llm-text",
+        "name": "instruction",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Write ONE realistic request in the {{ domain }} category, the way a real user would phrase it. 1 to 3 sentences, with a concrete detail or constraint.\n\nReturn only the request.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You write everyday requests, not benchmark prompts."
+      },
+      {
+        "column_type": "llm-text",
+        "name": "draft",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Answer this request:\n\n{{ instruction }}\n\nWrite a confident, well-formatted answer that is plausible but has exactly one real flaw: a wrong number, a missing step, an unsupported claim, or an unsafe suggestion. Do not announce the flaw.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You write convincing near-misses. The flaw must be findable, not hidden."
+      },
+      {
+        "column_type": "llm-text",
+        "name": "critique",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Request:\n{{ instruction }}\n\nDraft answer:\n{{ draft }}\n\nName the single most important flaw in the draft, say why it is wrong, and say what the answer should do instead. 2 to 4 sentences. Do not rewrite the answer.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You review answers. One specific flaw, no padding."
+      },
+      {
+        "column_type": "llm-text",
+        "name": "chosen",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Request:\n{{ instruction }}\n\nDraft answer:\n{{ draft }}\n\nReview:\n{{ critique }}\n\nRewrite the answer so it keeps everything correct in the draft and fixes the flaw. Same shape and length as the draft.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You revise answers. Keep the good parts, fix the stated flaw, change nothing else."
+      },
+      {
+        "column_type": "llm-judge",
+        "name": "revision_judge",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Request:\n{{ instruction }}\n\nDraft:\n{{ draft }}\n\nRevised:\n{{ chosen }}\n\nReview:\n{{ critique }}",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "scores": [
+          {
+            "name": "RevisionBetter",
+            "description": "The revised answer actually fixes the flaw",
+            "options": {
+              "0": "worse than the draft",
+              "1": "unchanged",
+              "2": "fixed, with new problems",
+              "3": "cleanly fixed"
+            }
+          },
+          {
+            "name": "PairUsable",
+            "description": "This is a fair preference pair for DPO",
+            "options": {
+              "0": "draft is not clearly worse",
+              "1": "too similar",
+              "2": "usable",
+              "3": "clean preference"
+            }
+          }
+        ],
+        "system_prompt": "You grade preference pairs. A good pair has one clear, explainable difference."
+      }
+    ],
+    "processors": []
+  },
+  "run": {
+    "rows": 5,
+    "preview": true,
+    "output_formats": [
+      "jsonl"
+    ]
+  },
+  "ui": {
+    "nodes": [
+      {
+        "id": "domain",
+        "x": 120,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "instruction",
+        "x": 590,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "draft",
+        "x": 1060,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "critique",
+        "x": 1530,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "chosen",
+        "x": 2000,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "revision_judge",
+        "x": 2470,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "openai-compatible",
+        "x": -900,
+        "y": 180,
+        "width": 400
+      },
+      {
+        "id": "teacher-model",
+        "x": -420,
+        "y": 180,
+        "width": 400
+      },
+      {
+        "id": "note_1",
+        "x": -900,
+        "y": -300,
+        "width": 420,
+        "node_type": "markdown_note",
+        "name": "note_1",
+        "markdown": "### Critique and Revise\nGenerate `{instruction, draft, chosen}` triples for preference training.\n\n**The flow**\n- `draft` answers with exactly one deliberate flaw, kept quiet\n- `critique` names that flaw and why it matters\n- `chosen` rewrites the answer, changing only the flaw\n- `revision_judge` checks the pair is actually usable\n\n**Why a critique column**\nOne run yields two datasets: preferences for DPO or GRPO, and review text for a critic model. Drop `critique` from the export if you only want pairs.",
+        "note_color": "#E0F2FE",
+        "note_opacity": "35"
+      },
+      {
+        "id": "note_2",
+        "x": -430,
+        "y": -300,
+        "width": 420,
+        "node_type": "markdown_note",
+        "name": "note_2",
+        "markdown": "**Pick a model first**\n`teacher-model` has no model set. Use a strong model for `draft` too, otherwise the flaw is a knowledge gap and `chosen` repeats it.\n\n**Filter**\nExport only rows where `PairUsable` is 2 or 3. A pair the judge calls too similar teaches the model noise, not preference.",
+        "note_color": "#E0F2FE",
+        "note_opacity": "35"
+      }
+    ],
+    "edges": [
+      {
+        "from": "openai-compatible",
+        "to": "teacher-model",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "semantic-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "instruction",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "draft",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "critique",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "chosen",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "revision_judge",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "domain",
+        "to": "instruction",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "instruction",
+        "to": "draft",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "draft",
+        "to": "critique",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "critique",
+        "to": "chosen",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "chosen",
+        "to": "revision_judge",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      }
+    ],
+    "layout_direction": "LR"
+  }
+}

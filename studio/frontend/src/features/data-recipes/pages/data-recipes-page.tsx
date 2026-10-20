@@ -31,6 +31,8 @@ import { OPEN_LEARNING_RECIPES_ON_ARRIVAL_KEY } from "@/lib/navigation-intents";
 import { toastError } from "@/shared/toast";
 import {
   Album02Icon,
+  ArrowReloadHorizontalIcon,
+  Brain02Icon,
   CodeIcon,
   CookBookIcon,
   Database02Icon,
@@ -40,6 +42,7 @@ import {
   GithubIcon,
   Plant01Icon,
   PlusSignIcon,
+  ToolsIcon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useNavigate } from "@tanstack/react-router";
@@ -179,6 +182,70 @@ const TEMPLATE_CARDS: TemplateCard[] = [
       "rgb(148 163 184 / 0.45)",
     ],
     learningRecipeId: "github-support-bot",
+  },
+  {
+    title: "Reasoning Distill",
+    description:
+      "Step-by-step traces from a strong teacher, judged for correctness before they reach the student.",
+    icon: Brain02Icon,
+    difficulty: "Intermediate",
+    learningBadges: ["LLM Text", "LLM Judge", "Expression", "Reasoning"],
+    surfaceClassName:
+      "from-indigo-500/15 via-blue-500/5 to-transparent dark:from-indigo-400/20 dark:via-blue-400/10 dark:to-indigo-950/16",
+    shineColor: [
+      "rgb(99 102 241 / 0.45)",
+      "rgb(59 130 246 / 0.4)",
+      "rgb(129 140 248 / 0.45)",
+    ],
+    learningRecipeId: "reasoning-distill",
+  },
+  {
+    title: "Code Dataset from Text",
+    description:
+      "Upload documents and get coding tasks, checked Python answers, and a faithfulness score per chunk.",
+    icon: DocumentAttachmentIcon,
+    difficulty: "Intermediate",
+    learningBadges: ["Unstructured", "LLM Code", "Python Check", "LLM Judge"],
+    surfaceClassName:
+      "from-teal-500/15 via-emerald-500/5 to-transparent dark:from-teal-400/20 dark:via-emerald-400/10 dark:to-teal-950/16",
+    shineColor: [
+      "rgb(20 184 166 / 0.45)",
+      "rgb(16 185 129 / 0.4)",
+      "rgb(45 212 191 / 0.45)",
+    ],
+    learningRecipeId: "code-from-text",
+  },
+  {
+    title: "Tool-Call Traces",
+    description:
+      "Typed tool schemas, the request that needs one, and the single valid call, scored for grounding.",
+    icon: ToolsIcon,
+    difficulty: "Advanced",
+    learningBadges: ["Structured LLM", "LLM Judge", "Function Calling"],
+    surfaceClassName:
+      "from-rose-500/15 via-pink-500/5 to-transparent dark:from-rose-400/20 dark:via-pink-400/10 dark:to-rose-950/16",
+    shineColor: [
+      "rgb(244 63 94 / 0.45)",
+      "rgb(236 72 153 / 0.4)",
+      "rgb(251 113 133 / 0.45)",
+    ],
+    learningRecipeId: "tool-call-traces",
+  },
+  {
+    title: "Critique and Revise",
+    description:
+      "A deliberately flawed draft, the critique that names the flaw, and the corrected answer for DPO pairs.",
+    icon: ArrowReloadHorizontalIcon,
+    difficulty: "Advanced",
+    learningBadges: ["LLM Text", "LLM Judge", "DPO Pairs"],
+    surfaceClassName:
+      "from-purple-500/15 via-violet-500/5 to-transparent dark:from-purple-400/20 dark:via-violet-400/10 dark:to-purple-950/16",
+    shineColor: [
+      "rgb(168 85 247 / 0.45)",
+      "rgb(139 92 246 / 0.4)",
+      "rgb(192 132 252 / 0.45)",
+    ],
+    learningRecipeId: "critique-revise",
   },
 ];
 

@@ -23,6 +23,13 @@ const githubSupportBotUrl = new URL(
   "./github-support-bot.json",
   import.meta.url,
 ).href;
+const reasoningDistillUrl = new URL("./reasoning-distill.json", import.meta.url)
+  .href;
+const codeFromTextUrl = new URL("./code-from-text.json", import.meta.url).href;
+const toolCallTracesUrl = new URL("./tool-call-traces.json", import.meta.url)
+  .href;
+const critiqueReviseUrl = new URL("./critique-revise.json", import.meta.url)
+  .href;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -147,5 +154,33 @@ export const LEARNING_RECIPES: LearningRecipeDef[] = [
     description:
       "Crawl real GitHub issues and PRs and turn each thread into a {User, Assistant} training pair.",
     loadPayload: () => loadPayloadFromUrl(githubSupportBotUrl),
+  },
+  {
+    id: "reasoning-distill",
+    title: "Reasoning Distill",
+    description:
+      "Distil a strong model's step-by-step traces into reasoning + answer rows, kept only where a judge passes them.",
+    loadPayload: () => loadPayloadFromUrl(reasoningDistillUrl),
+  },
+  {
+    id: "code-from-text",
+    title: "Code Dataset from Text",
+    description:
+      "Upload documents and turn each chunk into a coding task, a checked Python answer, and a faithfulness score.",
+    loadPayload: () => loadPayloadFromUrl(codeFromTextUrl),
+  },
+  {
+    id: "tool-call-traces",
+    title: "Tool-Call Traces",
+    description:
+      "Invent a typed tool schema per domain, then generate the request and the single valid call it needs.",
+    loadPayload: () => loadPayloadFromUrl(toolCallTracesUrl),
+  },
+  {
+    id: "critique-revise",
+    title: "Critique and Revise",
+    description:
+      "Generate {instruction, draft, chosen} triples for DPO or GRPO, plus the critique that explains the fix.",
+    loadPayload: () => loadPayloadFromUrl(critiqueReviseUrl),
   },
 ];

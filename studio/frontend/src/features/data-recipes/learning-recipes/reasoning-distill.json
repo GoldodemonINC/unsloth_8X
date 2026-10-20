@@ -1,0 +1,320 @@
+{
+  "recipe": {
+    "model_providers": [
+      {
+        "name": "openai-compatible",
+        "endpoint": "",
+        "provider_type": "openai",
+        "extra_headers": {},
+        "extra_body": {}
+      }
+    ],
+    "mcp_providers": [],
+    "model_configs": [
+      {
+        "alias": "teacher-model",
+        "model": "",
+        "provider": "openai-compatible",
+        "inference_parameters": {
+          "temperature": 0.7
+        }
+      }
+    ],
+    "tool_configs": [],
+    "columns": [
+      {
+        "column_type": "sampler",
+        "name": "subject",
+        "drop": false,
+        "sampler_type": "category",
+        "params": {
+          "values": [
+            "mathematics",
+            "physics",
+            "logic",
+            "data analysis"
+          ]
+        }
+      },
+      {
+        "column_type": "sampler",
+        "name": "skill",
+        "drop": false,
+        "sampler_type": "subcategory",
+        "params": {
+          "category": "subject",
+          "values": {
+            "mathematics": [
+              "rates and ratios",
+              "systems of equations",
+              "probability"
+            ],
+            "physics": [
+              "kinematics",
+              "energy conservation",
+              "circuits"
+            ],
+            "logic": [
+              "ordering constraints",
+              "deduction",
+              "counterfactuals"
+            ],
+            "data analysis": [
+              "rate comparison",
+              "weighted averages",
+              "trend reading"
+            ]
+          }
+        }
+      },
+      {
+        "column_type": "llm-text",
+        "name": "problem",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Write ONE hard but fully self-contained {{ subject }} problem about {{ skill }}.\n\nRules:\n- every number and fact needed to solve it must be in the text\n- the answer must be verifiable, not a matter of opinion\n- no multiple choice, no hints, no solution\n\nReturn only the problem statement.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You write exam-grade problems that have exactly one checkable answer."
+      },
+      {
+        "column_type": "llm-text",
+        "name": "reasoning",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Solve this problem step by step.\n\nProblem:\n{{ problem }}\n\nRules:\n- one numbered step per line, each depending on the previous one\n- state the quantity you compute and why\n- if a step needs an assumption, say so explicitly\n- no final answer yet, and do not restate the question\n\nReturn only the numbered steps.",
+        "with_trace": "none",
+        "extract_reasoning_content": true,
+        "system_prompt": "You are producing a faithful chain of thought, not a summary of one."
+      },
+      {
+        "column_type": "llm-text",
+        "name": "final_answer",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Problem:\n{{ problem }}\n\nReasoning:\n{{ reasoning }}\n\nGive the final answer only, with its unit if it has one. If the reasoning above is wrong, give the correct answer instead.",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "system_prompt": "You answer in one line. No preamble, no restating the reasoning."
+      },
+      {
+        "column_type": "expression",
+        "name": "response",
+        "drop": false,
+        "expr": "{{ reasoning }}\n\nFinal answer: {{ final_answer }}",
+        "dtype": "str"
+      },
+      {
+        "column_type": "llm-judge",
+        "name": "reasoning_judge",
+        "drop": false,
+        "model_alias": "teacher-model",
+        "prompt": "Check the reasoning against the problem.\n\nProblem:\n{{ problem }}\n\nReasoning:\n{{ reasoning }}\n\nAnswer: {{ final_answer }}",
+        "with_trace": "none",
+        "extract_reasoning_content": false,
+        "scores": [
+          {
+            "name": "Correctness",
+            "description": "The final answer is the one a careful solver would give",
+            "options": {
+              "0": "wrong",
+              "1": "partly right, arithmetic slip",
+              "2": "right answer, shaky reasoning",
+              "3": "right answer and sound reasoning"
+            }
+          },
+          {
+            "name": "Faithfulness",
+            "description": "Each step follows from the previous one and from the problem",
+            "options": {
+              "0": "invents facts",
+              "1": "skips steps",
+              "2": "mostly sound",
+              "3": "every step justified"
+            }
+          }
+        ],
+        "system_prompt": "You grade reasoning traces. Be strict about invented numbers and skipped steps."
+      }
+    ],
+    "processors": []
+  },
+  "run": {
+    "rows": 5,
+    "preview": true,
+    "output_formats": [
+      "jsonl"
+    ]
+  },
+  "ui": {
+    "nodes": [
+      {
+        "id": "subject",
+        "x": 120,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "skill",
+        "x": 590,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "problem",
+        "x": 1060,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "reasoning",
+        "x": 1530,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "final_answer",
+        "x": 2000,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "response",
+        "x": 2470,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "reasoning_judge",
+        "x": 2940,
+        "y": 620,
+        "width": 400
+      },
+      {
+        "id": "openai-compatible",
+        "x": -900,
+        "y": 180,
+        "width": 400
+      },
+      {
+        "id": "teacher-model",
+        "x": -420,
+        "y": 180,
+        "width": 400
+      },
+      {
+        "id": "note_1",
+        "x": -900,
+        "y": -300,
+        "width": 420,
+        "node_type": "markdown_note",
+        "name": "note_1",
+        "markdown": "### Reasoning Distill\nTurn a strong model's chain of thought into training rows for a smaller one.\n\n**The flow**\n- `problem` writes a self-contained task\n- `reasoning` solves it one step per line\n- `final_answer` answers from that reasoning\n- `response` stitches them into `steps + Final answer: <answer>`\n\n**Pick a model first**\n`teacher-model` has no model set. Point it at a strong teacher (a large local model, or any OpenAI-compatible endpoint). Distillation is only worth it when the teacher is better than the student you are training.",
+        "note_color": "#E0F2FE",
+        "note_opacity": "35"
+      },
+      {
+        "id": "note_2",
+        "x": -430,
+        "y": -300,
+        "width": 420,
+        "node_type": "markdown_note",
+        "name": "note_2",
+        "markdown": "**Judge before you train**\n`reasoning_judge` scores Correctness and Faithfulness from 0 to 3. Keep rows where both are 2 or higher, otherwise you teach the student the teacher's mistakes.\n\nTypical yield is 40 to 60 percent. Raising rows to 200 and keeping the 3s beats keeping every row from a softer teacher.",
+        "note_color": "#E0F2FE",
+        "note_opacity": "35"
+      },
+      {
+        "id": "note_3",
+        "x": 40,
+        "y": 140,
+        "width": 420,
+        "node_type": "markdown_note",
+        "name": "note_3",
+        "markdown": "**Train on it**\nKeep `reasoning` and `final_answer` in the export and let your chat template wrap them, or train on `response` as a single assistant turn. The second form is what the RL `reasoning_tags` reward preset expects.",
+        "note_color": "#E0F2FE",
+        "note_opacity": "35"
+      }
+    ],
+    "edges": [
+      {
+        "from": "openai-compatible",
+        "to": "teacher-model",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "semantic-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "problem",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "reasoning",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "final_answer",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "teacher-model",
+        "to": "reasoning_judge",
+        "type": "semantic",
+        "source_handle": "semantic-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "subject",
+        "to": "skill",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "skill",
+        "to": "problem",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "problem",
+        "to": "reasoning",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "reasoning",
+        "to": "final_answer",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "final_answer",
+        "to": "response",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      },
+      {
+        "from": "response",
+        "to": "reasoning_judge",
+        "type": "canvas",
+        "source_handle": "data-out",
+        "target_handle": "data-in"
+      }
+    ],
+    "layout_direction": "LR"
+  }
+}
