@@ -4,6 +4,7 @@
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
 import { hfApiToken, useHfTokenStore, useHubModelSearch } from "@/features/hub";
+import { filterMergeSearchResults } from "@/features/advanced/merge-search-filter";
 import { useDebouncedValue } from "@/hooks";
 import { cn } from "@/lib/utils";
 import { Search01Icon } from "@hugeicons/core-free-icons";
@@ -11,10 +12,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useMemo, useState } from "react";
 
 const REPO_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
-
-// Weight-space merging needs full-precision safetensors, so quantized
-// repackagings are hidden from the list (a typed id still works).
-const QUANTIZED_RE = /(^|[-_.])(bnb|awq|gptq|gguf|mlx|exl2|4bit|8bit|int4|int8|fp8)([-_.]|$)/i;
 
 function formatCount(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0";
@@ -65,10 +62,7 @@ export function MergeModelSlot({
   }, [debouncedQuery]);
 
   const visible = useMemo(
-    () =>
-      results
-        .filter((row) => !QUANTIZED_RE.test(row.id))
-        .slice(0, 6),
+    () => filterMergeSearchResults(results).slice(0, 6),
     [results],
   );
   const exactAlreadyListed =
