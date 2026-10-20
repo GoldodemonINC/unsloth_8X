@@ -8,7 +8,7 @@ import type { ReactElement } from "react";
 const MODES = [
   { to: "/studio", label: "Training Studio", match: "/studio" },
   { to: "/merge", label: "Merging Studio", match: "/merge" },
-  { to: "/export", label: "Export / Splitter", match: "/export" },
+  { to: "/export", label: "Export / VRAM Fit", match: "/export" },
 ] as const;
 
 export function StudioModeNav(): ReactElement {

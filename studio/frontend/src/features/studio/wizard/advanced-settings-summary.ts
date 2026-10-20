@@ -156,7 +156,7 @@ export function countNonDefaultAdvancedSettings(
 /**
  * Advanced Studio features the run will actually use. They ride alongside the
  * hyperparameter count so the run preview does not claim "Defaults" while QAT,
- * a curriculum, blended streams or an auto-eval suite are switched on.
+ * a curriculum, blended streams or a Regression Guard suite are switched on.
  */
 export function countEnabledAdvancedFeatures(
   advanced: AdvancedTrainingState | undefined,

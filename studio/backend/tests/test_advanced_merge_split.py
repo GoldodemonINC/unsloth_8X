@@ -210,3 +210,159 @@ def test_resolve_checkpoint_source_returns_local_path(tmp_path):
     local = tmp_path / "ckpt"
     local.mkdir()
     assert merge.resolve_checkpoint_source(str(local)) == str(local)
+
+
+def _write_bf16_checkpoint(directory: Path, tensors: dict, *, vocab: int = 16) -> Path:
+    """A bf16 checkpoint on disk, config and all, like a Hub download."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors.torch import save_file
+
+    directory.mkdir(parents = True, exist_ok = True)
+    (directory / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen2",
+                "hidden_size": 8,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 2,
+                "intermediate_size": 8,
+                "vocab_size": vocab,
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = {
+        key: (value.to(torch.bfloat16) if value.is_floating_point() else value).contiguous()
+        for key, value in tensors.items()
+    }
+    save_file(payload, str(directory / "model.safetensors"))
+    return directory
+
+
+def test_merge_bfloat16_checkpoints_keeps_dtype(tmp_path: Path):
+    """A bf16 pair used to die on read: numpy has no bfloat16 dtype."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors import safe_open
+
+    generator = torch.Generator().manual_seed(0)
+    a_tensors = {
+        "model.embed_tokens.weight": torch.randn(16, 8, generator = generator),
+        "model.layers.0.mlp.down_proj.weight": torch.randn(8, 8, generator = generator),
+        "model.layers.0.self_attn.rotary_emb.inv_freq": torch.arange(4, dtype = torch.int64),
+    }
+    b_tensors = {
+        "model.embed_tokens.weight": torch.randn(16, 8, generator = generator),
+        "model.layers.0.mlp.down_proj.weight": torch.randn(8, 8, generator = generator),
+        "model.layers.0.self_attn.rotary_emb.inv_freq": torch.arange(4, dtype = torch.int64),
+    }
+    model_a = _write_bf16_checkpoint(tmp_path / "a", a_tensors)
+    model_b = _write_bf16_checkpoint(tmp_path / "b", b_tensors)
+
+    out = tmp_path / "merged"
+    report = merge.merge_checkpoints(
+        str(model_a), str(model_b), str(out), method = "slerp", weight = 0.75
+    )
+    assert report["status"] == "completed"
+    assert report["metrics"]["blended_tensors"] == 2
+    assert report["metrics"]["skipped_tensors"] == 1
+    # bf16 weights are 2 bytes each; the int64 bookkeeping tensor keeps its 8.
+    assert report["metrics"]["total_bytes"] == 16 * 8 * 2 + 8 * 8 * 2 + 4 * 8
+    assert (out / "merge_report.json").is_file()
+
+    weight_map = json.loads((out / "model.safetensors.index.json").read_text(encoding = "utf-8"))["weight_map"]
+    assert set(weight_map) == set(a_tensors)
+    with safe_open(str(out / weight_map["model.embed_tokens.weight"]), framework = "pt") as handle:
+        merged = handle.get_tensor("model.embed_tokens.weight")
+        integers = handle.get_tensor("model.layers.0.self_attn.rotary_emb.inv_freq")
+    assert merged.dtype == torch.bfloat16
+    assert merged.shape == (16, 8)
+    assert integers.dtype == torch.int64
+    assert torch.equal(integers, a_tensors["model.layers.0.self_attn.rotary_emb.inv_freq"])
+    # SLERP between two close-to-orthogonal draws is not a plain lerp, but the
+    # output must still be a unit-ish blend of the two: check it moved off both.
+    a_embed = a_tensors["model.embed_tokens.weight"].to(torch.float32)
+    b_embed = b_tensors["model.embed_tokens.weight"].to(torch.float32)
+    merged_embed = merged.to(torch.float32)
+    assert not torch.allclose(merged_embed, a_embed, atol = 1e-2)
+    assert not torch.allclose(merged_embed, b_embed, atol = 1e-2)
+
+
+def test_split_bfloat16_checkpoint_sizes_and_reloads(tmp_path: Path):
+    """bf16 tensors are 2 bytes each, and the shards must keep the dtype."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors import safe_open
+
+    generator = torch.Generator().manual_seed(1)
+    tensors = {
+        "a": torch.randn(32, 64, generator = generator),
+        "b": torch.randn(8, 8, generator = generator),
+    }
+    source = _write_bf16_checkpoint(tmp_path / "src", tensors)
+
+    inventory = splitter._inventory(str(source))
+    by_key = {key: nbytes for key, _shape, nbytes in inventory}
+    assert by_key["a"] == 32 * 64 * 2
+    assert by_key["b"] == 8 * 8 * 2
+
+    out = tmp_path / "split"
+    manifest = splitter.split_checkpoint(
+        str(source), str(out), max_shard_bytes = 5_000, reserve_fraction = 0.0, prefer = "ram"
+    )
+    assert manifest["status"] == "completed"
+    assert manifest["total_bytes"] == sum(by_key.values())
+
+    weight_map = json.loads((out / "model.safetensors.index.json").read_text(encoding = "utf-8"))["weight_map"]
+    for key, shard in weight_map.items():
+        with safe_open(str(out / shard), framework = "pt") as handle:
+            restored = handle.get_tensor(key)
+        assert restored.dtype == torch.bfloat16
+        assert torch.equal(restored, tensors[key].to(torch.bfloat16))
+
+
+def test_slerp_keeps_the_tensor_shape():
+    """The 1-D SLERP math used to leak out, writing flat tensors into the checkpoint."""
+    rng = np.random.default_rng(3)
+    a = rng.normal(size = (4, 6)).astype(np.float32)
+    b = rng.normal(size = (4, 6)).astype(np.float32)
+    blended = merge.blend_tensors([a, b], method = "slerp", weights = [0.25, 0.75])
+    assert blended.shape == (4, 6)
+
+    c = rng.normal(size = (4, 6)).astype(np.float32)
+    blended_three = merge.blend_tensors([a, b, c], method = "slerp")
+    assert blended_three.shape == (4, 6)
+
+    cube = rng.normal(size = (2, 3, 4)).astype(np.float32)
+    other = rng.normal(size = (2, 3, 4)).astype(np.float32)
+    assert merge.blend_tensors([cube, other], method = "slerp").shape == (2, 3, 4)
+
+    # Endpoints still come back exactly, at the right shape.
+    assert np.allclose(merge.blend_tensors([a, b], method = "slerp", weights = [1, 0]), a)
+
+
+def test_merge_bfloat16_aligns_mismatched_rows(tmp_path: Path):
+    """Padding a bf16 tensor goes through float32 and must come back shaped."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors import safe_open
+
+    generator = torch.Generator().manual_seed(7)
+    small = {"model.embed_tokens.weight": torch.randn(12, 8, generator = generator)}
+    full = {"model.embed_tokens.weight": torch.randn(16, 8, generator = generator)}
+    model_a = _write_bf16_checkpoint(tmp_path / "a", small, vocab = 16)
+    model_b = _write_bf16_checkpoint(tmp_path / "b", full, vocab = 16)
+
+    out = tmp_path / "merged"
+    report = merge.merge_checkpoints(str(model_a), str(model_b), str(out), method = "linear", weight = 0.5)
+    assert report["metrics"]["blended_tensors"] == 1
+
+    weight_map = json.loads((out / "model.safetensors.index.json").read_text(encoding = "utf-8"))["weight_map"]
+    with safe_open(str(out / weight_map["model.embed_tokens.weight"]), framework = "pt") as handle:
+        merged = handle.get_tensor("model.embed_tokens.weight")
+    assert merged.dtype == torch.bfloat16
+    assert merged.shape == (16, 8)
+    # Rows the small model never had stay at half the full model's value.
+    expected_tail = full["model.embed_tokens.weight"][12:].to(torch.float32) * 0.5
+    assert torch.allclose(merged[12:].to(torch.float32), expected_tail, atol = 1e-2)

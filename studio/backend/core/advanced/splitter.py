@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import tensor_io
+
 DEFAULT_RESERVE_FRACTION = 0.15
 
 
@@ -249,8 +251,6 @@ class ShardPlan:
 
 def _inventory(source: str) -> list[tuple[str, tuple[int, ...], int]]:
     """List (key, shape, nbytes) from a safetensors file or checkpoint dir."""
-    from safetensors import safe_open
-
     path = Path(source)
     files: list[Path]
     if path.is_file():
@@ -266,7 +266,7 @@ def _inventory(source: str) -> list[tuple[str, tuple[int, ...], int]]:
         raise ValueError(f"No safetensors files found in {source!r}.")
     inventory: list[tuple[str, tuple[int, ...], int]] = []
     for file_path in files:
-        with safe_open(str(file_path), framework="np") as handle:
+        with tensor_io.open_file(file_path) as handle:
             for key in handle.keys():
                 shape = tuple(int(v) for v in handle.get_slice(key).get_shape())
                 itemsize = _dtype_itemsize(handle, key)
@@ -275,13 +275,9 @@ def _inventory(source: str) -> list[tuple[str, tuple[int, ...], int]]:
 
 
 def _dtype_itemsize(handle, key: str) -> int:
-    """Read dtype through a tiny slice so we never materialize the tensor."""
-    try:
-        slice_ = handle.get_slice(key)
-        sample = slice_[0]
-        return int(getattr(sample, "itemsize", 4))
-    except Exception:
-        return 4
+    """Bytes per element, from the header: bf16 is 2, and reading a sample tensor
+    to measure it would fail on exactly the dtypes this needs to size."""
+    return tensor_io.dtype_itemsize(handle, key)
 
 
 def _numel(shape: Sequence[int]) -> int:
@@ -374,10 +370,6 @@ def split_checkpoint(
     max_shard_bytes_user: int | None = None,
 ) -> dict[str, Any]:
     """Stream a checkpoint into bounded shards and write the index + manifest."""
-    import numpy as np
-    from safetensors import safe_open
-    from safetensors.numpy import save_file
-
     source_path = Path(source).expanduser()
     if not source_path.exists():
         raise ValueError(f"Checkpoint not found: {source}")
@@ -406,7 +398,7 @@ def split_checkpoint(
             source_files = sorted(source_path.glob("*.safetensors"))
     tensor_file: dict[str, Path] = {}
     for file_path in source_files:
-        with safe_open(str(file_path), framework="np") as handle:
+        with tensor_io.open_file(file_path) as handle:
             for key in handle.keys():
                 tensor_file[key] = file_path
 
@@ -420,18 +412,18 @@ def split_checkpoint(
 
     with contextlib.ExitStack() as stack:
         handles = {
-            path: stack.enter_context(safe_open(str(path), framework="np"))
+            path: stack.enter_context(tensor_io.open_file(path))
             for path in set(tensor_file.values())
         }
         for shard_index, shard in enumerate(plan.shards, start=1):
             payload: dict[str, Any] = {}
             for chunk in shard:
                 handle = handles[tensor_file[chunk.key]]
-                array = np.asarray(handle.get_tensor(chunk.key))
-                payload[chunk.key] = array
-                total_written += int(array.nbytes)
+                tensor = tensor_io.load_tensor(handle, chunk.key)
+                payload[chunk.key] = tensor
+                total_written += tensor_io.nbytes(tensor)
             name = f"model-{shard_index:05d}.safetensors"
-            save_file(payload, str(out / name))
+            tensor_io.save_tensors(payload, str(out / name))
             written_files.append(name)
             for key in payload:
                 weight_map[key] = name

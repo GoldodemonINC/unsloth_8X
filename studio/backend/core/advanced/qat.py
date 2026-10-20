@@ -360,3 +360,257 @@ def qat_summary(session: QatSession) -> dict[str, Any]:
         "group_size": session.config.group_size,
         "layers": len(session.modules),
     }
+
+
+# ---------------------------------------------------------------------------
+# Quality at the export quant
+# ---------------------------------------------------------------------------
+
+# A delta below this many points is indistinguishable from run-to-run noise on a
+# 1.5B model, so it is labelled rather than reported as a win or a loss.
+NOISE_POINTS = 1.5
+
+METHODOLOGY = (
+    "Weight-space retention at the export grid: for each shared matrix, how much of "
+    "its own signal survives fake-quantization (cosine of the quantized tensor "
+    "against the original), candidate minus parent, in points. Positive means the "
+    "fine-tune is more robust to the export format. This is a cheap structural "
+    "proxy, not a benchmark: run an eval suite for task accuracy."
+)
+
+
+def _cosine_points(left, right) -> float:
+    """Cosine similarity of two flat float32 arrays, in points (0-100)."""
+    import numpy as np
+
+    a = np.asarray(left, dtype = np.float32).reshape(-1)
+    b = np.asarray(right, dtype = np.float32).reshape(-1)
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 0.0:
+        return 100.0
+    return float(np.dot(a, b) / denom) * 100.0
+
+
+def retention_points(values, config: QatConfig | dict[str, Any] | None = None) -> float:
+    """How much of *values* survives fake-quantization at the configured grid."""
+    import numpy as np
+
+    cfg = config if isinstance(config, QatConfig) else validate_qat_config(config)
+    original = np.asarray(values, dtype = np.float32)
+    quantized = np.asarray(fake_quantize(original, cfg), dtype = np.float32)
+    return _cosine_points(quantized, original)
+
+
+def compare_at_export(
+    parent_tensors: dict[str, Any],
+    candidate_tensors: dict[str, Any],
+    *,
+    config: QatConfig | dict[str, Any] | None = None,
+    max_tensors: int = 64,
+    min_numel: int = 4096,
+) -> dict[str, Any]:
+    """Measure candidate-vs-parent quality *at the export quant*.
+
+    Both sides are quantized with the same grid the checkpoint will be exported
+    to, so the number reflects the format the user will actually ship -- not
+    bf16. Tensors are compared only where both checkpoints have the same shape;
+    a reshaped tensor is reported as incomparable rather than silently skipped.
+    """
+    cfg = config if isinstance(config, QatConfig) else validate_qat_config(config)
+    shared = sorted(set(parent_tensors) & set(candidate_tensors))
+    compared = 0
+    deltas: list[float] = []
+    parent_retention: list[float] = []
+    candidate_retention: list[float] = []
+    details: list[dict[str, Any]] = []
+    incomparable: list[str] = []
+    for key in shared:
+        if compared >= max_tensors:
+            break
+        left = parent_tensors[key]
+        right = candidate_tensors[key]
+        try:
+            import numpy as np
+
+            left_array = np.asarray(left, dtype = np.float32)
+            right_array = np.asarray(right, dtype = np.float32)
+        except (TypeError, ValueError):
+            incomparable.append(key)
+            continue
+        if left_array.shape != right_array.shape:
+            incomparable.append(key)
+            continue
+        if left_array.size < min_numel or left_array.ndim < 2:
+            continue
+        base = retention_points(left_array, cfg)
+        candidate = retention_points(right_array, cfg)
+        delta = candidate - base
+        compared += 1
+        deltas.append(delta)
+        parent_retention.append(base)
+        candidate_retention.append(candidate)
+        details.append(
+            {
+                "tensor": key,
+                "parent_points": round(base, 3),
+                "candidate_points": round(candidate, 3),
+                "delta_points": round(delta, 3),
+            }
+        )
+
+    if not compared:
+        return {
+            "status": "inconclusive",
+            "verdict": "inconclusive",
+            "format": cfg.format,
+            "group_size": cfg.group_size,
+            "tensors_compared": 0,
+            "delta_points": None,
+            "reason": (
+                "No shared floating matrices were large enough to compare at the export "
+                "quant. Point both paths at the parent and the fine-tuned checkpoint."
+            ),
+            "methodology": METHODOLOGY,
+        }
+
+    mean_delta = sum(deltas) / len(deltas)
+    worst = min(details, key = lambda item: item["delta_points"])
+    if mean_delta >= NOISE_POINTS:
+        verdict = "pareto-positive"
+    elif mean_delta <= -NOISE_POINTS:
+        verdict = "regressed"
+    else:
+        verdict = "within-noise"
+    blocked = sorted(
+        item["tensor"] for item in details if item["delta_points"] <= -NOISE_POINTS
+    )
+    return {
+        "status": "measured",
+        "verdict": verdict,
+        "format": cfg.format,
+        "group_size": cfg.group_size,
+        "tensors_compared": compared,
+        "delta_points": round(mean_delta, 3),
+        "parent_retention_points": round(sum(parent_retention) / len(parent_retention), 3),
+        "candidate_retention_points": round(
+            sum(candidate_retention) / len(candidate_retention), 3
+        ),
+        "noise_floor_points": NOISE_POINTS,
+        "worst_tensor": worst,
+        "regressed_tensors": blocked[:10],
+        "incomparable_tensors": incomparable[:10],
+        "per_tensor": details[:10],
+        "methodology": METHODOLOGY,
+        "claim": (
+            f"Quantization-aware fine-tuning at {cfg.format} (group {cfg.group_size}); the "
+            "weights are quantized in the forward pass, so the claim covers that grid only."
+        ),
+    }
+
+
+def validate_checkpoints_at_export(
+    parent: str,
+    candidate: str,
+    *,
+    config: QatConfig | dict[str, Any] | None = None,
+    max_tensors: int = 64,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Stream two checkpoints and compare them at the export quant.
+
+    Only one tensor pair is resident at a time, so this runs on a CPU host with
+    the same streaming discipline as the merge.
+    """
+    from . import merge, tensor_io  # noqa: PLC0415 - avoids an import cycle
+
+    parent_dir = merge.resolve_checkpoint_source(parent, token = token)
+    candidate_dir = merge.resolve_checkpoint_source(candidate, token = token)
+    parent_entries, _ = merge._open_state(parent_dir)
+    candidate_entries, _ = merge._open_state(candidate_dir)
+    shared = sorted(set(parent_entries) & set(candidate_entries))
+
+    cfg = config if isinstance(config, QatConfig) else validate_qat_config(config)
+    compared = 0
+    deltas: list[float] = []
+    parent_retention: list[float] = []
+    candidate_retention: list[float] = []
+    details: list[dict[str, Any]] = []
+    incomparable: list[str] = []
+    for key in shared:
+        if compared >= max_tensors:
+            break
+        left = merge._read_tensor(parent_entries, key)
+        right = merge._read_tensor(candidate_entries, key)
+        if not (tensor_io.is_floating(left) and tensor_io.is_floating(right)):
+            continue
+        left_array = tensor_io.to_float32(left)
+        right_array = tensor_io.to_float32(right)
+        if left_array.shape != right_array.shape:
+            incomparable.append(key)
+            continue
+        if left_array.size < cfg.min_numel or left_array.ndim < 2:
+            continue
+        base = retention_points(left_array, cfg)
+        candidate_points = retention_points(right_array, cfg)
+        compared += 1
+        deltas.append(candidate_points - base)
+        parent_retention.append(base)
+        candidate_retention.append(candidate_points)
+        details.append(
+            {
+                "tensor": key,
+                "parent_points": round(base, 3),
+                "candidate_points": round(candidate_points, 3),
+                "delta_points": round(candidate_points - base, 3),
+            }
+        )
+
+    if not compared:
+        return {
+            "status": "inconclusive",
+            "verdict": "inconclusive",
+            "format": cfg.format,
+            "group_size": cfg.group_size,
+            "tensors_compared": 0,
+            "delta_points": None,
+            "reason": "No shared floating matrices were large enough to compare.",
+            "methodology": METHODOLOGY,
+        }
+
+    mean_delta = sum(deltas) / len(deltas)
+    verdict = (
+        "pareto-positive"
+        if mean_delta >= NOISE_POINTS
+        else "regressed"
+        if mean_delta <= -NOISE_POINTS
+        else "within-noise"
+    )
+    worst = min(details, key = lambda item: item["delta_points"])
+    return {
+        "status": "measured",
+        "verdict": verdict,
+        "format": cfg.format,
+        "group_size": cfg.group_size,
+        "tensors_compared": compared,
+        "delta_points": round(mean_delta, 3),
+        "parent_retention_points": round(sum(parent_retention) / len(parent_retention), 3),
+        "candidate_retention_points": round(
+            sum(candidate_retention) / len(candidate_retention), 3
+        ),
+        "noise_floor_points": NOISE_POINTS,
+        "worst_tensor": worst,
+        "regressed_tensors": [
+            item["tensor"] for item in details if item["delta_points"] <= -NOISE_POINTS
+        ][:10],
+        "incomparable_tensors": incomparable[:10],
+        "per_tensor": details[:10],
+        "parent": parent_dir,
+        "candidate": candidate_dir,
+        "methodology": METHODOLOGY,
+        "claim": (
+            f"Quantization-aware fine-tuning at {cfg.format} (group {cfg.group_size}); the "
+            "weights are quantized in the forward pass, so the claim covers that grid only."
+        ),
+    }

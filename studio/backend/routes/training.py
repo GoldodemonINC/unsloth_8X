@@ -531,7 +531,7 @@ def _validate_advanced_request(request: TrainingStartRequest) -> None:
             )
         if advanced.auto_eval and advanced.auto_eval.enabled:
             if not advanced.auto_eval.suites:
-                raise ValueError("Auto-eval needs at least one benchmark suite.")
+                raise ValueError("Regression Guard needs at least one benchmark suite.")
             eval_harness.build_eval_plan(
                 advanced.auto_eval.suites,
                 baseline_model = request.model_name,

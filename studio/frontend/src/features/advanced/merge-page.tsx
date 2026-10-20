@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import { useNavigate } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,12 +27,17 @@ import {
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useState, type ReactElement } from "react";
 import {
+  evalMergedModel,
+  fetchOutputLocations,
   planMerge,
   runMerge,
   runMoeMerge,
+  validateMerge,
   waitForJob,
   type AdvancedJob,
   type MergePlanResponse,
+  type MergeValidation,
+  type StructuralEval,
 } from "./api/advanced-api";
 import { MergeModelSlot } from "./components/merge-model-slot";
 import { MERGE_METHODS, type MergeMethod } from "./types";
@@ -52,6 +58,30 @@ function bytes(value: number | null | undefined): string {
     unit += 1;
   }
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
+// A drive path or a rooted POSIX path; a bare name is resolved by the backend.
+function isAbsolutePath(value: string): boolean {
+  return /^(?:[A-Za-z]:[\\/]|[\\/])/.test(value.trim());
+}
+
+function slashes(value: string): string {
+  return value.trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+/** Whether a path sits inside the folder Studio scans for models to list, quantize and run. */
+function isInsideOutputsRoot(value: string, root: string | null): boolean {
+  if (!root) return false;
+  const target = slashes(value);
+  const base = slashes(root);
+  if (!target || !base) return false;
+  return target === base || target.startsWith(`${base}/`);
+}
+
+/** The folder name Studio uses as a model name (Export preselects checkpoints by it). */
+function outputFolderName(path: string): string {
+  const parts = slashes(path).split("/");
+  return parts[parts.length - 1] ?? "";
 }
 
 function SpecCard({
@@ -90,6 +120,7 @@ function SpecCard({
 
 export function MergePage(): ReactElement {
   const signalReady = useAppShellReadySignal();
+  const navigate = useNavigate();
   const hfToken = useHfTokenStore((s) => s.token);
   const accessToken = hfApiToken(hfToken) ?? null;
   const [modelA, setModelA] = useState("");
@@ -103,16 +134,45 @@ export function MergePage(): ReactElement {
   const [density, setDensity] = useState(0.5);
   const [topK, setTopK] = useState(2);
   const [temperature, setTemperature] = useState(1);
-  // A bare name resolves under the backend's own outputs folder, so the default works on
-  // Windows and on a Colab runtime; an absolute path is still taken as given.
-  const [outputDir, setOutputDir] = useState("merged");
+  // Blank means "let the backend pick": it writes a folder named after both models directly
+  // inside the folder Studio scans, so the Library, Export and Chat pick the result up.
+  const [outputDir, setOutputDir] = useState("");
+  const [outputTouched, setOutputTouched] = useState(false);
+  const [libraryRoot, setLibraryRoot] = useState<string | null>(null);
   const [job, setJob] = useState<AdvancedJob | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  // The pre-merge gates, run on Inspect: the tokenizer disagreement that otherwise
+  // produces a model which loads fine and answers slightly wrong.
+  const [validation, setValidation] = useState<MergeValidation | null>(null);
+  const [validating, setValidating] = useState(false);
+  const [allowTokenConflict, setAllowTokenConflict] = useState(false);
+  const [structural, setStructural] = useState<StructuralEval | null>(null);
 
   useEffect(() => {
     signalReady();
   }, [signalReady]);
+
+  // Only used for the hint and the "outside the library" warning; a merge resolves its
+  // own default server-side, so a failure here costs nothing.
+  useEffect(() => {
+    let cancelled = false;
+    fetchOutputLocations()
+      .then((locations) => {
+        if (!cancelled) setLibraryRoot(locations.outputs_root);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const typedOutput = outputDir.trim();
+  const outsideLibrary =
+    typedOutput !== "" &&
+    isAbsolutePath(typedOutput) &&
+    libraryRoot !== null &&
+    !isInsideOutputsRoot(typedOutput, libraryRoot);
 
   const inspect = async () => {
     setPlanning(true);
@@ -127,6 +187,9 @@ export function MergePage(): ReactElement {
       });
       setPlan(result);
       setMode(result.recommended_mode);
+      if (!outputTouched && result.suggested_output_dir) {
+        setOutputDir(result.suggested_output_dir);
+      }
       if (result.models[1].hidden_size) {
         setTopK(Math.min(2, result.moe.experts.length));
       }
@@ -136,22 +199,34 @@ export function MergePage(): ReactElement {
     } finally {
       setPlanning(false);
     }
+    // A validation failure must not hide the plan; it just shows nothing extra.
+    setValidating(true);
+    try {
+      setValidation(
+        await validateMerge({
+          model_a: modelA.trim(),
+          model_b: modelB.trim(),
+          hf_token: accessToken,
+        }),
+      );
+    } catch {
+      setValidation(null);
+    } finally {
+      setValidating(false);
+    }
   };
 
   const start = async () => {
     setRunError(null);
     setJob(null);
-    if (!outputDir.trim()) {
-      setRunError("Choose an output folder for the merged checkpoint.");
-      return;
-    }
+    setStructural(null);
     setRunning(true);
     try {
       const created =
         mode === "mmoe"
           ? await runMoeMerge({
               models: [modelA.trim(), modelB.trim()],
-              output_dir: outputDir.trim(),
+              output_dir: typedOutput || null,
               top_k: topK,
               temperature,
               hf_token: accessToken,
@@ -159,16 +234,35 @@ export function MergePage(): ReactElement {
           : await runMerge({
               model_a: modelA.trim(),
               model_b: modelB.trim(),
-              output_dir: outputDir.trim(),
+              output_dir: typedOutput || null,
               method,
               weight,
               density,
               max_shard_gb: 4,
               hf_token: accessToken,
+              allow_tokenizer_conflict: allowTokenConflict,
             });
       setJob(created);
       const finished = await waitForJob(created.job_id, setJob);
       setJob(finished);
+      if (!outputTouched && finished.status === "completed") {
+        // Hand the field back to the backend so a second run gets its own folder
+        // instead of blending into this one; the card below shows where this went.
+        setOutputDir("");
+      }
+      const mergedPath =
+        finished.output_dir ??
+        (finished.result as { output_dir?: string } | null)?.output_dir ??
+        null;
+      // Structural tier only: it proves the folder loads and is sane, not that the
+      // merge is better. Quality needs an eval suite.
+      if (mode === "standard" && finished.status === "completed" && mergedPath) {
+        try {
+          setStructural(await evalMergedModel({ source: mergedPath }));
+        } catch {
+          setStructural(null);
+        }
+      }
     } catch (error) {
       setRunError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -299,6 +393,113 @@ export function MergePage(): ReactElement {
             </div>
           ) : null}
         </section>
+
+        {plan || validation ? (
+          <section className="elevated-card flex flex-col gap-3 p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-ui-13p5 font-semibold text-foreground">
+                Pre-merge checks
+              </h2>
+              {validating ? (
+                <span className="flex items-center gap-2 text-ui-11 text-muted-foreground">
+                  <Spinner className="size-3.5" /> Checking tokenizers
+                </span>
+              ) : null}
+            </div>
+            <p className="text-ui-11 leading-ui-16 text-muted-foreground">
+              These run before any shard is written. A special-token disagreement
+              would produce a model that loads and runs but quietly mis-handles
+              prompts, so the merge refuses instead.
+            </p>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-ui-11 font-medium text-foreground">
+                    Tokenizer
+                  </span>
+                  <Badge
+                    variant={
+                      validation?.tokenizer.status === "conflict"
+                        ? "destructive"
+                        : validation?.tokenizer.status === "warning"
+                          ? "outline"
+                          : "secondary"
+                    }
+                  >
+                    {validation?.tokenizer.status === "not_checked"
+                      ? "not checked yet"
+                      : (validation?.tokenizer.status ?? "checking")}
+                  </Badge>
+                </div>
+                {validation?.tokenizer.reason ? (
+                  <p className="mt-2 text-ui-11 leading-ui-15 text-muted-foreground">
+                    {validation.tokenizer.reason}
+                  </p>
+                ) : null}
+                {(validation?.tokenizer.conflicts?.length ?? 0) > 0 ? (
+                  <ul className="mt-2 flex list-disc flex-col gap-1 pl-4 text-ui-11 leading-ui-15 text-destructive">
+                    {validation?.tokenizer.conflicts?.map((conflict) => (
+                      <li key={conflict}>{conflict}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {(validation?.tokenizer.warnings?.length ?? 0) > 0 ? (
+                  <ul className="mt-2 flex list-disc flex-col gap-1 pl-4 text-ui-11 leading-ui-15 text-amber-600 dark:text-amber-400">
+                    {validation?.tokenizer.warnings?.map((warning) => (
+                      <li key={warning}>{warning}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {validation?.blocked && validation.tokenizer.status === "conflict" ? (
+                  <label className="mt-3 flex items-start gap-2 text-ui-11 leading-ui-15 text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={allowTokenConflict}
+                      onChange={(event) => setAllowTokenConflict(event.target.checked)}
+                    />
+                    Build it anyway. The override is recorded in the run manifest.
+                  </label>
+                ) : null}
+              </div>
+
+              <div className="rounded-xl border border-border/60 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-ui-11 font-medium text-foreground">
+                    Loading policy
+                  </span>
+                  <Badge variant={validation?.blocked ? "destructive" : "secondary"}>
+                    {validation?.blocked ? "blocked" : validation ? "safe" : "checking"}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-ui-11 leading-ui-15 text-muted-foreground">
+                  Safetensors only by default (a pickle can run code while loading),
+                  and checkpoints that need custom code are refused unless you opt in.
+                </p>
+                {validation?.sources
+                  .filter((entry) => entry.blocked_reason)
+                  .map((entry) => (
+                    <p
+                      key={entry.label}
+                      className="mt-2 text-ui-11 leading-ui-15 text-destructive"
+                    >
+                      {entry.blocked_reason}
+                    </p>
+                  ))}
+                {plan?.estimates ? (
+                  <p className="mt-2 text-ui-11 leading-ui-15 text-muted-foreground">
+                    Peak {bytes(plan.estimates.need.ram_bytes)} RAM ·{" "}
+                    {bytes(plan.estimates.need.disk_bytes)} disk
+                    {plan.estimates.streaming
+                      ? " · streaming, so the parents are never both resident (an 8 GB CPU tier can merge)"
+                      : ""}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        ) : null}
 
         <section className="elevated-card flex flex-col gap-5 p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -444,20 +645,36 @@ export function MergePage(): ReactElement {
             </span>
             <Input
               value={outputDir}
-              onChange={(event) => setOutputDir(event.target.value)}
-              placeholder="merged"
+              onChange={(event) => {
+                setOutputTouched(true);
+                setOutputDir(event.target.value);
+              }}
+              placeholder="Automatic — named after both models, inside Unsloth's library"
               className="font-mono text-ui-12"
             />
-            <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
-              A name lands in Unsloth&apos;s outputs folder for this machine; an
-              absolute path is used as-is.
-            </span>
+            {outsideLibrary ? (
+              <span className="text-ui-11 leading-ui-15 text-amber-600 dark:text-amber-400">
+                Outside Unsloth&apos;s library ({libraryRoot}). The merge still runs,
+                but Library, Export and Chat only list models under that folder, so
+                you could not quantize or chat with the result.
+              </span>
+            ) : (
+              <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
+                {libraryRoot
+                  ? `Written inside ${libraryRoot}, the folder Studio scans — the merged model shows up in Library, Export (quantize) and Chat as soon as it finishes.`
+                  : "Written inside Unsloth's library folder, so the merged model shows up in Library, Export (quantize) and Chat when it finishes."}
+              </span>
+            )}
           </label>
 
           <div className="flex flex-wrap items-center gap-3">
             <Button
               onClick={() => void start()}
-              disabled={running || !plan || !outputDir.trim()}
+              disabled={
+                running ||
+                !plan ||
+                Boolean(validation?.blocked && !allowTokenConflict)
+              }
               size="sm"
             >
               {running ? (
@@ -486,21 +703,90 @@ export function MergePage(): ReactElement {
 
           {job?.status === "completed" && job.result ? (
             <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-ui-11 leading-ui-16">
-              <p className="font-medium text-foreground">Merge complete</p>
-              <p className="mt-1 text-muted-foreground">
-                {job.output_dir ??
+              {(() => {
+                const completedPath =
+                  job.output_dir ??
                   (job.result as { output_dir?: string }).output_dir ??
-                  outputDir}{" "}
-                ·{" "}
-                {(() => {
-                  const metrics = (job.result as {
-                    metrics?: { blended_tensors?: number; shards?: number; total_bytes?: number };
-                  }).metrics;
-                  return metrics
-                    ? `${metrics.blended_tensors ?? 0} tensors blended in ${metrics.shards ?? 0} shards (${bytes(metrics.total_bytes)})`
-                    : "bundle written";
-                })()}
-              </p>
+                  outputDir;
+                const metrics = (job.result as {
+                  metrics?: { blended_tensors?: number; shards?: number; total_bytes?: number };
+                }).metrics;
+                // Only a weight-space merge is a loadable model; an MMoE bundle is a router
+                // Studio trains, so Library and Export have nothing to open for it.
+                // From the job, not the mode toggle, which the user can flip afterwards.
+                const loadable = job.kind === "merge";
+                return (
+                  <>
+                    <p className="font-medium text-foreground">
+                      {loadable ? "Merge complete" : "MMoE bundle written"}
+                    </p>
+                    <p className="mt-1 break-all font-mono text-muted-foreground">
+                      {completedPath}
+                    </p>
+                    <p className="mt-1 text-muted-foreground">
+                      {metrics
+                        ? `${metrics.blended_tensors ?? 0} tensors blended in ${metrics.shards ?? 0} shards (${bytes(metrics.total_bytes)})`
+                        : "bundle written"}
+                    </p>
+                    {structural ? (
+                      <p
+                        className={cn(
+                          "mt-1",
+                          structural.structurally_valid
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-destructive",
+                        )}
+                      >
+                        Structural check: {structural.verdict}
+                        {structural.problems.length > 0
+                          ? ` — ${structural.problems.join(" ")}`
+                          : " — loadable, index and shards agree, no NaN weights, tokenizer present."}
+                      </p>
+                    ) : null}
+                    {job.run_manifest ? (
+                      <p className="mt-1 break-all font-mono text-ui-10p5 text-muted-foreground/70">
+                        manifest: {job.run_manifest}
+                      </p>
+                    ) : null}
+                    {job.library_visible === false ? (
+                      <p className="mt-2 text-amber-600 dark:text-amber-400">
+                        Stored outside Unsloth&apos;s library, so Library, Export and Chat
+                        will not list it. Merge into{" "}
+                        {libraryRoot ? (
+                          <span className="font-mono">{libraryRoot}</span>
+                        ) : (
+                          "Unsloth's outputs folder"
+                        )}{" "}
+                        to quantize or chat with it.
+                      </p>
+                    ) : loadable ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            void navigate({ to: "/library", search: { show: "models" } })
+                          }
+                        >
+                          Open in Library
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            void navigate({
+                              to: "/export",
+                              search: { run: outputFolderName(completedPath) },
+                            })
+                          }
+                        >
+                          Quantize in Export
+                        </Button>
+                      </div>
+                    ) : null}
+                  </>
+                );
+              })()}
             </div>
           ) : null}
           {job?.status === "failed" ? (

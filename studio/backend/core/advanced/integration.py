@@ -10,7 +10,7 @@ Three mechanics are applied inside a normal SFT run:
 * **Curriculum / blender** overrides the trainer's batch sampler so each step
   draws from the stream the cadence (or the ratios) names.
 
-Auto-eval runs after the checkpoint is saved.
+The Regression Guard (post-run eval) runs after the checkpoint is saved.
 """
 
 from __future__ import annotations
@@ -164,6 +164,16 @@ def build_stream_sampler(
     if plan_blend is None and plan_curriculum is None:
         return None
 
+    # Ratio changes are events keyed by global step, so the batch stream is a pure
+    # function of (seed, events, step). A run with no slider move has an empty log
+    # and the base ratio applies at every step -- which is what makes a resume
+    # after a checkpoint reproduce the stream exactly.
+    schedule = (
+        blending.BlendSchedule(base = plan_blend, batch_size = batch_size)
+        if plan_blend is not None
+        else None
+    )
+
     orders: dict[str, list[int]] = {}
     cursors: dict[str, int] = {}
     for stream in layout:
@@ -188,6 +198,7 @@ def build_stream_sampler(
         )
     return _IndexSampler(indices), {
         "blend": plan_blend.to_dict() if plan_blend else None,
+        "blend_schedule": schedule.manifest_block() if schedule is not None else None,
         "curriculum": plan_curriculum.to_dict() if plan_curriculum else None,
         "steps_per_epoch": steps_per_epoch,
     }
@@ -271,7 +282,7 @@ def run_auto_eval(
         event_queue.put(
             {
                 "type": "warning",
-                "message": "Auto-eval finished: "
+                "message": "Regression Guard finished: "
                 + str(report.get("comparison", {}).get("verdict", "unknown")),
             }
         )

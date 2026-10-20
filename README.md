@@ -105,6 +105,15 @@ Unsloth works on **Windows, Linux, WSL** and **macOS**. We support **Multi GPU s
 * **Complete support:** Supports [reinforcement learning](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide), LoRA, QLoRA, full fine tuning, pretraining, RL, GRPO, DPO, and FP8.
 * **Export & Deploy:** [Export](https://unsloth.ai/docs/new/studio/export) or Deploy models including [GGUF](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf), NVFP4, FP8 and more formats.
 * **Datasets:** Build datasets from PDFs, CSVs, DOCX files, and more with [Data Recipes](https://unsloth.ai/docs/new/studio/data-recipe).
+
+### Platform scope
+Unsloth Studio is **three studios** — **Training**, **Merging**, **Export** — with a run layer underneath them (jobs, resource arbitration, run manifests). Merging, MMoE and export are engines inside those studios, not separate headlines.
+
+**On any CPU (8 GB+ available RAM):** merge (streaming), policy alignment, VRAM Fit sharding, structural validation. **Training, RL, QAT, MMoE and benchmarks need a GPU.** Colab covers MMoE and small training runs.
+
+A CPU merge is **streaming only**: it holds one tensor pair in memory instead of both parents, which is what makes the 8 GB tier real. A full-load merge would not fit and is not offered. The result is written into the folder the Library, Export and Chat scan, so a CPU merge feeds straight into GGUF quantization.
+
+Every stage writes a `run_manifest.json` beside its output — versions, seeds, dataset identity, the layer-LR zone definition, the blend schedule and any policy override — so a model can be reproduced from its folder alone.
   
 ## 🚀 Unsloth Start
 

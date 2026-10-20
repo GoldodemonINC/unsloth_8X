@@ -169,14 +169,14 @@ export function AdvancedTrainingSection() {
         <div className="flex flex-wrap gap-1.5">
           {advanced.qatEnabled ? <Badge variant="secondary">QAT</Badge> : null}
           {advanced.curriculumEnabled ? (
-            <Badge variant="secondary">Curriculum</Badge>
+            <Badge variant="outline">Curriculum · experimental</Badge>
           ) : null}
           {advanced.layerLrEnabled ? (
             <Badge variant="secondary">Layer LR</Badge>
           ) : null}
           {advanced.blendEnabled ? <Badge variant="secondary">Blend</Badge> : null}
           {advanced.autoEvalEnabled ? (
-            <Badge variant="secondary">Auto-eval</Badge>
+            <Badge variant="secondary">Regression Guard</Badge>
           ) : null}
           {isPolicyAlignment ? <Badge variant="secondary">RL</Badge> : null}
         </div>
@@ -257,8 +257,8 @@ export function AdvancedTrainingSection() {
             <div className="flex flex-col gap-6">
               <div className="flex flex-col gap-3">
                 <Row
-                  title="Curriculum co-training"
-                  description="Alternate batch steps between domains on a fixed cadence to avoid catastrophic forgetting."
+                  title="Curriculum co-training (experimental)"
+                  description="Alternate batch steps between domains on a fixed cadence. Experimental: there is no equal-compute A/B showing it beats plain blending, so treat any gain as unproven."
                   checked={advanced.curriculumEnabled}
                   onCheckedChange={(curriculumEnabled) =>
                     setAdvanced({ curriculumEnabled })
@@ -534,8 +534,8 @@ export function AdvancedTrainingSection() {
           <AccordionContent className="h-auto! px-3 pb-5">
             <div className="flex flex-col gap-4">
               <Row
-                title="Run auto-eval on completion"
-                description="Scores the finished checkpoint against the baseline and reports the per-benchmark delta."
+                title="Run Regression Guard on completion"
+                description="Scores the finished checkpoint against its baseline and reports the per-benchmark delta. Deltas under ~1.5 points on a 1.5B model are labelled within noise, not as wins."
                 checked={advanced.autoEvalEnabled}
                 onCheckedChange={(autoEvalEnabled) =>
                   setAdvanced({ autoEvalEnabled })

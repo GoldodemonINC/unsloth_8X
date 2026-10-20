@@ -75,6 +75,7 @@ import { ExportRunPanel } from "./components/export-run-panel";
 import { ImageLoraExportCard } from "./components/image-lora-export-card";
 import { MethodPicker } from "./components/method-picker";
 import { Q4nxConvertCard } from "./components/q4nx-convert-card";
+import { CapabilitiesPanel } from "@/features/advanced/components/capabilities-panel";
 import { CheckpointSplitterCard } from "@/features/advanced/components/checkpoint-splitter-card";
 import { StudioModeNav } from "@/features/studio/studio-mode-nav";
 import { QuantPicker } from "./components/quant-picker";
@@ -2104,6 +2105,7 @@ export function ExportPage() {
         <ImageLoraExportCard preselect={preselectImageLora} />
         <Q4nxConvertCard />
         <CheckpointSplitterCard />
+        <CapabilitiesPanel />
       </main>
     </div>
   );

@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from . import tensor_io
+
 MERGE_METHODS = ("slerp", "ties", "dare", "linear")
 
 _CONFIG_FILES = ("config.json",)
@@ -413,24 +415,28 @@ def align_tensor(array, target_shape: Sequence[int], *, method: str = "crop"):
 def _slerp_pair(a, b, t: float):
     import numpy as np
 
+    # SLERP is defined on the flattened vector, but the result has to come back in
+    # the input's shape: writing back a flattened [n] where the model expects [n, m]
+    # produced a checkpoint whose tensors no longer load.
+    shape = np.shape(a)
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
     if a.shape != b.shape:
         raise ValueError("SLERP needs two tensors of equal size after alignment.")
     na, nb = np.linalg.norm(a), np.linalg.norm(b)
     if na == 0 or nb == 0:
-        return ((1 - t) * a + t * b).reshape(-1)
+        return ((1 - t) * a + t * b).reshape(shape)
     cosine = float(np.dot(a, b) / (na * nb))
     if abs(cosine) > 0.9995:
-        return ((1 - t) * a + t * b).reshape(-1)
+        return ((1 - t) * a + t * b).reshape(shape)
     if cosine < 0:
         # Antipodal: the shortest arc is undefined; fall back to linear.
-        return ((1 - t) * a + t * b).reshape(-1)
+        return ((1 - t) * a + t * b).reshape(shape)
     theta = math.acos(max(-1.0, min(1.0, cosine)))
     sin_theta = math.sin(theta)
     wa = math.sin((1 - t) * theta) / sin_theta
     wb = math.sin(t * theta) / sin_theta
-    return (wa * a + wb * b).reshape(-1)
+    return (wa * a + wb * b).reshape(shape)
 
 
 def blend_tensors(
@@ -597,11 +603,8 @@ def merge_state_dicts(
 
 
 def _to_numpy(tensor):
-    import numpy as np
-
-    if hasattr(tensor, "detach"):
-        return tensor.detach().cpu().float().numpy()
-    return np.asarray(tensor, dtype=np.float32)
+    """Float32 numpy view of a tensor, torch or numpy."""
+    return tensor_io.to_float32(tensor)
 
 
 def _align_for_key(array, key: str, plan: AlignmentPlan):
@@ -644,8 +647,6 @@ def _weight_files(directory: Path) -> list[Path]:
 
 
 def _open_state(directory: str) -> tuple[dict[str, tuple[Path, str]], dict[str, Any] | None]:
-    from safetensors import safe_open
-
     root = Path(directory)
     if root.is_file() and root.suffix == ".safetensors":
         root = root.parent
@@ -655,7 +656,7 @@ def _open_state(directory: str) -> tuple[dict[str, tuple[Path, str]], dict[str, 
     entries: dict[str, tuple[Path, str]] = {}
     metadata: dict[str, Any] | None = None
     for file_path in files:
-        with safe_open(str(file_path), framework="np") as handle:
+        with tensor_io.open_file(file_path) as handle:
             metadata = metadata or handle.metadata()
             for key in handle.keys():
                 entries[key] = (file_path, key)
@@ -663,11 +664,9 @@ def _open_state(directory: str) -> tuple[dict[str, tuple[Path, str]], dict[str, 
 
 
 def _read_tensor(entries, key):
-    from safetensors import safe_open
-
     file_path, inner = entries[key]
-    with safe_open(str(file_path), framework="np") as handle:
-        return handle.get_tensor(inner)
+    with tensor_io.open_file(file_path) as handle:
+        return tensor_io.load_tensor(handle, inner)
 
 
 def inspect_checkpoint(directory: str) -> dict[str, Any]:
@@ -695,21 +694,45 @@ def merge_checkpoints(
     seed: int = 3407,
     max_shard_bytes: int = 4 * 1024 * 1024 * 1024,
     token: str | None = None,
+    policy: Any = None,
+    allow_tokenizer_conflict: bool = False,
 ) -> dict[str, Any]:
     """Stream two safetensors checkpoints into an aligned merged model.
 
     Sources may be local directories or Hub repo ids (a snapshot is downloaded
-    first). Only one tensor pair is resident at a time; shards are written as
-    they fill. The returned report is also written to ``merge_report.json``.
-    """
-    import numpy as np
-    from safetensors.numpy import save_file
+    first). Only one tensor pair is resident at a time, so a merge on a CPU host
+    peaks at one tensor pair rather than both parents; shards are written as
+    they fill, each one atomically.
 
+    Two gates run **before the output folder is created**, so a refused merge
+    leaves nothing behind:
+
+    * the loading policy (safetensors-only, remote code opt-in),
+    * the tokenizer check (disagreeing bos/eos/pad refuses the merge).
+
+    The returned report is written to ``merge_report.json`` and a
+    ``run_manifest.json`` records the run.
+    """
+    from . import licenses  # noqa: PLC0415
+    from . import policy as policy_module  # noqa: PLC0415 - avoids an import cycle
+    from . import run_manifest, tokenizer_check  # noqa: PLC0415
+
+    active_policy = policy or policy_module.DEFAULT_POLICY
     model_a = resolve_checkpoint_source(model_a, token = token)
     model_b = resolve_checkpoint_source(model_b, token = token)
+    policy_report = [
+        policy_module.enforce_source_policy(model_a, active_policy, label = "Model A"),
+        policy_module.enforce_source_policy(model_b, active_policy, label = "Model B"),
+    ]
     spec_a = probe_model_spec(model_a)
     spec_b = probe_model_spec(model_b)
     plan = plan_alignment(spec_a, spec_b)
+
+    # The quiet failure: weights blend fine, the tokenizer does not.
+    tokenizer_report = tokenizer_check.check_before_merge(
+        [model_a, model_b], allow_conflict = allow_tokenizer_conflict
+    )
+
     entries_a, _ = _open_state(model_a)
     entries_b, _ = _open_state(model_b)
 
@@ -729,7 +752,8 @@ def merge_checkpoints(
         if not shard:
             return
         name = f"model-{shard_index:05d}.safetensors"
-        save_file(shard, str(out / name))
+        # Atomic: a crash or a full disk never leaves a shard the index points at.
+        policy_module.atomic_save_tensors(shard, out / name)
         for key in shard:
             weight_map[key] = name
         shard = {}
@@ -741,17 +765,24 @@ def merge_checkpoints(
         if in_a and in_b:
             left = _read_tensor(entries_a, key)
             right = _read_tensor(entries_b, key)
-            if left.shape != right.shape:
-                left = _align_for_key(left, key, plan)
-                right = _align_for_key(right, key, plan)
-            if left.shape == right.shape and np.issubdtype(left.dtype, np.floating):
-                merged = blend_tensors(
-                    [left, right],
-                    method=method,
-                    weights=[1.0 - weight, weight],
-                    density=density,
-                    seed=seed,
-                ).astype(left.dtype, copy=False)
+            # Blend in float32, then hand the result back in the dtype the pair
+            # was stored in, so a bf16 merge stays bf16 on disk.
+            left_array = tensor_io.to_float32(left)
+            right_array = tensor_io.to_float32(right)
+            if left_array.shape != right_array.shape:
+                left_array = _align_for_key(left_array, key, plan)
+                right_array = _align_for_key(right_array, key, plan)
+            if left_array.shape == right_array.shape and tensor_io.is_floating(left):
+                merged = tensor_io.cast_like(
+                    blend_tensors(
+                        [left_array, right_array],
+                        method=method,
+                        weights=[1.0 - weight, weight],
+                        density=density,
+                        seed=seed,
+                    ),
+                    left,
+                )
                 blended += 1
             else:
                 # Integer bookkeeping tensors (positions, token ids) must not be averaged.
@@ -761,7 +792,7 @@ def merge_checkpoints(
             merged = _read_tensor(entries_a if in_a else entries_b, key)
             copied += 1
 
-        nbytes = int(getattr(merged, "nbytes", 0))
+        nbytes = tensor_io.nbytes(merged)
         if shard and shard_bytes + nbytes > max_shard_bytes:
             flush()
         shard[key] = merged
@@ -784,6 +815,9 @@ def merge_checkpoints(
                     pass
                 break
 
+    # The output inherits one parent's tokenizer files; confirm it really did.
+    output_tokenizer = tokenizer_check.verify_output(out, tokenizer_report.fingerprints[0])
+
     report = {
         "status": "completed",
         "output_dir": str(out),
@@ -791,6 +825,27 @@ def merge_checkpoints(
         "weight": weight,
         "models": [spec_a.to_dict(), spec_b.to_dict()],
         "alignment": plan.to_dict(),
+        "tokenizer": {
+            **tokenizer_report.to_dict(),
+            "summary": tokenizer_report.summary(),
+            "override_used": bool(allow_tokenizer_conflict)
+            and tokenizer_report.status == "conflict",
+            "output": output_tokenizer,
+        },
+        "policy": {
+            "loading": active_policy.to_dict(),
+            "sources": [item["source"] for item in policy_report],
+            "remote_code": [
+                warning
+                for warning in (
+                    policy_module.remote_code_warning(model_a),
+                    policy_module.remote_code_warning(model_b),
+                )
+                if warning
+            ],
+        },
+        # What the merged result may be used for is a property of both parents.
+        "licenses": licenses.to_report_block([model_a, model_b]),
         "metrics": {
             "blended_tensors": blended,
             "copied_tensors": copied,
@@ -799,7 +854,50 @@ def merge_checkpoints(
             "total_bytes": total_bytes,
         },
     }
-    (out / "merge_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    manifest = run_manifest.build_manifest(
+        "merge",
+        config={
+            "method": method,
+            "weight": weight,
+            "density": density,
+            "max_shard_bytes": max_shard_bytes,
+            "alignment": plan.to_dict(),
+        },
+        seeds={"seed": seed},
+        inputs={
+            "model_a": run_manifest.checkpoint_digest(model_a),
+            "model_b": run_manifest.checkpoint_digest(model_b),
+        },
+        artifacts={
+            "output_dir": str(out),
+            "shards": shard_index - 1,
+            "total_bytes": total_bytes,
+            "report": "merge_report.json",
+        },
+        events=[
+            {
+                "kind": "tokenizer_check",
+                "step": 0,
+                "status": tokenizer_report.status,
+                "override": bool(allow_tokenizer_conflict),
+            }
+        ],
+        versions={"tokenizer_check": 1, "merge_engine": 1},
+        policy={"loading": active_policy.to_dict()},
+        labeller={"output_tokenizer": output_tokenizer["status"]},
+    )
+    manifest["tokenizer"] = {
+        "status": tokenizer_report.status,
+        "conflicts": list(tokenizer_report.conflicts),
+        "warnings": list(tokenizer_report.warnings),
+        "override_used": bool(allow_tokenizer_conflict)
+        and tokenizer_report.status == "conflict",
+    }
+    manifest["licenses"] = report["licenses"]
+    run_manifest.write_manifest(out, manifest)
+    report["run_manifest"] = str(out / run_manifest.MANIFEST_NAME)
+    report["manifest_id"] = manifest["run_id"]
+    policy_module.atomic_write_json(out / "merge_report.json", report)
     return report
 
 

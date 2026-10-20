@@ -63,3 +63,34 @@ def test_derived_name_resolves_under_outputs_root(tmp_path, monkeypatch):
     assert resolved == outputs / "gemma-4-12B-it_1781327234"
     # No escape: the absolute G: source no longer leaks into the output path.
     assert "modelsAI" not in str(resolved)
+
+
+def test_merge_name_uses_both_model_names():
+    sr = _load_storage_roots()
+    assert (
+        sr.default_merge_dir_name(
+            "hf://deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "WeiboAI/VibeThinker-1.5B"
+        )
+        == "merge-DeepSeek-R1-Distill-Qwen-1.5B-VibeThinker-1.5B"
+    )
+
+
+def test_merge_name_ignores_windows_directories_and_extension():
+    sr = _load_storage_roots()
+    assert sr.default_merge_dir_name(r"C:\models\llama-3.2-1b", "/opt/weights/qwen3-1.7b") == (
+        "merge-llama-3.2-1b-qwen3-1.7b"
+    )
+    assert sr.default_merge_dir_name("/models/a/model.safetensors", "") == "merge-model-model"
+
+
+def test_merge_name_resolves_as_a_direct_child_of_outputs_root(tmp_path, monkeypatch):
+    # A direct child, because the Library, Export and Chat scan only that level.
+    sr = _load_storage_roots()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setattr(sr, "outputs_root", lambda: outputs)
+
+    name = sr.default_merge_dir_name("WeiboAI/VibeThinker-1.5B", "unsloth/Qwen3-1.7B")
+    resolved = sr.resolve_output_dir(name)
+    assert resolved == outputs / "merge-VibeThinker-1.5B-Qwen3-1.7B"
+    assert resolved.parent == outputs

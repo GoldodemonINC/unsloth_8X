@@ -5320,6 +5320,10 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
         output_dir = str(resolve_output_dir(output_dir))
         ensure_dir(Path(output_dir))
         _emit_output_dir(event_queue, output_dir)
+        # Record what this run is, beside its checkpoints: versions, seeds, dataset
+        # identity, the zone definition and the blend schedule. A folder without one
+        # cannot be reproduced (see core.advanced.run_manifest).
+        _write_run_manifest(output_dir, model_name, config, learning_rate = lr_value)
         # Pin the subset before any checkpoint lands here, so a resume reads it back rather than deriving it from a
         # config the user may have edited in between.
         if not record_row_bound(output_dir, max_train_rows, max_train_rows_seed) and max_train_rows:
@@ -5418,7 +5422,7 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
                         event_queue = event_queue,
                     )
                 except Exception as exc:  # noqa: BLE001 - post-run, never fatal
-                    logger.warning("Auto-eval could not start: %s", exc)
+                    logger.warning("Regression Guard could not start: %s", exc)
             saved_output_dir = (
                 None if stopped_in_training and not trainer.save_on_stop else output_dir
             )
@@ -5483,6 +5487,113 @@ def _emit_output_dir(event_queue: Any, output_dir: str) -> None:
         event_queue.put({"type": "output_dir", "output_dir": output_dir, "ts": time.time()})
     except Exception:
         pass
+
+
+def _write_run_manifest(
+    output_dir: str,
+    model_name: str,
+    config: dict,
+    *,
+    learning_rate: float | None = None,
+) -> None:
+    """Write ``run_manifest.json`` for a training run, beside its checkpoints.
+
+    A trained folder used to record nothing but the adapter: which dataset
+    revision, which seed, which curriculum, which zone definition and which blend
+    schedule produced it were only in the UI that started it. This records them
+    with the run.
+
+    Never raises: a manifest failure must not kill a training job that has just
+    been set up.
+    """
+    try:
+        from core.advanced import blending, run_manifest
+
+        advanced = config.get("advanced") or {}
+        manifest = run_manifest.build_manifest(
+            "train",
+            config = {
+                "model_name": model_name,
+                "method": config.get("training_type") or config.get("method"),
+                "learning_rate": learning_rate,
+                "num_epochs": config.get("num_epochs"),
+                "max_steps": config.get("max_steps"),
+                "save_steps": config.get("save_steps"),
+                "batch_size": config.get("batch_size"),
+                "gradient_accumulation_steps": config.get("gradient_accumulation_steps"),
+                "optimizer": config.get("optimizer"),
+                "lora_r": config.get("lora_r") or config.get("lora_rank"),
+                "lora_alpha": config.get("lora_alpha"),
+                "training_type": config.get("training_type"),
+                "format_type": config.get("format_type"),
+                "advanced": advanced,
+            },
+            seeds = {"seed": config.get("seed", 3407)},
+            inputs = {
+                "base_model": run_manifest.dataset_identity(
+                    config.get("model_name") or config.get("model_path")
+                ),
+                "dataset": run_manifest.dataset_identity(
+                    config.get("dataset_snapshot_path")
+                    or config.get("hf_dataset")
+                    or config.get("uploaded_file")
+                ),
+                "dataset_revision": config.get("dataset_revision"),
+            },
+            artifacts = {"output_dir": output_dir},
+            policy = {
+                "loading": {
+                    "local_files_only": bool(config.get("model_local_files_only")),
+                    "trust_remote_code": bool(config.get("trust_remote_code")),
+                }
+            },
+        )
+        # The advanced block is the part a reproduction actually needs: which zone
+        # definition, which curriculum, and the blend ratio that was in force.
+        manifest["versions"]["zone_definition"] = run_manifest.zone_definition_hash(
+            advanced.get("layer_lr")
+        )
+        curriculum_config = advanced.get("curriculum") or {}
+        if curriculum_config.get("enabled"):
+            manifest["curriculum"] = {
+                "label": "experimental",
+                "cadence": curriculum_config.get("cadence"),
+                "note": (
+                    "Curriculum ordering is experimental and has no equal-compute A/B yet; "
+                    "treat a gain as unproven."
+                ),
+            }
+        blend_config = advanced.get("blend") or {}
+        if blend_config.get("enabled") and blend_config.get("slots"):
+            try:
+                batch_size = int(config.get("batch_size") or 1)
+                schedule = blending.BlendSchedule(
+                    base = blending.validate_blend_slots(
+                        blend_config.get("slots") or [], batch_size = batch_size
+                    ),
+                    batch_size = batch_size,
+                )
+                manifest["blend"] = schedule.manifest_block()
+            except ValueError as error:
+                manifest["blend"] = {"error": str(error)}
+        qat_config = advanced.get("qat") or {}
+        if qat_config.get("enabled"):
+            manifest["qat"] = {
+                "enabled": True,
+                "format": qat_config.get("format"),
+                "group_size": qat_config.get("group_size"),
+                "claim": (
+                    "Quantization-aware fine-tuning: the forward pass runs on the "
+                    f"fake-quantized weights at {qat_config.get('format')}. Nothing is "
+                    "claimed for other precisions."
+                ),
+            }
+        run_manifest.write_manifest(output_dir, manifest)
+    except Exception as error:  # noqa: BLE001 - never fail a run over its manifest
+        try:
+            logger.warning(f"Could not write the run manifest into {output_dir}: {error}")
+        except Exception:
+            pass
 
 
 def _emit_resource_provenance(

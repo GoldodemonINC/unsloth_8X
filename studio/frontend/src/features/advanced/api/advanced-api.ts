@@ -29,6 +29,59 @@ export interface AdvancedCapabilities {
   torch_available: boolean;
   safetensors_available: boolean;
   trl_available: boolean;
+  /** Honest CPU/GPU availability per feature, matching the platform scope table. */
+  features?: Array<{
+    key: string;
+    label: string;
+    cpu: boolean;
+    gpu: boolean;
+    note: string;
+    available_here: boolean;
+  }>;
+  platform_line?: string;
+  has_gpu?: boolean;
+  merge_streams?: boolean;
+  merge_cpu_note?: string;
+}
+
+export interface MergeValidation {
+  ok: boolean;
+  blocked: boolean;
+  blocked_reason?: string;
+  policy: { allow_remote_code: boolean; allow_non_safetensors: boolean };
+  sources: Array<{
+    label: string;
+    source: string;
+    allowed?: boolean | null;
+    blocked?: boolean;
+    blocked_reason?: string;
+    warnings?: string[];
+    notes?: string[];
+    pickles?: string[];
+    requires_remote_code?: boolean;
+  }>;
+  tokenizer: {
+    status: "ok" | "warning" | "conflict" | "not_checked";
+    ok?: boolean | null;
+    conflicts?: string[];
+    warnings?: string[];
+    reason?: string;
+  };
+}
+
+export interface StructuralEval {
+  verdict:
+    | "structurally-valid"
+    | "structurally-broken"
+    | "unloadable"
+    | "pareto-positive"
+    | "within-noise"
+    | "regressed";
+  structurally_valid: boolean;
+  problems: string[];
+  warnings: string[];
+  tier: string;
+  scope: string;
 }
 
 export interface AdvancedJob {
@@ -39,8 +92,25 @@ export interface AdvancedJob {
   finished_at: number | null;
   /** Where the job writes, resolved by the backend (absolute) when it started. */
   output_dir?: string | null;
+  /** True when Studio's Library/Export/Chat scans will list this output as a model. */
+  library_visible?: boolean;
+  /** The lease the job acquired, and what it was sized for. */
+  resources?: {
+    status: string;
+    need: { vram_bytes: number; ram_bytes: number; disk_bytes: number } | null;
+    notes: string[];
+  };
+  /** Path to the run_manifest.json written beside the artifacts, when there is one. */
+  run_manifest?: string | null;
   result: Record<string, unknown> | null;
   error: string | null;
+}
+
+export interface AdvancedOutputLocations {
+  /** The folder Studio scans for trained and merged models. */
+  outputs_root: string;
+  /** Where GGUF and other exports land. */
+  exports_root: string;
 }
 
 export interface MergeModelSpec {
@@ -87,6 +157,16 @@ export interface MergePlanResponse {
     warnings: string[];
   };
   recommended_mode: "standard" | "mmoe";
+  /** Absolute folder the backend will use when the output field is left blank. */
+  suggested_output_dir?: string | null;
+  /** Plan before compute: peak RAM/disk (a CPU merge is streaming, not full-load). */
+  estimates?: {
+    need: { vram_bytes: number; ram_bytes: number; disk_bytes: number };
+    notes: string[];
+    streaming: boolean;
+    model_bytes: number;
+  };
+  tokenizer?: MergeValidation["tokenizer"];
 }
 
 export interface SplitPlanResponse {
@@ -127,6 +207,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function fetchAdvancedCapabilities(): Promise<AdvancedCapabilities> {
   return request("/capabilities");
+}
+
+/** Where a merge has to write for Studio to list, quantize and serve the result. */
+export function fetchOutputLocations(): Promise<AdvancedOutputLocations> {
+  return request("/outputs");
 }
 
 export function validateQat(body: AdvancedTrainingRequest["qat"]) {
@@ -209,8 +294,30 @@ export function runMerge(body: {
   density: number;
   max_shard_gb: number;
   hf_token?: string | null;
+  allow_remote_code?: boolean;
+  allow_non_safetensors?: boolean;
+  allow_tokenizer_conflict?: boolean;
 }): Promise<AdvancedJob> {
   return request("/merge/run", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The pre-merge gates: tokenizer agreement, pickle weights, remote code. */
+export function validateMerge(body: {
+  model_a: string;
+  model_b: string;
+  hf_token?: string | null;
+  allow_remote_code?: boolean;
+  allow_non_safetensors?: boolean;
+}): Promise<MergeValidation> {
+  return request("/merge/validate", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** CPU structural merge-eval: loadable, index/files agree, no NaN, tokenizer present. */
+export function evalMergedModel(body: {
+  source: string;
+  sample_tensors?: number;
+}): Promise<StructuralEval> {
+  return request("/merge/eval", { method: "POST", body: JSON.stringify(body) });
 }
 
 export function runMoeMerge(body: {

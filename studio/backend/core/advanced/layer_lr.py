@@ -42,7 +42,20 @@ _EMBED_MARKERS = (
 )
 _HEAD_MARKERS = ("lm_head", "score", "classifier", "output_proj", "final_layernorm")
 _ADAPTER_MARKERS = ("lora_", "modules_to_save", "dora_", "lora_magnitude_vector")
-_LAYER_RE = re.compile(r"(?:layers?|blocks?|encoder\.layer|decoder\.layers?)\.(\d+)\.")
+
+# A decoder layer is named by a container component followed by its index:
+# ``model.layers.0.…``, ``transformer.h.0.…``, ``encoder.block.0.…``. Matching the
+# *components* rather than one hard-coded path is what keeps GPT-2-style ``h.0``
+# names from falling through to the embedding zone.
+_LAYER_CONTAINERS = frozenset({"layer", "layers", "block", "blocks", "h"})
+# Terminal normalisation that closes the stack: the model's final norm belongs
+# with the head, not with the embeddings.
+_FINAL_NORM_RE = re.compile(r"(?:^|\.)(?:norm|ln_f|final_layernorm|final_norm)(?:\.|$)")
+# Structural tags reported by the zone map. They do not change the zone; they
+# make the preview explain *why* a parameter landed where it did.
+_MOE_ROUTER_MARKERS = ("mlp.gate", "router", "block_sparse_moe.gate", "gate.weight")
+_MOE_EXPERT_MARKERS = ("experts.", "expert_", "block_sparse_moe.experts")
+_HYBRID_MARKERS = ("mamba", ".ssm", "ssm_", "linear_attn", "recurrent", "conv1d", "dt_proj")
 
 
 @dataclass(frozen=True)
@@ -133,23 +146,64 @@ def validate_layer_lr_config(
 
 
 def layer_index(name: str) -> int | None:
-    match = _LAYER_RE.search(name)
-    return int(match.group(1)) if match else None
+    """Depth index of a parameter, or None for terminal (non-block) parameters.
+
+    Reads name *components*: the index must be a bare integer whose preceding
+    component is a block container. That skips expert indices
+    (``…experts.5.w1``) and attention-head indices, and it recognises the
+    ``transformer.h.0`` and ``encoder.block.0`` spellings.
+    """
+    parts = name.split(".")
+    for position, part in enumerate(parts[:-1]):
+        if position == 0 or not part.isdigit():
+            continue
+        if parts[position - 1] in _LAYER_CONTAINERS:
+            return int(part)
+    return None
 
 
-def classify_param_zone(name: str) -> str:
+def param_kind(name: str) -> str:
+    """Structural role of a parameter, for the zone-map preview."""
+    lowered = name.lower()
+    if any(marker in lowered for marker in _ADAPTER_MARKERS):
+        return "adapter"
+    if any(marker in lowered for marker in _MOE_EXPERT_MARKERS):
+        return "moe_expert"
+    if any(marker in lowered for marker in _MOE_ROUTER_MARKERS):
+        return "moe_router"
+    if any(marker in lowered for marker in _HYBRID_MARKERS):
+        return "hybrid_block"
+    if _FINAL_NORM_RE.search(lowered) or any(m in lowered for m in _HEAD_MARKERS):
+        return "head"
+    if any(marker in lowered for marker in _EMBED_MARKERS):
+        return "embedding"
+    if lowered.endswith("norm.weight") or lowered.endswith("norm.bias") or ".norm." in lowered:
+        return "norm"
+    if any(token in lowered for token in ("q_proj", "k_proj", "v_proj", "o_proj", "attn")):
+        return "attention"
+    if any(token in lowered for token in ("mlp", "ffn", "feed_forward")):
+        return "mlp"
+    return "other"
+
+
+def classify_param_zone(name: str, num_layers: int | None = None) -> str:
+    """Zone of one parameter name, by depth when the depth is known."""
     lowered = name.lower()
     if any(marker in lowered for marker in _ADAPTER_MARKERS):
         return "adapter"
     index = layer_index(lowered)
     if index is None:
-        # No layer index: embeddings and heads are terminal parameters; anything
-        # else (norm at position 0, scalar biases) follows the embedding regime.
-        if any(marker in lowered for marker in _HEAD_MARKERS):
+        # Terminal parameters: the head (lm_head, score, the final norm) or the
+        # input embeddings closed the stack; anything else sits beside them.
+        if any(marker in lowered for marker in _HEAD_MARKERS) or _FINAL_NORM_RE.search(lowered):
             return "head"
-        if any(marker in lowered for marker in _EMBED_MARKERS):
-            return "embedding"
         return "embedding"
+    if num_layers:
+        if index >= num_layers:
+            # Off-the-end index (a padded or mis-counted config): clamp rather
+            # than inventing a zone that no multiplier covers.
+            index = num_layers - 1
+        return zone_for_layer(index, num_layers)
     return "middle"  # refined by zone_for_layer once the depth is known
 
 
@@ -191,11 +245,13 @@ def resolve_multiplier(
         return "adapter", config.zone_multipliers.get("adapter", 1.0)
     if index is None:
         lowered = name.lower()
-        if any(marker in lowered for marker in _HEAD_MARKERS):
+        if any(marker in lowered for marker in _HEAD_MARKERS) or _FINAL_NORM_RE.search(lowered):
             zone = "head"
         else:
             zone = "embedding"
         return zone, config.zone_multipliers.get(zone, 1.0)
+    if num_layers and index >= num_layers:
+        index = num_layers - 1
     if index in config.layer_multipliers:
         zone = zone_for_layer(index, num_layers or index + 1)
         return zone, config.layer_multipliers[index]
@@ -253,6 +309,153 @@ def build_param_groups(
         group["param_count"] = counts[key]
         result.append(group)
     return result
+
+
+def _numel(parameter: Any) -> int:
+    """Element count of a parameter, a tensor, or a bare integer."""
+    if isinstance(parameter, (int, float)) and not isinstance(parameter, bool):
+        return int(parameter)
+    counter = getattr(parameter, "numel", None)
+    if callable(counter):
+        try:
+            return int(counter())
+        except Exception:  # noqa: BLE001 - a fake tensor in a test
+            return 0
+    shape = getattr(parameter, "shape", None)
+    if shape is not None:
+        total = 1
+        for size in shape:
+            total *= int(size)
+        return total
+    return 0
+
+
+def _requires_grad(parameter: Any) -> bool:
+    return bool(getattr(parameter, "requires_grad", True))
+
+
+def zone_map(
+    named_parameters: Iterable[tuple[str, Any]],
+    config: LayerLrConfig,
+    *,
+    num_layers: int | None = None,
+    sample_limit: int = 8,
+    include_frozen: bool = False,
+) -> dict[str, Any]:
+    """Every parameter's zone, with proof that each one landed in exactly one.
+
+    ``build_param_groups`` groups by ``(zone, lr)``, so a parameter that silently
+    matched no zone -- or two -- was previously invisible until the loss curve
+    looked wrong. This returns the full classification plus a coverage block:
+    ``exact_one_zone`` is the assertion the test suite checks, and
+    ``unclassified`` names anything that fell through.
+
+    Frozen parameters are excluded from the optimizer groups by design; they are
+    still classified here (``include_frozen``) so the preview can show them.
+    """
+    entries: list[dict[str, Any]] = []
+    per_zone: dict[str, dict[str, Any]] = {
+        zone: {
+            "zone": zone,
+            "multiplier": config.zone_multipliers.get(zone, 1.0),
+            "lr": config.base_learning_rate * config.zone_multipliers.get(zone, 1.0),
+            "params": 0,
+            "numel": 0,
+            "kinds": {},
+            "sample": [],
+            "trainable": 0,
+        }
+        for zone in ZONES
+    }
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    unclassified: list[str] = []
+    total_numel = 0
+    assigned_numel = 0
+
+    for name, parameter in named_parameters:
+        trainable = _requires_grad(parameter)
+        size = _numel(parameter)
+        total_numel += size
+        if name in seen:
+            duplicates.append(name)
+        seen.add(name)
+        if not trainable and not include_frozen:
+            continue
+        zone, multiplier = resolve_multiplier(name, config, num_layers)
+        if zone not in per_zone:
+            unclassified.append(name)
+            continue
+        kind = param_kind(name)
+        bucket = per_zone[zone]
+        bucket["params"] += 1
+        bucket["numel"] += size
+        if trainable:
+            bucket["trainable"] += 1
+        bucket["kinds"][kind] = bucket["kinds"].get(kind, 0) + 1
+        if len(bucket["sample"]) < sample_limit:
+            bucket["sample"].append(name)
+        assigned_numel += size
+        entries.append(
+            {
+                "name": name,
+                "zone": zone,
+                "kind": kind,
+                "layer": layer_index(name),
+                "multiplier": multiplier,
+                "lr": config.base_learning_rate * multiplier,
+                "numel": size,
+                "trainable": trainable,
+            }
+        )
+
+    zones = [bucket for bucket in per_zone.values() if bucket["params"] or bucket["zone"] in ("head", "embedding")]
+    exact_one_zone = (
+        not duplicates and not unclassified and all(entry["zone"] in per_zone for entry in entries)
+    )
+    return {
+        "zones": zones,
+        "entries": entries,
+        "coverage": {
+            "params": len(entries),
+            "unique_names": len(seen),
+            "exact_one_zone": exact_one_zone,
+            "duplicates": duplicates,
+            "unclassified": unclassified,
+            "total_numel": total_numel,
+            "assigned_numel": assigned_numel,
+            "covers_all_params": assigned_numel == total_numel,
+        },
+        "num_layers": num_layers,
+        "zone_definition_hash_inputs": {
+            "zone_multipliers": dict(config.zone_multipliers),
+            "layer_multipliers": {str(k): v for k, v in config.layer_multipliers.items()},
+            "depth_curve": list(config.depth_curve) if config.depth_curve else None,
+        },
+    }
+
+
+def zone_preview(
+    config: LayerLrConfig,
+    *,
+    num_layers: int | None,
+    param_names: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """The plan endpoint's zone map: the depth strip plus, when given, real names."""
+    payload: dict[str, Any] = {
+        "layer_strip": zone_breakdown(num_layers) if num_layers else [],
+        "multipliers": dict(config.zone_multipliers),
+        "layer_multipliers": {str(k): v for k, v in config.layer_multipliers.items()},
+        "depth_curve": list(config.depth_curve) if config.depth_curve else None,
+    }
+    if param_names:
+        mapped = zone_map(
+            ((name, 1) for name in param_names), config, num_layers = num_layers
+        )
+        payload["zone_map"] = mapped["zones"]
+        payload["coverage"] = mapped["coverage"]
+        payload["entries"] = mapped["entries"]
+    return payload
 
 
 def summarize_groups(groups: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

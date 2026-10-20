@@ -20,6 +20,7 @@ first one.
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -182,9 +183,10 @@ class BlendedSampler:
     plan: BlendPlan
     streams: Mapping[str, Sequence[int]]
     seed: int = 3407
-    _cursors: dict[str, int] = field(default_factory=dict, init=False)
-    _orders: dict[str, list[int]] = field(default_factory=dict, init=False)
-    _passes: dict[str, int] = field(default_factory=dict, init=False)
+    schedule: BlendSchedule | None = None
+    _cursors: dict[str, int] = field(default_factory = dict, init=False)
+    _orders: dict[str, list[int]] = field(default_factory = dict, init=False)
+    _passes: dict[str, int] = field(default_factory = dict, init=False)
 
     def __post_init__(self) -> None:
         import random
@@ -215,9 +217,15 @@ class BlendedSampler:
         self._cursors[name] = cursor + 1
         return order[cursor]
 
-    def next_batch(self) -> list[int]:
-        layout = self.plan.batch_layout()
+    def next_batch(self, step: int | None = None) -> list[int]:
+        """One batch. With a schedule and a step, the layout follows the event log."""
+        layout = self.layout_at(step) if step is not None else self.plan.batch_layout()
         return [self._next_row(name) for name in layout]
+
+    def layout_at(self, step: int | None) -> list[str]:
+        if self.schedule is None or step is None:
+            return self.plan.batch_layout()
+        return self.schedule.layout_at(step)
 
     def __iter__(self) -> Iterator[list[int]]:
         while True:
@@ -226,11 +234,254 @@ class BlendedSampler:
     def passes(self) -> dict[str, int]:
         return dict(self._passes)
 
+    def resume(self, state: Mapping[str, Any]) -> None:
+        """Restore cursors and pass counts from :meth:`snapshot`.
+
+        The orders are rebuilt rather than stored: they are a pure function of
+        ``(seed, stream length, pass count)``, so replaying the shuffles gives
+        back the exact sequence the interrupted run would have produced. This is
+        what makes a blend-slider move before a checkpoint resume-safe.
+        """
+        import random
+
+        cursors = state.get("cursors") or {}
+        passes = state.get("passes") or {}
+        for name in self._orders:
+            rows = [int(row) for row in self.streams[name]]
+            rounds = int(passes.get(name, 0))
+            order = list(rows)
+            random.Random(self.seed).shuffle(order)
+            for index in range(rounds):
+                random.Random(self.seed + index + 1).shuffle(order)
+            self._orders[name] = order
+            self._passes[name] = rounds
+            self._cursors[name] = int(cursors.get(name, 0))
+            if self._cursors[name] > len(order):
+                self._cursors[name] = 0
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "plan": self.plan.to_dict(),
             "cursors": dict(self._cursors),
             "passes": dict(self._passes),
+        }
+
+
+@dataclass(frozen=True)
+class BlendEvent:
+    """One ratio change, pinned to a global optimizer step.
+
+    The slider is live, so a run's batch stream depended on *when* it moved.
+    Recording the step makes the stream a pure function of
+    ``(seed, events, step)``: replaying the events reproduces the stream without
+    the UI being involved at all.
+    """
+
+    step: int
+    ratios: dict[str, float]
+    reason: str = "ratio change"
+    recorded_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "step": int(self.step),
+            "ratios": {name: float(value) for name, value in self.ratios.items()},
+            "reason": self.reason,
+            "recorded_at": float(self.recorded_at),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "BlendEvent":
+        return cls(
+            step = int(payload.get("step", 0)),
+            ratios = {
+                str(name): float(value)
+                for name, value in (payload.get("ratios") or {}).items()
+            },
+            reason = str(payload.get("reason") or "ratio change"),
+            recorded_at = float(payload.get("recorded_at") or 0.0),
+        )
+
+
+def _normalise(ratios: Mapping[str, float]) -> dict[str, float]:
+    cleaned = {
+        str(name): float(value)
+        for name, value in ratios.items()
+    }
+    if any(not math.isfinite(value) or value < 0 for value in cleaned.values()):
+        raise ValueError("Blend ratios must be non-negative finite numbers.")
+    total = sum(cleaned.values())
+    if total <= 0:
+        raise ValueError("At least one blend ratio must be positive.")
+    return {name: value / total for name, value in cleaned.items()}
+
+
+@dataclass
+class BlendSchedule:
+    """The blend's history, and the ratio that applies at any step.
+
+    ``base`` is the ratio the run started with. Every change is an event keyed by
+    global step; ``ratios_at(step)`` replays them in order, which is how a resumed
+    run reproduces the stream exactly (and what the acceptance test asserts).
+    """
+
+    base: BlendPlan
+    events: list[BlendEvent] = field(default_factory = list)
+    batch_size: int = 1
+
+    def __post_init__(self) -> None:
+        self.events.sort(key = lambda event: event.step)
+
+    # -- recording ----------------------------------------------------------
+
+    def set_ratios(
+        self,
+        ratios: Mapping[str, float],
+        *,
+        step: int,
+        reason: str = "ratio change",
+    ) -> BlendEvent:
+        """Record new *weights* at *step*; streams not named keep their base weight.
+
+        A move at the same step replaces the earlier one, because the run only
+        consumed batches at that step once. Use :meth:`set_ratio` for a single
+        stream's share.
+        """
+        if step < 0:
+            raise ValueError("Blend events are keyed by a non-negative global step.")
+        unknown = [name for name in ratios if name not in self.base.ratios]
+        if unknown:
+            raise ValueError(
+                f"Unknown dataset stream(s): {', '.join(unknown)}. "
+                f"Known streams: {', '.join(self.base.ratios)}."
+            )
+        merged = dict(self.base.ratios)
+        merged.update({str(name): float(value) for name, value in ratios.items()})
+        event = BlendEvent(
+            step = int(step),
+            ratios = _normalise(merged),
+            reason = reason,
+            recorded_at = time.time(),
+        )
+        # A move at the same step supersedes the earlier one: the run only ever
+        # consumed batches at that step once.
+        self.events = [item for item in self.events if item.step != event.step]
+        self.events.append(event)
+        self.events.sort(key = lambda item: item.step)
+        return event
+
+    def set_ratio(self, name: str, value: float, *, step: int) -> BlendEvent:
+        """Set one stream's *share* of the batch; the others rebalance.
+
+        This is what the UI slider calls: "reasoning is 25%" means reasoning
+        gets 25% and the remaining streams split the other 75% in proportion to
+        the shares they had, not "reasoning's raw weight is 25".
+        """
+        if name not in self.base.ratios:
+            raise ValueError(
+                f"Unknown dataset stream {name!r}. Known streams: "
+                f"{', '.join(self.base.ratios)}."
+            )
+        share = float(value)
+        if not math.isfinite(share) or share < 0 or share > 1:
+            raise ValueError("A stream's share must be between 0 and 1.")
+        current = self.ratios_at(step)
+        others = {key: ratio for key, ratio in current.items() if key != name}
+        remaining = 1.0 - share
+        total_others = sum(others.values())
+        ratios = {name: share}
+        for key, ratio in others.items():
+            ratios[key] = (
+                remaining * (ratio / total_others)
+                if total_others > 0
+                else remaining / max(1, len(others))
+            )
+        return self.set_ratios(ratios, step = step, reason = f"{name} -> {share:.0%}")
+
+    # -- reading -----------------------------------------------------------
+
+    def ratios_at(self, step: int) -> dict[str, float]:
+        current = dict(self.base.ratios)
+        for event in self.events:
+            if event.step > step:
+                break
+            current = dict(event.ratios)
+        return current
+
+    def plan_at(self, step: int) -> BlendPlan:
+        ratios = self.ratios_at(step)
+        slots = tuple(
+            BlendSlot(
+                name = slot.name,
+                ratio = ratios[slot.name],
+                dataset = slot.dataset,
+                rows = slot.rows,
+                subset = slot.subset,
+                split = slot.split,
+            )
+            for slot in self.base.slots
+        )
+        return BlendPlan(
+            slots = slots,
+            ratios = ratios,
+            batch_size = self.batch_size or self.base.batch_size,
+            notes = self.base.notes,
+            warnings = self.base.warnings,
+        )
+
+    def layout_at(self, step: int) -> list[str]:
+        return self.plan_at(step).batch_layout()
+
+    def events_document(self) -> list[dict[str, Any]]:
+        return [event.to_dict() for event in self.events]
+
+    def manifest_block(self) -> dict[str, Any]:
+        """What the run manifest stores: base plan plus the event log."""
+        return {
+            "batch_size": self.batch_size or self.base.batch_size,
+            "base_ratios": dict(self.base.ratios),
+            "slots": [slot.to_dict() for slot in self.base.slots],
+            "events": self.events_document(),
+            "event_count": len(self.events),
+        }
+
+    @classmethod
+    def from_manifest(
+        cls, payload: Mapping[str, Any] | None, *, batch_size: int | None = None
+    ) -> "BlendSchedule | None":
+        """Rebuild a schedule from a manifest block, or None when there is none."""
+        if not payload:
+            return None
+        slots = payload.get("slots") or []
+        if not slots:
+            return None
+        plan = validate_blend_slots(
+            slots, batch_size = int(batch_size or payload.get("batch_size") or 1)
+        )
+        schedule = cls(
+            base = plan,
+            events = [BlendEvent.from_dict(item) for item in payload.get("events") or []],
+            batch_size = int(payload.get("batch_size") or plan.batch_size),
+        )
+        return schedule
+
+    # -- checkpointing ------------------------------------------------------
+
+    def snapshot(self, step: int, *, checkpoint: str | None = None) -> dict[str, Any]:
+        """The record written at a checkpoint boundary.
+
+        It is self-contained: a resume from it needs no in-memory history, only
+        the events up to *step* and the step itself.
+        """
+        applied = [event for event in self.events if event.step <= step]
+        pending = [event for event in self.events if event.step > step]
+        return {
+            "step": int(step),
+            "checkpoint": checkpoint,
+            "ratios": self.ratios_at(step),
+            "applied_events": [event.to_dict() for event in applied],
+            "pending_events": [event.to_dict() for event in pending],
+            "recorded_at": time.time(),
         }
 
 

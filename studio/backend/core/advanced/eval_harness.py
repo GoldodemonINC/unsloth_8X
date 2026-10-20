@@ -205,9 +205,16 @@ def compute_deltas(
     candidate: Mapping[str, float],
     *,
     regression_threshold: float = 0.02,
+    noise_floor: float = 0.015,
     higher_is_better: bool = True,
 ) -> dict[str, Any]:
-    """Compare two score maps (suite -> metric value in [0, 1] or percent)."""
+    """Compare two score maps (suite -> metric value in [0, 1] or percent).
+
+    ``noise_floor`` is the honesty knob: a delta smaller than it is labelled
+    *within noise* rather than reported as an improvement. On a 1.5B model 1.5
+    points is roughly the run-to-run spread, so calling +0.5 a win would be a
+    claim the data cannot support.
+    """
     if not baseline:
         raise ValueError("Baseline scores are empty.")
     entries = []
@@ -225,6 +232,7 @@ def compute_deltas(
             if signed > abs(regression_threshold)
             else "flat"
         )
+        within_noise = abs(delta) <= abs(noise_floor)
         entries.append(
             {
                 "suite": suite,
@@ -234,19 +242,37 @@ def compute_deltas(
                 "delta": delta,
                 "relative": (delta / base) if base else None,
                 "status": status,
+                "within_noise": within_noise,
+                "noise_note": (
+                    f"within noise (±{abs(noise_floor) * 100:.1f} pts)"
+                    if within_noise
+                    else None
+                ),
             }
         )
     if not entries:
         raise ValueError("No overlapping suites between baseline and candidate.")
     aggregate = sum(entry["delta"] for entry in entries) / len(entries)
     regressions = [entry["suite"] for entry in entries if entry["status"] == "regressed"]
+    improvements = [e["suite"] for e in entries if e["status"] == "improved"]
+    if regressions:
+        verdict = "regressed"
+    elif improvements:
+        verdict = "pareto-positive"
+    else:
+        verdict = "within-noise"
     return {
         "entries": entries,
         "aggregate_delta": aggregate,
+        "noise_floor": abs(noise_floor),
         "regressions": regressions,
-        "improved": [e["suite"] for e in entries if e["status"] == "improved"],
+        "improved": improvements,
         "flat": [e["suite"] for e in entries if e["status"] == "flat"],
+        "within_noise": [e["suite"] for e in entries if e["within_noise"]],
+        # ``verdict`` keeps the historical vocabulary (regressed / ok) for callers
+        # that gate on it; ``honest_verdict`` uses the full label set.
         "verdict": "regressed" if regressions else "ok",
+        "honest_verdict": verdict,
     }
 
 
@@ -254,7 +280,7 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
     """Render a delta report as Markdown for the run detail and notifications."""
     lines: list[str] = []
     title = report.get("run_name") or report.get("candidate_model") or "Evaluation report"
-    lines.append(f"# Auto-eval: {title}")
+    lines.append(f"# Regression Guard: {title}")
     lines.append("")
     generated = report.get("generated_at") or datetime.now(timezone.utc).isoformat()
     lines.append(f"_Generated {generated}_")
@@ -263,16 +289,20 @@ def render_markdown_report(report: Mapping[str, Any]) -> str:
     lines.append("|---|---:|---:|---:|---|")
     for entry in report.get("comparison", {}).get("entries", []):
         delta = float(entry.get("delta", 0.0))
+        note = f" · {entry['noise_note']}" if entry.get("noise_note") else ""
         lines.append(
             f"| {entry.get('label', entry.get('suite'))} | "
             f"{_fmt(entry.get('baseline'))} | {_fmt(entry.get('candidate'))} | "
-            f"{delta:+.4f} | {_icon(entry.get('status'))} {entry.get('status')} |"
+            f"{delta:+.4f} | {_icon(entry.get('status'))} {entry.get('status')}{note} |"
         )
     comparison = report.get("comparison", {})
     lines.append("")
+    floor = comparison.get("noise_floor")
+    floor_note = f", noise floor ±{float(floor) * 100:.1f} pts" if floor else ""
     lines.append(
         f"**Aggregate delta: {float(comparison.get('aggregate_delta', 0.0)):+.4f}**  "
-        f"(verdict: {comparison.get('verdict', 'unknown')})"
+        f"(verdict: {comparison.get('honest_verdict') or comparison.get('verdict', 'unknown')}"
+        f"{floor_note})"
     )
     if report.get("warnings"):
         lines.append("")

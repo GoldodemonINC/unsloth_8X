@@ -26,8 +26,13 @@ from core.advanced import (
     curriculum,
     eval_harness,
     layer_lr,
+    merge_eval,
+    policy as loading_policy,
     qat,
+    resources,
     rl,
+    run_manifest,
+    tokenizer_check,
 )
 
 router = APIRouter()
@@ -49,6 +54,9 @@ class QatRequest(BaseModel):
     tensor_scale: Optional[float] = None
     skip: Optional[list[str]] = None
     min_numel: int = 4096
+    # Optional pair to measure: quality at the export quant, parent vs fine-tune.
+    parent: Optional[str] = None
+    candidate: Optional[str] = None
 
 
 class RlValidateRequest(BaseModel):
@@ -70,6 +78,10 @@ class LayerLrRequest(BaseModel):
     zone_multipliers: Optional[dict[str, float]] = None
     layer_multipliers: Optional[dict[str, float]] = None
     depth_curve: Optional[list[float]] = None
+    # Optional real parameter names, so the preview shows the actual zone map.
+    param_names: Optional[list[str]] = None
+    # A checkpoint to read the parameter names from when they are not sent.
+    model: Optional[str] = None
 
 
 class BlendRequest(BaseModel):
@@ -100,6 +112,23 @@ class MergeRunRequest(BaseModel):
     seed: int = 3407
     max_shard_gb: float = Field(4.0, gt = 0.0, le = 1024.0)
     hf_token: Optional[str] = None
+    # Opt-ins. Both are recorded in merge_report.json and the run manifest.
+    allow_remote_code: bool = False
+    allow_non_safetensors: bool = False
+    allow_tokenizer_conflict: bool = False
+
+
+class MergeValidateRequest(BaseModel):
+    model_a: str
+    model_b: str
+    hf_token: Optional[str] = None
+    allow_remote_code: bool = False
+    allow_non_safetensors: bool = False
+
+
+class MergeEvalRequest(BaseModel):
+    source: str
+    sample_tensors: int = Field(24, gt = 0, le = 512)
 
 
 class MoeRunRequest(BaseModel):
@@ -111,6 +140,25 @@ class MoeRunRequest(BaseModel):
     layer_start: Optional[int] = None
     layer_end: Optional[int] = None
     hf_token: Optional[str] = None
+    allow_remote_code: bool = False
+    allow_non_safetensors: bool = False
+
+
+class ResourceEstimateRequest(BaseModel):
+    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat"]
+    sources: Optional[list[str]] = None
+    output_dir: Optional[str] = None
+
+
+class AcquireRequest(BaseModel):
+    job_id: str
+    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat"]
+    sources: Optional[list[str]] = None
+    wait_seconds: float = Field(0.0, ge = 0.0, le = 3600.0)
+
+
+class ReleaseRequest(BaseModel):
+    job_id: str
 
 
 class SplitPlanRequest(BaseModel):
@@ -144,15 +192,51 @@ class EvalRunRequest(EvalPlanRequest):
 # ---------------------------------------------------------------------------
 
 
-def _output_dir(value: Optional[str], *, kind: str) -> Path:
+def _merge_default_name(model_a: str, model_b: str) -> str:
+    from utils.paths import default_merge_dir_name
+
+    return default_merge_dir_name(model_a, model_b)
+
+
+def _free_output_dir(name: str) -> Path:
+    """An unused folder directly under the outputs root, so two runs never overwrite each other."""
+    from utils.paths import outputs_root
+
+    root = outputs_root()
+    candidate = root / name
+    index = 2
+    while candidate.exists():
+        candidate = root / f"{name}-{index}"
+        index += 1
+    return candidate
+
+
+def _library_visible(output: Optional[Path]) -> bool:
+    """True when Studio lists *output* as a model (the Library scans the outputs root's children)."""
+    if output is None:
+        return False
+    from utils.paths import outputs_root
+
+    try:
+        resolved = output.resolve()
+        root = outputs_root().resolve()
+    except (OSError, ValueError):
+        return False
+    return resolved != root and resolved.parent == root
+
+
+def _output_dir(value: Optional[str], *, kind: str, default_name: Optional[str] = None) -> Path:
     """Resolve a merge/split output folder without pinning the UI to one machine's paths.
 
-    A blank value (or the bare default name the UI prefills) lands under the Studio outputs
-    root, so the same request works on Windows and on a Colab runtime, where ``C:\\models``
-    does not exist. An absolute path is honoured as given so writing to another drive keeps
+    A blank value lands beside the training runs in the Studio outputs root, named after
+    the sources, so the same request works on Windows and on a Colab runtime (where
+    ``C:\\models`` does not exist) and the result is a model the Library, Export and Chat
+    can pick up. An absolute path is honoured as given so writing to another drive keeps
     working.
     """
-    raw = (value or "").strip() or kind
+    raw = (value or "").strip()
+    if not raw:
+        return _free_output_dir(default_name or kind)
     expanded = Path(raw).expanduser()
     # A Windows drive path (``C:/models``) is not absolute on POSIX, so test Windows rules too:
     # it must never be joined onto the outputs root. ``C:merged`` stays drive-relative and is
@@ -167,8 +251,64 @@ def _output_dir(value: Optional[str], *, kind: str) -> Path:
         raise HTTPException(status_code = 400, detail = str(error)) from error
 
 
-def _start_job(kind: str, work, *, output_dir: Optional[str] = None) -> dict[str, Any]:
+def _loading_policy(**flags: Any) -> loading_policy.LoadingPolicy:
+    return loading_policy.LoadingPolicy(
+        allow_remote_code = bool(flags.get("allow_remote_code", False)),
+        allow_non_safetensors = bool(flags.get("allow_non_safetensors", False)),
+    )
+
+
+def _stage_manifest(
+    kind: str,
+    directory: Optional[str],
+    *,
+    config: dict[str, Any],
+    inputs: dict[str, Any],
+    artifacts: dict[str, Any],
+    seeds: Optional[dict[str, Any]] = None,
+    policy: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
+    """Write the stage's run manifest beside its artifacts.
+
+    Failing to write it must not lose a finished run's output, so the caller
+    records the error instead of raising.
+    """
+    if not directory:
+        return None
+    try:
+        manifest = run_manifest.build_manifest(
+            kind,
+            config = config,
+            inputs = inputs,
+            artifacts = artifacts,
+            seeds = seeds or {},
+            policy = policy or {},
+        )
+        target = run_manifest.write_manifest(directory, manifest)
+        return str(target)
+    except OSError:
+        return None
+
+
+def _start_job(
+    kind: str,
+    work,
+    *,
+    output_dir: Optional[str] = None,
+    sources: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Reserve resources, then run *work* on a thread.
+
+    The lease is taken here, on the request thread, so a job that cannot run is
+    a 409 naming the short resource instead of a background thread that dies
+    with a CUDA OOM. The lease is released when the work finishes.
+    """
     job_id = uuid.uuid4().hex
+    lease = resources.acquire_for_job(
+        job_id, kind, sources = sources, output_dir = output_dir
+    )
+    if lease["status"] != "granted":
+        raise HTTPException(status_code = 409, detail = lease["reason"])
     record = {
         "job_id": job_id,
         "kind": kind,
@@ -176,6 +316,13 @@ def _start_job(kind: str, work, *, output_dir: Optional[str] = None) -> dict[str
         "created_at": time.time(),
         "finished_at": None,
         "output_dir": output_dir,
+        "library_visible": _library_visible(Path(output_dir) if output_dir else None),
+        "resources": {
+            "status": lease["status"],
+            "need": (lease.get("estimate") or {}).get("need"),
+            "notes": (lease.get("estimate") or {}).get("notes", []),
+        },
+        "run_manifest": None,
         "result": None,
         "error": None,
     }
@@ -194,11 +341,14 @@ def _start_job(kind: str, work, *, output_dir: Optional[str] = None) -> dict[str
             result = work()
             record["result"] = result
             record["status"] = "completed"
+            if isinstance(result, dict):
+                record["run_manifest"] = result.get("run_manifest")
         except Exception as error:  # noqa: BLE001 - surfaced through the job record
             record["error"] = str(error)
             record["status"] = "failed"
         finally:
             record["finished_at"] = time.time()
+            resources.BROKER.release(job_id)
 
     threading.Thread(target = _runner, name = f"advanced-{kind}", daemon = True).start()
     return record
@@ -217,11 +367,91 @@ def _job(job_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# The platform scope table, in one place. Each entry answers "does this work on a
+# CPU-only host?" honestly, because the product's wedge is that merging does.
+_FEATURES = (
+    {
+        "key": "merge",
+        "label": "Merge (weight blending)",
+        "cpu": True,
+        "gpu": True,
+        "note": "Streams one tensor pair at a time, so it fits a CPU host with ~2x the largest tensor free.",
+    },
+    {
+        "key": "split",
+        "label": "VRAM Fit (checkpoint sharding)",
+        "cpu": True,
+        "gpu": True,
+        "note": "Splits oversized checkpoints into loadable shards; needs disk, not a GPU.",
+    },
+    {
+        "key": "structural_validation",
+        "label": "Structural validation",
+        "cpu": True,
+        "gpu": True,
+        "note": "Load, tokenizer and NaN/scale checks. Says nothing about task quality.",
+    },
+    {
+        "key": "alignment",
+        "label": "Policy alignment",
+        "cpu": True,
+        "gpu": True,
+        "note": "Preference data checks and planning; training the adapter needs a GPU.",
+    },
+    {
+        "key": "training",
+        "label": "Training",
+        "cpu": False,
+        "gpu": True,
+        "note": "CPU is orchestration only: no CPU training path exists.",
+    },
+    {
+        "key": "moe",
+        "label": "MMoE expert fusion",
+        "cpu": False,
+        "gpu": True,
+        "note": "The bundle can be written anywhere; training the router needs a GPU.",
+    },
+    {
+        "key": "benchmarks",
+        "label": "Benchmarks (eval harness)",
+        "cpu": False,
+        "gpu": True,
+        "note": "lm-eval needs a GPU to be practical; structural validation is the CPU tier.",
+    },
+    {
+        "key": "rl",
+        "label": "Reinforcement learning",
+        "cpu": False,
+        "gpu": True,
+        "note": "DPO/GRPO train the model, so they need a GPU.",
+    },
+    {
+        "key": "qat",
+        "label": "Quantization-aware fine-tuning",
+        "cpu": False,
+        "gpu": True,
+        "note": "Fake-quant is applied in the forward pass of a training run.",
+    },
+)
+
+PLATFORM_LINE = (
+    "On any CPU (8 GB+ available): merge (streaming), alignment, VRAM Fit sharding, "
+    "structural validation. Training, RL, QAT, MMoE, and benchmarks need a GPU; "
+    "Colab covers MMoE and small training runs."
+)
+
+
 @router.get("/capabilities")
 def capabilities() -> dict[str, Any]:
     from core.advanced import splitter
 
     memory = splitter.probe_memory()
+    has_gpu = bool(memory.gpus)
+    features = [
+        {**feature, "available_here": feature["gpu"] if has_gpu else feature["cpu"]}
+        for feature in _FEATURES
+    ]
     return {
         "qat_formats": list(qat.QAT_FORMATS),
         "merge_methods": ["linear", "slerp", "ties", "dare"],
@@ -231,9 +461,65 @@ def capabilities() -> dict[str, Any]:
         "eval_suites": eval_harness.list_suites(),
         "eval_harness": eval_harness.harness_available(),
         "memory": memory.to_dict(),
+        "features": features,
+        "platform_line": PLATFORM_LINE,
+        "has_gpu": has_gpu,
         "torch_available": _module_available("torch"),
         "safetensors_available": _module_available("safetensors"),
         "trl_available": _module_available("trl"),
+        "merge_streams": True,
+        "merge_cpu_note": (
+            "CPU merge is streaming only: both parents are never resident, so 8 GB of "
+            "available RAM is a real tier. A full-load merge would not fit and is not offered."
+        ),
+    }
+
+
+@router.get("/resources")
+def resource_state() -> dict[str, Any]:
+    """Live VRAM/RAM/disk, the headroom limits, and who holds a lease."""
+    return resources.BROKER.snapshot()
+
+
+@router.post("/resources/estimate")
+def resource_estimate(request: ResourceEstimateRequest) -> dict[str, Any]:
+    try:
+        return resources.estimate(
+            request.kind, sources = request.sources, output_dir = request.output_dir
+        )
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+
+
+@router.post("/jobs/acquire")
+def acquire_resources(request: AcquireRequest) -> dict[str, Any]:
+    """Lease resources for a job started outside this router (training, MCP)."""
+    result = resources.BROKER.acquire(
+        request.job_id,
+        request.kind,
+        None,
+        sources = request.sources,
+        wait_seconds = request.wait_seconds,
+    )
+    if result["status"] == "denied":
+        raise HTTPException(status_code = 409, detail = result["reason"])
+    return result
+
+
+@router.post("/jobs/release")
+def release_resources(request: ReleaseRequest) -> dict[str, Any]:
+    resources.BROKER.release(request.job_id)
+    return {"released": request.job_id, "leases": resources.BROKER.leases()}
+
+
+@router.get("/outputs")
+def output_locations() -> dict[str, Any]:
+    """Where Studio keeps the models it can list, quantize and serve."""
+    from utils.paths import exports_root, outputs_root
+
+    return {
+        "outputs_root": str(outputs_root()),
+        "exports_root": str(exports_root()),
     }
 
 
@@ -252,7 +538,33 @@ def validate_qat(request: QatRequest) -> dict[str, Any]:
         cfg = qat.validate_qat_config(request.model_dump())
     except ValueError as error:
         raise HTTPException(status_code = 400, detail = str(error)) from error
-    return {"config": cfg.__dict__, "summary": qat.qat_summary(qat.QatSession(config = cfg))}
+    payload: dict[str, Any] = {
+        "config": cfg.__dict__,
+        "summary": qat.qat_summary(qat.QatSession(config = cfg)),
+        "claim": (
+            f"Quantization-aware fine-tuning at {cfg.format} (group {cfg.group_size}). The "
+            "forward pass runs on the fake-quantized weights, so the run learns to "
+            "compensate for that grid. Nothing is claimed for other precisions."
+        ),
+        "export_target": {"format": cfg.format, "group_size": cfg.group_size},
+    }
+    if request.parent and request.candidate:
+        try:
+            payload["export_quality"] = qat.validate_checkpoints_at_export(
+                request.parent, request.candidate, config = cfg
+            )
+        except ValueError as error:
+            raise HTTPException(status_code = 400, detail = str(error)) from error
+    else:
+        payload["export_quality"] = {
+            "status": "not_measured",
+            "verdict": "unmeasured",
+            "reason": (
+                "Give both parent and candidate checkpoints to measure quality at the "
+                "export quant; without them this endpoint only validates the config."
+            ),
+        }
+    return payload
 
 
 @router.post("/rl/validate")
@@ -278,7 +590,15 @@ def plan_curriculum(request: CurriculumRequest) -> dict[str, Any]:
         )
     except ValueError as error:
         raise HTTPException(status_code = 400, detail = str(error)) from error
-    return plan.to_dict()
+    payload = plan.to_dict()
+    # Labelled wherever it is exposed: it is a schedule preview until an
+    # equal-compute A/B exists, and not a peer of weight blending.
+    payload["label"] = "experimental"
+    payload["note"] = (
+        "Curriculum ordering is experimental. Treat any gain over plain blending "
+        "as unproven until an equal-compute A/B says otherwise."
+    )
+    return payload
 
 
 @router.post("/layer-lr/plan")
@@ -297,7 +617,59 @@ def plan_layer_lr(request: LayerLrRequest) -> dict[str, Any]:
     breakdown = (
         layer_lr.zone_breakdown(request.num_layers) if request.num_layers else []
     )
-    return {"config": cfg.to_dict(), "zones": breakdown}
+    param_names = list(request.param_names or [])
+    num_layers = request.num_layers
+    note = None
+    if request.model and not param_names:
+        param_names, discovered_layers = _checkpoint_param_names(request.model)
+        num_layers = num_layers or discovered_layers
+        if not param_names:
+            note = (
+                "Parameter names could not be read from that checkpoint; the preview "
+                "shows the depth strip only."
+            )
+    preview = layer_lr.zone_preview(
+        cfg, num_layers = num_layers, param_names = param_names or None
+    )
+    payload: dict[str, Any] = {
+        "config": cfg.to_dict(),
+        "zones": breakdown,
+        "preview": preview,
+        "num_layers": num_layers,
+        "zone_definition_hash": None,
+        "notes": [note] if note else [],
+    }
+    if param_names:
+        payload["coverage"] = preview.get("coverage")
+    else:
+        payload["notes"].append(
+            "Send param_names or a local model path to see every parameter's zone before training."
+        )
+    try:
+        payload["zone_definition_hash"] = run_manifest.zone_definition_hash(cfg.to_dict())
+    except (TypeError, ValueError):
+        pass
+    return payload
+
+
+def _checkpoint_param_names(source: str) -> tuple[list[str], int | None]:
+    """Tensor names of a local checkpoint, read from shard headers only.
+
+    A Hub id is not downloaded here: a planning call must stay cheap, and the
+    names arrive once the merge has a local snapshot.
+    """
+    from core.advanced import merge
+
+    if not Path(source).expanduser().exists():
+        return [], None
+    try:
+        entries, _ = merge._open_state(source)
+    except (ValueError, OSError):
+        return [], None
+    names = sorted(entries)
+    depths = [layer_lr.layer_index(name) for name in names]
+    known = [depth for depth in depths if depth is not None]
+    return names, (max(known) + 1 if known else None)
 
 
 @router.post("/blend/plan")
@@ -334,6 +706,102 @@ def _require_checkpoint_source(path: str, label: str, *, allow_hub: bool = True)
     )
 
 
+def _local_tokenizer_preview(sources: list[str]) -> dict[str, Any]:
+    """Tokenizer comparison for sources that are already on disk."""
+    missing = [source for source in sources if not Path(source).expanduser().exists()]
+    if missing:
+        return {
+            "status": "not_checked",
+            "ok": None,
+            "reason": (
+                "Tokenizer check runs on local checkpoints; "
+                + ", ".join(missing[:2])
+                + " has not been downloaded yet. It runs automatically before any merge."
+            ),
+        }
+    try:
+        return tokenizer_check.compare_tokenizers(sources, label = "merge").to_dict()
+    except ValueError as error:
+        return {"status": "not_checked", "ok": None, "reason": str(error)}
+
+
+@router.post("/merge/validate")
+def validate_merge(request: MergeValidateRequest) -> dict[str, Any]:
+    """Run the pre-merge gates without writing anything.
+
+    This is what the UI calls when both slots are filled: tokenizer agreement,
+    pickle weight files, and remote-code requirements, each with the reason it
+    would block (or warn about) a run.
+    """
+    policy = _loading_policy(
+        allow_remote_code = request.allow_remote_code,
+        allow_non_safetensors = request.allow_non_safetensors,
+    )
+    sources = [request.model_a, request.model_b]
+    inspections: list[dict[str, Any]] = []
+    for label, source in zip(("Model A", "Model B"), sources):
+        if Path(source).expanduser().exists():
+            try:
+                inspections.append(
+                    {
+                        "label": label,
+                        **loading_policy.enforce_source_policy(
+                            source, policy, label = label
+                        ),
+                        "blocked": False,
+                    }
+                )
+            except loading_policy.PolicyViolation as error:
+                inspections.append(
+                    {
+                        "label": label,
+                        "source": source,
+                        "allowed": False,
+                        "blocked": True,
+                        "blocked_reason": str(error),
+                        "warnings": [str(error)],
+                    }
+                )
+        else:
+            inspections.append(
+                {
+                    "label": label,
+                    "source": source,
+                    "allowed": None,
+                    "blocked": False,
+                    "notes": ["Not downloaded yet; the policy is applied when it is."],
+                }
+            )
+    tokenizer = _local_tokenizer_preview(sources)
+    blocked = any(item.get("blocked") for item in inspections)
+    result: dict[str, Any] = {
+        "ok": (not blocked) and tokenizer.get("status") != "conflict",
+        "blocked": blocked or tokenizer.get("status") == "conflict",
+        "policy": policy.to_dict(),
+        "sources": inspections,
+        "tokenizer": tokenizer,
+    }
+    if tokenizer.get("status") == "conflict":
+        result["blocked_reason"] = (
+            "The parents' tokenizers disagree on a special token; the merge would refuse "
+            "to write. " + " ".join(tokenizer.get("conflicts") or [])
+        )
+    return result
+
+
+@router.post("/merge/eval")
+def eval_merged_model(request: MergeEvalRequest) -> dict[str, Any]:
+    """Structural merge-eval: is the merged folder loadable and sane?
+
+    This is the CPU tier. It deliberately does not claim task quality; the
+    verdict vocabulary keeps ``pareto-positive``/``within-noise``/``regressed``
+    for the benchmark tier so the two cannot be confused.
+    """
+    return merge_eval.structural_eval(
+        request.source, sample_tensors = request.sample_tensors
+    )
+
+
 @router.post("/merge/plan")
 def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
     from core.advanced import merge
@@ -362,11 +830,25 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
         )
     except ValueError as error:
         raise HTTPException(status_code = 400, detail = str(error)) from error
+    suggested = _free_output_dir(_merge_default_name(request.model_a, request.model_b))
+    estimate = resources.estimate(
+        "merge", sources = [request.model_a, request.model_b], output_dir = suggested
+    )
     return {
         "models": [spec_a.to_dict(), spec_b.to_dict()],
         "alignment": alignment.to_dict(),
         "moe": moe.to_dict(),
         "recommended_mode": "mmoe" if alignment.mmoe_required else "standard",
+        # Prefilled into the output field so a merge lands in the folder Studio scans.
+        "suggested_output_dir": str(suggested),
+        # Plan before compute: peak memory, the output folder, and the tokenizer verdict.
+        "estimates": {
+            "need": estimate["need"],
+            "notes": estimate["notes"],
+            "streaming": True,
+            "model_bytes": estimate["model_bytes"],
+        },
+        "tokenizer": _local_tokenizer_preview([request.model_a, request.model_b]),
     }
 
 
@@ -376,7 +858,15 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
 
     _require_checkpoint_source(request.model_a, "Model A")
     _require_checkpoint_source(request.model_b, "Model B")
-    output = _output_dir(request.output_dir, kind = "merged")
+    policy = _loading_policy(
+        allow_remote_code = request.allow_remote_code,
+        allow_non_safetensors = request.allow_non_safetensors,
+    )
+    output = _output_dir(
+        request.output_dir,
+        kind = "merged",
+        default_name = _merge_default_name(request.model_a, request.model_b),
+    )
     for source in (request.model_a, request.model_b):
         try:
             if output.resolve() == Path(source).expanduser().resolve():
@@ -398,9 +888,16 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
             seed = request.seed,
             max_shard_bytes = int(request.max_shard_gb * 1024**3),
             token = request.hf_token,
+            policy = policy,
+            allow_tokenizer_conflict = request.allow_tokenizer_conflict,
         )
 
-    return _start_job("merge", work, output_dir = str(output))
+    return _start_job(
+        "merge",
+        work,
+        output_dir = str(output),
+        sources = [request.model_a, request.model_b],
+    )
 
 
 @router.post("/merge/moe")
@@ -409,7 +906,15 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
 
     for index, source in enumerate(request.models):
         _require_checkpoint_source(source, f"Model {index + 1}")
-    output = _output_dir(request.output_dir, kind = "moe")
+    policy = _loading_policy(
+        allow_remote_code = request.allow_remote_code,
+        allow_non_safetensors = request.allow_non_safetensors,
+    )
+    output = _output_dir(
+        request.output_dir,
+        kind = "moe",
+        default_name = _merge_default_name(request.models[0], request.models[1]),
+    )
 
     def work() -> dict[str, Any]:
         snapshots = [
@@ -432,14 +937,29 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
             temperature = request.temperature,
             layer_range = layer_range,
         )
-        return moe.write_moe_bundle(
+        tokenizer = tokenizer_check.check_before_merge(snapshots)
+        result = moe.write_moe_bundle(
             str(output),
             plan.to_dict(),
             hidden_size = plan.router_hidden,
             seed = 3407,
         )
+        result["tokenizer"] = {
+            "status": tokenizer.status,
+            "warnings": list(tokenizer.warnings),
+        }
+        result["run_manifest"] = _stage_manifest(
+            "moe",
+            str(output),
+            config = {"top_k": request.top_k, "plan": plan.to_dict()},
+            inputs = {source: run_manifest.checkpoint_digest(source) for source in snapshots},
+            artifacts = {"output_dir": str(output), "bundle": "moe_bundle.json"},
+            seeds = {"router_seed": 3407},
+            policy = {"loading": policy.to_dict()},
+        )
+        return result
 
-    return _start_job("moe", work, output_dir = str(output))
+    return _start_job("moe", work, output_dir = str(output), sources = request.models)
 
 
 # ---------------------------------------------------------------------------
@@ -470,10 +990,14 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
     from core.advanced import splitter
 
     _require_checkpoint_source(request.source, "Checkpoint", allow_hub = False)
-    output = _output_dir(request.output_dir, kind = "sharded")
+    output = _output_dir(
+        request.output_dir,
+        kind = "sharded",
+        default_name = f"sharded-{Path(request.source).expanduser().name}",
+    )
 
     def work() -> dict[str, Any]:
-        return splitter.split_checkpoint(
+        result = splitter.split_checkpoint(
             request.source,
             str(output),
             max_shard_bytes = int((request.max_shard_gb or 4.0) * 1024**3),
@@ -481,8 +1005,25 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
             prefer = request.prefer,
             copy_tokenizer = request.copy_tokenizer,
         )
+        result["run_manifest"] = _stage_manifest(
+            "split",
+            str(output),
+            config = {
+                "max_shard_bytes": int((request.max_shard_gb or 4.0) * 1024**3),
+                "reserve_fraction": request.reserve_fraction,
+                "prefer": request.prefer,
+                "copy_tokenizer": request.copy_tokenizer,
+            },
+            inputs = {"source": run_manifest.checkpoint_digest(request.source)},
+            artifacts = {
+                "output_dir": str(output),
+                "shards": result.get("shards") or result.get("shard_count"),
+                "total_bytes": result.get("total_bytes"),
+            },
+        )
+        return result
 
-    return _start_job("split", work, output_dir = str(output))
+    return _start_job("split", work, output_dir = str(output), sources = [request.source])
 
 
 # ---------------------------------------------------------------------------
@@ -536,13 +1077,35 @@ def eval_run(request: EvalRunRequest) -> dict[str, Any]:
         )
 
     def work() -> dict[str, Any]:
-        return eval_runner.run_plan(
+        result = eval_runner.run_plan(
             plan,
             output_dir = request.output_dir,
             timeout = request.timeout_seconds,
         )
+        result["run_manifest"] = _stage_manifest(
+            "eval",
+            request.output_dir,
+            config = {
+                "suites": list(request.suites),
+                "batch_size": request.batch_size,
+                "limit": request.limit,
+                "eval_dataset": request.eval_dataset,
+            },
+            inputs = {
+                "baseline": run_manifest.checkpoint_digest(request.baseline_model),
+                "candidate": run_manifest.checkpoint_digest(request.candidate_model),
+                "dataset": run_manifest.dataset_identity(request.eval_dataset),
+            },
+            artifacts = {"output_dir": request.output_dir},
+        )
+        return result
 
-    return _start_job("eval", work)
+    return _start_job(
+        "eval",
+        work,
+        output_dir = request.output_dir,
+        sources = [request.baseline_model, request.candidate_model],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +1125,9 @@ def job_status(job_id: str) -> dict[str, Any]:
             "created_at",
             "finished_at",
             "output_dir",
+            "library_visible",
+            "resources",
+            "run_manifest",
             "result",
             "error",
         )

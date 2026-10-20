@@ -100,11 +100,12 @@ export function CheckpointSplitterCard() {
           </span>
           <div>
             <h2 className="text-ui-13p5 font-semibold text-foreground">
-              VRAM-aware checkpoint splitter
+              VRAM Fit
             </h2>
             <p className="text-ui-11 leading-ui-15 text-muted-foreground/85">
-              Streams a large safetensors checkpoint into shards sized to live free
-              VRAM / RAM, so a 70B export or a merged expert stack does not OOM.
+              When a checkpoint does not fit your card, shard it. Streaming splits a
+              safetensors model into pieces sized to live free VRAM / RAM, so a 70B
+              export or a merged expert stack still loads.
             </p>
           </div>
         </div>
@@ -114,7 +115,7 @@ export function CheckpointSplitterCard() {
             size="sm"
             checked={enabled}
             onCheckedChange={setEnabled}
-            aria-label="Enable checkpoint splitter"
+            aria-label="Enable VRAM Fit"
           />
         </div>
       </div>

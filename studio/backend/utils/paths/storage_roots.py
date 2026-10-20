@@ -1571,6 +1571,32 @@ def default_run_dir_name(model_name: str) -> str:
     return base or "model"
 
 
+def _merge_source_leaf(source: str) -> str:
+    """A merge source's own name: the last path component, or the repo name for a Hub id."""
+    raw = str(source or "").strip()
+    for prefix in ("hf://", "https://huggingface.co/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+    raw = raw.replace("\\", "/").rstrip("/")
+    name = raw.rsplit("/", 1)[-1] if raw else ""
+    if name.lower().endswith(".safetensors"):
+        name = name[: -len(".safetensors")]
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-._")
+    return name[:60] or "model"
+
+
+def default_merge_dir_name(model_a: str, model_b: str) -> str:
+    """The folder a merge gets when the request names none: ``merge-<a>-<b>``.
+
+    Deliberately a direct child of outputs_root() rather than a nested
+    ``merged/<name>``: the Library, the export checkpoint list and the chat model
+    picker all scan only that folder's immediate children, so anything deeper never
+    shows up as a model Studio can quantize or run.
+    """
+    name = f"merge-{_merge_source_leaf(model_a)}-{_merge_source_leaf(model_b)}"
+    return name[:150].strip("-._") or "merge"
+
+
 def resolve_output_dir(path_value: str | None = None) -> Path:
     return resolve_under_root(
         path_value,
