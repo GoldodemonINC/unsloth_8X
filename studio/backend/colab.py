@@ -65,15 +65,33 @@ def _is_colab_proxy_url(url: str, port: int) -> bool:
     return bool(url and isinstance(url, str) and url.startswith("https://") and str(port) in url)
 
 
+def _looks_like_colab() -> bool:
+    """The same test ``main._IS_COLAB`` makes, without importing ``main`` (a heavy module that can fail to import
+    before the server's dependencies are ready). Used only as a fallback."""
+    import importlib.util
+    import os
+
+    if not os.path.isdir("/content"):
+        return False
+    return bool(
+        os.environ.get("COLAB_BACKEND_URL")
+        or os.environ.get("COLAB_JUPYTER_IP")
+        or importlib.util.find_spec("google.colab") is not None
+    )
+
+
 def _is_colab_runtime() -> bool:
     """True on a hosted Colab notebook kernel. Reuses the backend's main Colab detector (``/content`` + Colab env
     / ``google.colab``) instead of a single env var, which is not always present on hosted runtimes.
+
+    Falls back to the identical local check rather than False: this gates the automatic Cloudflare
+    tunnel, so a failed ``import main`` used to silently leave the notebook without a shareable link.
     """
     try:
         from main import _IS_COLAB
         return bool(_IS_COLAB)
     except Exception:
-        return False
+        return _looks_like_colab()
 
 
 def _colab_login_credentials_path() -> Path:

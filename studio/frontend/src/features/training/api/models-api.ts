@@ -133,6 +133,22 @@ interface LocalModelListResponse {
   models: LocalModelInfo[];
 }
 
+/**
+ * The rows of a `{ models: [...] }` listing, tolerating a bare array.
+ *
+ * A proxy, a stub server or a backend that rejected the response can answer a listing
+ * endpoint with something other than the documented envelope. Returning `undefined` put
+ * that shape into page state, where `localModels.filter(...)` crashed the whole export page
+ * ("Cannot read properties of undefined (reading 'filter')"). Normalise once, here, so every
+ * caller can rely on an array.
+ */
+function modelRows<T>(
+  data: Partial<LocalModelListResponse> | T[] | null | undefined,
+): T[] {
+  const rows = Array.isArray(data) ? data : data?.models;
+  return Array.isArray(rows) ? (rows as T[]) : [];
+}
+
 /** GET /api/models/check-vision; pass the token so a gated/private VLM is not misread as non-vision. */
 export async function checkVisionModel(
   modelName: string,
@@ -206,6 +222,5 @@ export async function listLocalModels(
   if (!response.ok) {
     throw new Error(`Failed to fetch local models (${response.status})`);
   }
-  const data = (await response.json()) as LocalModelListResponse;
-  return data.models;
+  return modelRows<LocalModelInfo>(await response.json());
 }

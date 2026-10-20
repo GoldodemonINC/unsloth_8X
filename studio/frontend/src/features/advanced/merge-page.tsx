@@ -103,7 +103,9 @@ export function MergePage(): ReactElement {
   const [density, setDensity] = useState(0.5);
   const [topK, setTopK] = useState(2);
   const [temperature, setTemperature] = useState(1);
-  const [outputDir, setOutputDir] = useState("");
+  // A bare name resolves under the backend's own outputs folder, so the default works on
+  // Windows and on a Colab runtime; an absolute path is still taken as given.
+  const [outputDir, setOutputDir] = useState("merged");
   const [job, setJob] = useState<AdvancedJob | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
@@ -443,9 +445,13 @@ export function MergePage(): ReactElement {
             <Input
               value={outputDir}
               onChange={(event) => setOutputDir(event.target.value)}
-              placeholder="C:\\models\\merged-output"
+              placeholder="merged"
               className="font-mono text-ui-12"
             />
+            <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
+              A name lands in Unsloth&apos;s outputs folder for this machine; an
+              absolute path is used as-is.
+            </span>
           </label>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -482,7 +488,8 @@ export function MergePage(): ReactElement {
             <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-ui-11 leading-ui-16">
               <p className="font-medium text-foreground">Merge complete</p>
               <p className="mt-1 text-muted-foreground">
-                {(job.result as { output_dir?: string }).output_dir ??
+                {job.output_dir ??
+                  (job.result as { output_dir?: string }).output_dir ??
                   outputDir}{" "}
                 ·{" "}
                 {(() => {

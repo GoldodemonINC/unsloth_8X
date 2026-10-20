@@ -783,7 +783,21 @@ export async function listLocalModels(
   signal?: AbortSignal,
 ): Promise<LocalModelListResponse> {
   const response = await authFetch("/api/models/local", { signal });
-  return parseJsonOrThrow<LocalModelListResponse>(response);
+  // Callers read `.models` straight off this to enumerate what is on the device. A bare array
+  // (a proxy or stub answering without the envelope) must become "nothing here", not
+  // `undefined`, or the picker dies on `.length`.
+  const body = await parseJsonOrThrow<
+    Partial<LocalModelListResponse> | LocalModelInfo[]
+  >(response);
+  if (Array.isArray(body)) {
+    return { models_dir: "", lmstudio_dirs: [], models: body };
+  }
+  return {
+    models_dir: body?.models_dir ?? "",
+    hf_cache_dir: body?.hf_cache_dir ?? null,
+    lmstudio_dirs: body?.lmstudio_dirs ?? [],
+    models: Array.isArray(body?.models) ? body.models : [],
+  };
 }
 
 export async function listCachedGguf(

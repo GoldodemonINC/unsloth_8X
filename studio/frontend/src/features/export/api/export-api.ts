@@ -155,7 +155,17 @@ export async function fetchDecisionExportInfo(
 
 export async function fetchCheckpoints(): Promise<CheckpointListResponse> {
   const response = await authFetch("/api/models/checkpoints");
-  return parseJson<CheckpointListResponse>(response);
+  // Tolerate a bare array (or a payload missing `models`): the export page reads
+  // `models.length` / `models.find` straight off this, so a non-array here crashes the
+  // page instead of showing "no checkpoints". See the same guard in models-api.ts.
+  const body = await parseJson<
+    Partial<CheckpointListResponse> | ModelCheckpoints[]
+  >(response);
+  const rows = Array.isArray(body) ? body : body?.models;
+  return {
+    outputs_dir: Array.isArray(body) ? "" : (body?.outputs_dir ?? ""),
+    models: Array.isArray(rows) ? rows : [],
+  };
 }
 
 /** Estimate a model's fp16-equivalent size to scale the GGUF quant labels; nulls (not error) when unknown. */

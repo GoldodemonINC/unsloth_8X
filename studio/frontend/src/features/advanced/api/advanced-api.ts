@@ -37,6 +37,8 @@ export interface AdvancedJob {
   status: "running" | "completed" | "failed";
   created_at: number;
   finished_at: number | null;
+  /** Where the job writes, resolved by the backend (absolute) when it started. */
+  output_dir?: string | null;
   result: Record<string, unknown> | null;
   error: string | null;
 }
@@ -200,7 +202,8 @@ export function planMerge(body: {
 export function runMerge(body: {
   model_a: string;
   model_b: string;
-  output_dir: string;
+  /** A bare name lands under the backend's outputs root; absolute is used as-is. */
+  output_dir?: string | null;
   method: MergeMethod;
   weight: number;
   density: number;
@@ -212,7 +215,7 @@ export function runMerge(body: {
 
 export function runMoeMerge(body: {
   models: string[];
-  output_dir: string;
+  output_dir?: string | null;
   top_k: number;
   temperature: number;
   hf_token?: string | null;
@@ -231,7 +234,7 @@ export function planSplit(body: {
 
 export function runSplit(body: {
   source: string;
-  output_dir: string;
+  output_dir?: string | null;
   max_shard_gb?: number | null;
   reserve_fraction?: number;
   prefer?: "ram" | "vram" | "auto";

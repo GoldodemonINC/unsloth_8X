@@ -266,18 +266,40 @@ async function withHubTimeout<T>(
   }
 }
 
+/**
+ * A model listing, tolerating a bare array or a payload missing `models`.
+ *
+ * Callers read `.models.length` / `.models.filter(...)` straight off this, so a proxy or stub
+ * that answers with a bare list used to fail the whole inventory source (and, on the export
+ * page, crash it) instead of showing "nothing found". Normalise once, here.
+ */
+async function modelListOrThrow(response: Response): Promise<LocalModelListResponse> {
+  const body = await parseJsonOrThrow<
+    Partial<LocalModelListResponse> | LocalModelInfo[]
+  >(response);
+  if (Array.isArray(body)) {
+    return { models_dir: "", lmstudio_dirs: [], models: body };
+  }
+  return {
+    models_dir: body?.models_dir ?? "",
+    hf_cache_dir: body?.hf_cache_dir ?? null,
+    lmstudio_dirs: body?.lmstudio_dirs ?? [],
+    models: Array.isArray(body?.models) ? body.models : [],
+  };
+}
+
 export async function listLocalModels(): Promise<LocalModelListResponse> {
   const response = await withHubTimeout(INVENTORY_TIMEOUT_MS, (signal) =>
     authFetch("/api/hub/local", { signal }),
   );
-  return parseJsonOrThrow<LocalModelListResponse>(response);
+  return modelListOrThrow(response);
 }
 
 export async function listUnslothModels(): Promise<LocalModelListResponse> {
   const response = await withHubTimeout(INVENTORY_TIMEOUT_MS, (signal) =>
     authFetch("/api/hub/unsloth-models", { signal }),
   );
-  return parseJsonOrThrow<LocalModelListResponse>(response);
+  return modelListOrThrow(response);
 }
 
 export async function fetchCachedGgufInventory(

@@ -15,7 +15,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -92,7 +92,8 @@ class MergePlanRequest(BaseModel):
 class MergeRunRequest(BaseModel):
     model_a: str
     model_b: str
-    output_dir: str
+    # Blank or a bare name lands in the Studio outputs folder; see ``_output_dir``.
+    output_dir: Optional[str] = None
     method: Literal["linear", "slerp", "ties", "dare"] = "linear"
     weight: float = Field(0.5, ge = 0.0, le = 1.0)
     density: float = Field(0.5, gt = 0.0, le = 1.0)
@@ -103,7 +104,7 @@ class MergeRunRequest(BaseModel):
 
 class MoeRunRequest(BaseModel):
     models: list[str] = Field(..., min_length = 2, max_length = 8)
-    output_dir: str
+    output_dir: Optional[str] = None
     top_k: int = 2
     router_hidden: Optional[int] = None
     temperature: float = 1.0
@@ -120,7 +121,7 @@ class SplitPlanRequest(BaseModel):
 
 
 class SplitRunRequest(SplitPlanRequest):
-    output_dir: str
+    output_dir: Optional[str] = None
     copy_tokenizer: bool = True
 
 
@@ -143,7 +144,30 @@ class EvalRunRequest(EvalPlanRequest):
 # ---------------------------------------------------------------------------
 
 
-def _start_job(kind: str, work) -> dict[str, Any]:
+def _output_dir(value: Optional[str], *, kind: str) -> Path:
+    """Resolve a merge/split output folder without pinning the UI to one machine's paths.
+
+    A blank value (or the bare default name the UI prefills) lands under the Studio outputs
+    root, so the same request works on Windows and on a Colab runtime, where ``C:\\models``
+    does not exist. An absolute path is honoured as given so writing to another drive keeps
+    working.
+    """
+    raw = (value or "").strip() or kind
+    expanded = Path(raw).expanduser()
+    # A Windows drive path (``C:/models``) is not absolute on POSIX, so test Windows rules too:
+    # it must never be joined onto the outputs root. ``C:merged`` stays drive-relative and is
+    # therefore not absolute under either rule.
+    if expanded.is_absolute() or PureWindowsPath(raw).is_absolute():
+        return expanded
+    from utils.paths import resolve_output_dir
+
+    try:
+        return resolve_output_dir(raw)
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+
+
+def _start_job(kind: str, work, *, output_dir: Optional[str] = None) -> dict[str, Any]:
     job_id = uuid.uuid4().hex
     record = {
         "job_id": job_id,
@@ -151,6 +175,7 @@ def _start_job(kind: str, work) -> dict[str, Any]:
         "status": "running",
         "created_at": time.time(),
         "finished_at": None,
+        "output_dir": output_dir,
         "result": None,
         "error": None,
     }
@@ -351,7 +376,7 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
 
     _require_checkpoint_source(request.model_a, "Model A")
     _require_checkpoint_source(request.model_b, "Model B")
-    output = Path(request.output_dir).expanduser()
+    output = _output_dir(request.output_dir, kind = "merged")
     for source in (request.model_a, request.model_b):
         try:
             if output.resolve() == Path(source).expanduser().resolve():
@@ -375,7 +400,7 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
             token = request.hf_token,
         )
 
-    return _start_job("merge", work)
+    return _start_job("merge", work, output_dir = str(output))
 
 
 @router.post("/merge/moe")
@@ -384,6 +409,7 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
 
     for index, source in enumerate(request.models):
         _require_checkpoint_source(source, f"Model {index + 1}")
+    output = _output_dir(request.output_dir, kind = "moe")
 
     def work() -> dict[str, Any]:
         snapshots = [
@@ -407,13 +433,13 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
             layer_range = layer_range,
         )
         return moe.write_moe_bundle(
-            request.output_dir,
+            str(output),
             plan.to_dict(),
             hidden_size = plan.router_hidden,
             seed = 3407,
         )
 
-    return _start_job("moe", work)
+    return _start_job("moe", work, output_dir = str(output))
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +470,7 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
     from core.advanced import splitter
 
     _require_checkpoint_source(request.source, "Checkpoint", allow_hub = False)
-    output = Path(request.output_dir).expanduser()
+    output = _output_dir(request.output_dir, kind = "sharded")
 
     def work() -> dict[str, Any]:
         return splitter.split_checkpoint(
@@ -456,7 +482,7 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
             copy_tokenizer = request.copy_tokenizer,
         )
 
-    return _start_job("split", work)
+    return _start_job("split", work, output_dir = str(output))
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +555,16 @@ def job_status(job_id: str) -> dict[str, Any]:
     record = _job(job_id)
     return {
         key: record[key]
-        for key in ("job_id", "kind", "status", "created_at", "finished_at", "result", "error")
+        for key in (
+            "job_id",
+            "kind",
+            "status",
+            "created_at",
+            "finished_at",
+            "output_dir",
+            "result",
+            "error",
+        )
     }
 
 

@@ -33,7 +33,9 @@ function gib(bytes: number | null | undefined): string {
 
 export function CheckpointSplitterCard() {
   const [source, setSource] = useState("");
-  const [outputDir, setOutputDir] = useState("");
+  // A bare name resolves under the backend's own outputs folder, so the default works on
+  // Windows and on a Colab runtime; an absolute path is still taken as given.
+  const [outputDir, setOutputDir] = useState("sharded");
   const [enabled, setEnabled] = useState(false);
   const [prefer, setPrefer] = useState<"ram" | "vram" | "auto">("auto");
   const [reserve, setReserve] = useState(0.15);
@@ -127,7 +129,7 @@ export function CheckpointSplitterCard() {
               <Input
                 value={source}
                 onChange={(event) => setSource(event.target.value)}
-                placeholder="C:\\models\\merged-output"
+                placeholder="path/to/merged-output"
                 className="font-mono text-ui-12"
               />
             </label>
@@ -138,9 +140,13 @@ export function CheckpointSplitterCard() {
               <Input
                 value={outputDir}
                 onChange={(event) => setOutputDir(event.target.value)}
-                placeholder="C:\\models\\merged-output-sharded"
+                placeholder="sharded"
                 className="font-mono text-ui-12"
               />
+              <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
+                A name lands in Unsloth&apos;s outputs folder; an absolute path is
+                used as-is.
+              </span>
             </label>
           </div>
 
@@ -309,7 +315,8 @@ export function CheckpointSplitterCard() {
               <p className="font-medium text-foreground">Split complete</p>
               <p className="mt-1 text-muted-foreground">
                 {String(
-                  (job.result as { output_dir?: string }).output_dir ??
+                  job.output_dir ??
+                    (job.result as { output_dir?: string }).output_dir ??
                     outputDir,
                 )}{" "}
                 ·{" "}
