@@ -32,6 +32,7 @@ def _write_checkpoint(
     added: dict[str, int] | None = None,
     decoder: dict[str, int] | None = None,
     tokenizer_json: dict[str, int] | None = None,
+    added_token_objects: bool = False,
 ) -> Path:
     """A tiny but complete checkpoint: config, tokenizer files and one shard."""
     np = pytest.importorskip("numpy")
@@ -62,6 +63,14 @@ def _write_checkpoint(
             config_tokens["pad_token_id"] = pad_id
     if template is not None:
         config_tokens["chat_template"] = template
+    if added_token_objects:
+        # How DeepSeek-R1-Distill-Qwen saves them: an ``AddedToken`` with a
+        # content string and no id anywhere in this file.
+        special = {
+            key: {"__type": "AddedToken", "content": str(value), "lstrip": False, "rstrip": False}
+            for key, value in special.items()
+            if value is not None
+        }
     if decoder is not None:
         # ``{"151643": {"content": "<|endoftext|>", "special": true}}``, as Qwen ships it.
         config_tokens["added_tokens_decoder"] = {
@@ -242,6 +251,35 @@ def test_tokenizer_json_resolves_ids_as_a_last_resort(tmp_path: Path):
     report = tokenizer_check.compare_tokenizers([a, b])
     assert report.status == "ok", report.conflicts
     assert report.fingerprints[0].special["eos_token"].token_id == 151643
+
+
+def test_added_token_objects_resolve_through_tokenizer_json(tmp_path: Path):
+    """The real DeepSeek-R1-Distill-Qwen shape: AddedToken objects, ids only in tokenizer.json."""
+    a = _write_checkpoint(
+        tmp_path / "a",
+        eos = "<｜end▁of▁sentence｜>",
+        pad = "<｜end▁of▁sentence｜>",
+        eos_id = None,
+        pad_id = None,
+        include_ids = False,
+        added_token_objects = True,
+        tokenizer_json = {"<｜end▁of▁sentence｜>": 151643, "<|endoftext|>": 151643},
+    )
+    b = _write_checkpoint(
+        tmp_path / "b",
+        eos = "<|endoftext|>",
+        pad = "<|endoftext|>",
+        eos_id = None,
+        pad_id = None,
+        include_ids = False,
+        added_token_objects = True,
+        tokenizer_json = {"<｜end▁of▁sentence｜>": 151643, "<|endoftext|>": 151643},
+    )
+    report = tokenizer_check.check_before_merge([a, b])
+    assert report.status == "ok", report.conflicts
+    assert report.fingerprints[0].special["pad_token"].token_id == 151643
+    assert report.fingerprints[1].special["eos_token"].token_id == 151643
+    assert any("different labels" in note for note in report.notes)
 
 
 def test_a_corrupt_tokenizer_json_does_not_crash_the_gate(tmp_path: Path):
