@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import type { DatasetAccessFilter } from "./dataset-filters";
+
 /** Who uploaded a model: the unsloth org, any other organization, or a personal account. */
 export type HubUploader = "unsloth" | "organization" | "personal";
 
@@ -20,6 +22,11 @@ export interface ModelSearchFilters {
   /** Dataset rows; the dataset list filters on these, the model search ignores them. */
   minRows?: number;
   maxRows?: number;
+  /** Dataset size on disk, in GB; also dataset-only. */
+  minGb?: number;
+  maxGb?: number;
+  /** Dataset access; absent means gated and open alike. */
+  access?: DatasetAccessFilter;
 }
 
 export function hasModelSearchFilters(filters: ModelSearchFilters): boolean {

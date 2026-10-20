@@ -26,7 +26,11 @@ import {
   requestModelConfigHandoff,
 } from "@/features/model-picker";
 import { taskForMediaPick } from "@/features/model-picker/components/model-selector/audio-picker-policy";
-import { type NpuModel, type NpuPickerSource, useNpuStatus } from "@/features/npu";
+import {
+  type NpuModel,
+  type NpuPickerSource,
+  useNpuStatus,
+} from "@/features/npu";
 import { loadOpenAIAutoSwitchSettings } from "@/features/settings";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
@@ -125,6 +129,7 @@ import {
   supersedingRefresh,
 } from "./lib/superseded-refresh";
 import {
+  type DatasetAccessFilter,
   type DatasetModality,
   matchesDatasetFilters,
 } from "./lib/dataset-filters";
@@ -444,11 +449,11 @@ export function ModelsPage() {
     [],
   );
   const refreshResidentModelStatus = useCallback(
-    (
-      { preserveIdleUnloaded = true }: {
-        preserveIdleUnloaded?: boolean;
-      } = {},
-    ): Promise<void> => {
+    ({
+      preserveIdleUnloaded = true,
+    }: {
+      preserveIdleUnloaded?: boolean;
+    } = {}): Promise<void> => {
       const seq = ++residentStatusSeq.current;
       const selected = useChatRuntimeStore.getState().params.checkpoint;
       const read = Promise.all([
@@ -539,9 +544,20 @@ export function ModelsPage() {
   const [uploaderPick, setUploaderPick] = useState<HubUploader[] | null>(null);
   // Until the popover's first change from the defaults, a capability pick keeps just that one.
   const [firstPickArmed, setFirstPickArmed] = useState(true);
-  const [datasetModalities, setDatasetModalities] = useState<
-    DatasetModality[]
-  >([]);
+  const [datasetModalities, setDatasetModalities] = useState<DatasetModality[]>(
+    [],
+  );
+  // Gated datasets work with any approved token but still need a click on the Hub, so the list
+  // offers Open-only and Gated-only beside the default that lists both.
+  const [datasetAccess, setDatasetAccess] =
+    useState<DatasetAccessFilter>("any");
+  const handlePopoverDatasetAccessChange = useCallback(
+    (next: DatasetAccessFilter) => {
+      setFirstPickArmed(false);
+      setDatasetAccess(next);
+    },
+    [],
+  );
   const handlePopoverModalitiesChange = useCallback(
     (next: DatasetModality[]) => {
       setFirstPickArmed(false);
@@ -584,6 +600,7 @@ export function ModelsPage() {
     // Back/forward skips handleResourceTypeChange, so the other kind's hidden bounds go here too.
     setSearchFilters({});
     setDatasetModalities([]);
+    setDatasetAccess("any");
   }, [urlResourceType]);
   const [discoverFormat, setDiscoverFormat] = useState<ModelFormatFilter>(
     () => findChannel(DEFAULT_DISCOVER_CHANNEL)?.format ?? "recommended",
@@ -639,9 +656,9 @@ export function ModelsPage() {
     HubCapabilityFilter[]
   >([]);
   // Pipeline tasks from an audio page's Search Hub link; they apply while the Audio filter is on.
-  const [linkedAudioTask, setLinkedAudioTask] = useState<
-    PipelineType[] | null
-  >(null);
+  const [linkedAudioTask, setLinkedAudioTask] = useState<PipelineType[] | null>(
+    null,
+  );
   const [allModelsView, setAllModelsViewState] = useState<AllModelsView>(
     readAllModelsViewPreference,
   );
@@ -985,7 +1002,7 @@ export function ModelsPage() {
       : results;
 
   useFeedWriteBack({
-    channelId: hasSearchFilters ? null : liveListChannel?.id ?? null,
+    channelId: hasSearchFilters ? null : (liveListChannel?.id ?? null),
     results,
     isLoading,
     accessToken: apiHfToken,
@@ -1041,12 +1058,21 @@ export function ModelsPage() {
   );
 
   const deferredDatasetModalities = useDeferredValue(datasetModalities);
-  const { minRows, maxRows } = storedSearchFilters;
+  const deferredDatasetAccess = useDeferredValue(datasetAccess);
+  const { minRows, maxRows, minGb, maxGb } = storedSearchFilters;
   const datasetDiscoverRows = useMemo<DiscoverRow[]>(() => {
     if (!isDatasetMode) return [];
     return datasetResults
       .filter((ds) =>
-        matchesDatasetFilters(ds, deferredDatasetModalities, minRows, maxRows),
+        matchesDatasetFilters(
+          ds,
+          deferredDatasetModalities,
+          minRows,
+          maxRows,
+          minGb,
+          maxGb,
+          deferredDatasetAccess,
+        ),
       )
       .map((ds) => {
         const owner = ds.id.includes("/") ? ds.id.split("/")[0] : "Hub";
@@ -1078,7 +1104,8 @@ export function ModelsPage() {
           },
           isAvailableOnDevice: availableSet.has(lower),
           isPartialOnDevice: partialSet.has(lower),
-          isDownloadingOnDevice: partialSet.has(lower) && downloadingSet.has(lower),
+          isDownloadingOnDevice:
+            partialSet.has(lower) && downloadingSet.has(lower),
           summary: summaryParts.join(" · ") || ds.prettyName || "Dataset",
           capabilities: [],
         };
@@ -1374,6 +1401,7 @@ export function ModelsPage() {
   const handleResetPopoverFilters = useCallback(() => {
     setCapabilityFilters([]);
     setDatasetModalities([]);
+    setDatasetAccess("any");
     setSearchFilters({});
     setUploaderPick(null);
     setFirstPickArmed(true);
@@ -1844,55 +1872,13 @@ export function ModelsPage() {
     ],
   );
 
-  const catalogState = useMemo<ModelsCatalogState>(
-    () => {
-      const typeFilterActive =
-        !isDatasetMode && inventoryCapabilities.length > 0;
-      return {
-        tab,
-        discoverRows: listRows,
-        cachedRows: filteredCachedRows,
-        localRows: filteredLocalRows,
-        selectedId,
-        isLoading,
-        downloadedReady,
-        inventoryError,
-        inventoryWarning,
-        query,
-        searchError,
-        searchFailure,
-        online,
-        isDataset: isDatasetMode,
-        inventoryTokens,
-        scannedCount,
-        loadingIntentCount: discoverFetchIntent,
-        hasMore,
-        manualFetchAvailable: discoverManualFetchAvailable,
-        hasActiveFilters:
-          !isFeedMode &&
-          ((isModelDiscover && hasSearchFilters) ||
-            // A search lists every uploader, so picking Unsloth narrows it.
-            (isModelDiscover &&
-              uploaderPick !== null &&
-              ownerScope === "unsloth" &&
-              debouncedQuery.trim() !== "") ||
-            deferredFormatFilter !== "all" ||
-            deferredCapabilityFilters.length > 0 ||
-            (isDatasetMode &&
-              (deferredDatasetModalities.length > 0 ||
-                minRows !== undefined ||
-                maxRows !== undefined)) ||
-            (tab === "downloaded" && typeFilterActive)),
-        typeFilterActive,
-        // A single format filter makes every row's format dot the same; Recommended mixes GGUF and checkpoints.
-        showFormatDots:
-          isDatasetMode ||
-          deferredFormatFilter === "all" ||
-          deferredFormatFilter === "recommended",
-      };
-    },
-    [
+  const catalogState = useMemo<ModelsCatalogState>(() => {
+    const typeFilterActive = !isDatasetMode && inventoryCapabilities.length > 0;
+    return {
       tab,
+      discoverRows: listRows,
+      cachedRows: filteredCachedRows,
+      localRows: filteredLocalRows,
       selectedId,
       isLoading,
       downloadedReady,
@@ -1902,28 +1888,66 @@ export function ModelsPage() {
       searchError,
       searchFailure,
       online,
+      isDataset: isDatasetMode,
       inventoryTokens,
       scannedCount,
+      loadingIntentCount: discoverFetchIntent,
       hasMore,
-      isFeedMode,
-      listRows,
-      filteredCachedRows,
-      filteredLocalRows,
-      isDatasetMode,
-      discoverFetchIntent,
-      discoverManualFetchAvailable,
-      deferredFormatFilter,
-      deferredCapabilityFilters,
-      deferredDatasetModalities,
-      minRows,
-      maxRows,
-      hasSearchFilters,
-      uploaderPick,
-      ownerScope,
-      debouncedQuery,
-      inventoryCapabilities,
-    ],
-  );
+      manualFetchAvailable: discoverManualFetchAvailable,
+      hasActiveFilters:
+        !isFeedMode &&
+        ((isModelDiscover && hasSearchFilters) ||
+          // A search lists every uploader, so picking Unsloth narrows it.
+          (isModelDiscover &&
+            uploaderPick !== null &&
+            ownerScope === "unsloth" &&
+            debouncedQuery.trim() !== "") ||
+          deferredFormatFilter !== "all" ||
+          deferredCapabilityFilters.length > 0 ||
+          (isDatasetMode &&
+            (deferredDatasetModalities.length > 0 ||
+              minRows !== undefined ||
+              maxRows !== undefined)) ||
+          (tab === "downloaded" && typeFilterActive)),
+      typeFilterActive,
+      // A single format filter makes every row's format dot the same; Recommended mixes GGUF and checkpoints.
+      showFormatDots:
+        isDatasetMode ||
+        deferredFormatFilter === "all" ||
+        deferredFormatFilter === "recommended",
+    };
+  }, [
+    tab,
+    selectedId,
+    isLoading,
+    downloadedReady,
+    inventoryError,
+    inventoryWarning,
+    query,
+    searchError,
+    searchFailure,
+    online,
+    inventoryTokens,
+    scannedCount,
+    hasMore,
+    isFeedMode,
+    listRows,
+    filteredCachedRows,
+    filteredLocalRows,
+    isDatasetMode,
+    discoverFetchIntent,
+    discoverManualFetchAvailable,
+    deferredFormatFilter,
+    deferredCapabilityFilters,
+    deferredDatasetModalities,
+    minRows,
+    maxRows,
+    hasSearchFilters,
+    uploaderPick,
+    ownerScope,
+    debouncedQuery,
+    inventoryCapabilities,
+  ]);
 
   const catalogPagination = useMemo<ModelsCatalogPagination>(
     () => ({
@@ -2048,12 +2072,7 @@ export function ModelsPage() {
         onViewChange={setAllModelsView}
       />
     );
-  }, [
-    filteredCachedRows,
-    filteredLocalRows,
-    allModelsView,
-    setAllModelsView,
-  ]);
+  }, [filteredCachedRows, filteredLocalRows, allModelsView, setAllModelsView]);
 
   // NPU rows have no detail view; one left open would cover their list.
   const detailOpen = urlModel !== null && !showNpuCatalog;
@@ -2066,7 +2085,10 @@ export function ModelsPage() {
 
   const tour = useGuidedTourController({
     id: "hub",
-    steps: useMemo(() => buildHubTourSteps({ catalogCovered }), [catalogCovered]),
+    steps: useMemo(
+      () => buildHubTourSteps({ catalogCovered }),
+      [catalogCovered],
+    ),
   });
 
   return (
@@ -2106,6 +2128,8 @@ export function ModelsPage() {
           isolateFirstCapability={firstPickArmed}
           datasetModalities={datasetModalities}
           onDatasetModalitiesChange={handlePopoverModalitiesChange}
+          datasetAccess={datasetAccess}
+          onDatasetAccessChange={handlePopoverDatasetAccessChange}
           fitOnDeviceOnly={fitOnDeviceOnly}
           onFitOnDeviceOnlyChange={setFitOnDeviceOnly}
           onManageLocalFolders={handleManageLocalFolders}
@@ -2182,13 +2206,10 @@ export function ModelsPage() {
         )}
         {splitMode ? (
           detailOpen ? (
-            <div
-              className="hub-canvas z-20 flex min-h-0 flex-col max-lg:absolute max-lg:inset-0 lg:relative lg:min-w-0 lg:flex-1"
-            >
+            <div className="hub-canvas z-20 flex min-h-0 flex-col max-lg:absolute max-lg:inset-0 lg:relative lg:min-w-0 lg:flex-1">
               <HubDetailView
                 model={selectedModel}
                 preferredGgufFile={preferredGgufFile}
-
                 preferredGgufFileIntent={preferredGgufFileIntent}
                 isDataset={isDatasetMode}
                 metadataUnavailable={metadataUnavailable}
@@ -2213,7 +2234,6 @@ export function ModelsPage() {
               <HubDetailView
                 model={selectedModel}
                 preferredGgufFile={preferredGgufFile}
-
                 preferredGgufFileIntent={preferredGgufFileIntent}
                 isDataset={isDatasetMode}
                 metadataUnavailable={metadataUnavailable}

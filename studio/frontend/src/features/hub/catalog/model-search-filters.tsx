@@ -44,8 +44,10 @@ import {
   hasModelSearchFilters,
 } from "../lib/model-search-filters";
 import {
+  DATASET_GB_STOPS,
   DATASET_MODALITIES,
   DATASET_ROW_STOPS,
+  type DatasetAccessFilter,
   type DatasetModality,
 } from "../lib/dataset-filters";
 import { CAPABILITY_FILTER_OPTIONS } from "../lib/view-models";
@@ -86,7 +88,9 @@ type LimitKey =
   | "minContext"
   | "maxContext"
   | "minRows"
-  | "maxRows";
+  | "maxRows"
+  | "minGb"
+  | "maxGb";
 
 interface RangeSpec {
   label: string;
@@ -170,6 +174,37 @@ const DATASET_ROWS: RangeSpec = {
     return `${n / scale}${unit}`;
   },
 };
+
+const DATASET_SIZE_GB: RangeSpec = {
+  label: "Size (GB)",
+  about:
+    "The bytes the dataset card publishes for its files. Datasets that publish no size are left out, so use the rows filter for those.",
+  min: "minGb",
+  max: "maxGb",
+  stops: DATASET_GB_STOPS,
+  labels: [
+    "<0.01GB",
+    null,
+    "0.5GB",
+    "1GB",
+    null,
+    "10GB",
+    null,
+    "100GB",
+    null,
+    ">1TB",
+  ],
+  format: (n) => `${n}GB`,
+};
+
+const DATASET_ACCESS_OPTIONS: readonly (readonly [
+  DatasetAccessFilter,
+  string,
+])[] = [
+  ["any", "Any"],
+  ["public", "Open"],
+  ["gated", "Gated"],
+];
 
 const MODALITY_LABELS: Record<DatasetModality, string> = {
   "3d": "3D",
@@ -617,6 +652,8 @@ export function ModelSearchFiltersControl({
   datasetSections,
   modalities,
   onModalitiesChange,
+  access,
+  onAccessChange,
   onDevice,
   className,
 }: {
@@ -642,6 +679,9 @@ export function ModelSearchFiltersControl({
   /** Empty means every modality ticked (no filter). */
   modalities: DatasetModality[];
   onModalitiesChange: (value: DatasetModality[]) => void;
+  /** "any" lists gated and open datasets alike. */
+  access: DatasetAccessFilter;
+  onAccessChange: (value: DatasetAccessFilter) => void;
   onDatasetsChange: (value: boolean) => void;
   /** Set on On Device, whose sections replace the Hub search's. */
   onDevice?: OnDeviceFilters;
@@ -653,6 +693,7 @@ export function ModelSearchFiltersControl({
   const filtered = onDevice
     ? onDeviceModels && onDevice.capabilities.length > 0
     : modalities.length > 0 ||
+      access !== "any" ||
       (modelSections && capabilities.length > 0) ||
       uploadersChanged ||
       ((showModelFilters || datasetSections) && hasModelSearchFilters(value));
@@ -772,6 +813,18 @@ export function ModelSearchFiltersControl({
                 spec={DATASET_ROWS}
                 value={value}
                 onChange={onChange}
+              />
+              <RangeStops
+                spec={DATASET_SIZE_GB}
+                value={value}
+                onChange={onChange}
+              />
+              <SegmentedRow
+                label="Access"
+                about="Any lists gated and open datasets alike. Open hides the ones that need a click on the Hub; Gated lists only those, with the token you already have."
+                value={access}
+                options={DATASET_ACCESS_OPTIONS}
+                onChange={onAccessChange}
               />
             </>
           )}

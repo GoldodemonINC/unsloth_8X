@@ -5,7 +5,11 @@ import { getHfEndpoint, useHfEndpoint } from "@/lib/hf-endpoint";
 import { fetchWithTimeout } from "../lib/network";
 import type { HubModelType } from "../types";
 import { listDatasets } from "@huggingface/hub";
-import { datasetModalities, datasetSizeBucket } from "../lib/dataset-filters";
+import {
+  datasetModalities,
+  datasetSizeBucket,
+  datasetSizeBytes,
+} from "../lib/dataset-filters";
 import { useCallback, useMemo } from "react";
 
 import { useHubPaginatedSearch } from "./use-hub-paginated-search";
@@ -27,7 +31,11 @@ interface CardDataWithInfo {
         download_size?: number;
         dataset_size?: number;
       }
-    | Array<{ splits?: DatasetInfoSplit[] }>;
+    | Array<{
+        splits?: DatasetInfoSplit[];
+        download_size?: number;
+        dataset_size?: number;
+      }>;
 }
 
 function extractTotalExamples(
@@ -67,6 +75,8 @@ export interface HfDatasetResult {
   modalities: string[];
   /** Index of the Hub's size_categories bucket, smallest first. */
   sizeBucket?: number;
+  /** Bytes the card publishes for the dataset, for the size-in-GB filter. */
+  sizeBytes?: number;
 }
 
 function mapDataset(raw: unknown): HfDatasetResult {
@@ -116,6 +126,7 @@ function mapDataset(raw: unknown): HfDatasetResult {
     plainTags,
     modalities: datasetModalities(tags),
     sizeBucket: datasetSizeBucket(tags),
+    sizeBytes: datasetSizeBytes(card?.dataset_info),
   };
 }
 
@@ -222,58 +233,57 @@ const OCR_OR_VISION_TEXT_TASKS = new Set([
   "document-question-answering",
 ]);
 
-const CURATED_EMPTY_QUERY_DATASET_IDS: Partial<Record<HubModelType, string[]>> = {
-  text: [
-    "unsloth/alpaca-cleaned",
-    "unsloth/OpenMathReasoning-mini",
-    "mlabonne/FineTome-100k",
-    "openai/gsm8k",
-    "philschmid/guanaco-sharegpt-style",
-    "open-r1/DAPO-Math-17k-Processed",
-    "HuggingFaceH4/Multilingual-Thinking",
-    "HuggingFaceH4/ultrafeedback_binarized",
-    "reciperesearch/dolphin-sft-v0.1-preference",
-    "roneneldan/TinyStories",
-    "FreedomIntelligence/alpaca-gpt4-korean",
-    "Goedel-LM/SFT_dataset_v2",
-    "allenai/tulu-3-sft-mixture",
-    "HuggingFaceH4/no_robots",
-    "Magpie-Align/Magpie-Air-300K-Filtered",
-    "teknium/OpenHermes-2.5",
-    "databricks/databricks-dolly-15k",
-    "tatsu-lab/alpaca",
-    "garage-bAInd/Open-Platypus",
-    "microsoft/orca-math-word-problems-200k",
-    "Open-Orca/OpenOrca",
-    "openbmb/UltraInteract_sft",
-  ],
-  vision: [
-    "unsloth/LaTeX_OCR",
-    "unsloth/llava-instruct-mix-vsft-mini",
-    "unsloth/Radiology_mini",
-    "AI4Math/MathVista",
-    "AI4Math/MathVerse",
-    "ChongyanChen/VQAonline",
-    "lmms-lab/VQAv2",
-    "hezarai/parsynth-ocr-200k",
-  ],
-  audio: [
-    "MrDragonFox/Elise",
-    "keithito/lj_speech",
-    "parler-tts/mls_eng_10k",
-    "parler-tts/libritts-r-filtered-speaker-descriptions",
-    "openslr/librispeech_asr",
-    "MikhailT/hifi-tts",
-    "mozilla-foundation/common_voice_17_0",
-    "facebook/voxpopuli",
-    "speechcolab/gigaspeech",
-    "kth-tmh/vctk",
-    "Wenetspeech4TTS/WenetSpeech4TTS",
-  ],
-  embeddings: [
-    "electroglyph/technical",
-  ],
-};
+const CURATED_EMPTY_QUERY_DATASET_IDS: Partial<Record<HubModelType, string[]>> =
+  {
+    text: [
+      "unsloth/alpaca-cleaned",
+      "unsloth/OpenMathReasoning-mini",
+      "mlabonne/FineTome-100k",
+      "openai/gsm8k",
+      "philschmid/guanaco-sharegpt-style",
+      "open-r1/DAPO-Math-17k-Processed",
+      "HuggingFaceH4/Multilingual-Thinking",
+      "HuggingFaceH4/ultrafeedback_binarized",
+      "reciperesearch/dolphin-sft-v0.1-preference",
+      "roneneldan/TinyStories",
+      "FreedomIntelligence/alpaca-gpt4-korean",
+      "Goedel-LM/SFT_dataset_v2",
+      "allenai/tulu-3-sft-mixture",
+      "HuggingFaceH4/no_robots",
+      "Magpie-Align/Magpie-Air-300K-Filtered",
+      "teknium/OpenHermes-2.5",
+      "databricks/databricks-dolly-15k",
+      "tatsu-lab/alpaca",
+      "garage-bAInd/Open-Platypus",
+      "microsoft/orca-math-word-problems-200k",
+      "Open-Orca/OpenOrca",
+      "openbmb/UltraInteract_sft",
+    ],
+    vision: [
+      "unsloth/LaTeX_OCR",
+      "unsloth/llava-instruct-mix-vsft-mini",
+      "unsloth/Radiology_mini",
+      "AI4Math/MathVista",
+      "AI4Math/MathVerse",
+      "ChongyanChen/VQAonline",
+      "lmms-lab/VQAv2",
+      "hezarai/parsynth-ocr-200k",
+    ],
+    audio: [
+      "MrDragonFox/Elise",
+      "keithito/lj_speech",
+      "parler-tts/mls_eng_10k",
+      "parler-tts/libritts-r-filtered-speaker-descriptions",
+      "openslr/librispeech_asr",
+      "MikhailT/hifi-tts",
+      "mozilla-foundation/common_voice_17_0",
+      "facebook/voxpopuli",
+      "speechcolab/gigaspeech",
+      "kth-tmh/vctk",
+      "Wenetspeech4TTS/WenetSpeech4TTS",
+    ],
+    embeddings: ["electroglyph/technical"],
+  };
 
 const INCOMPATIBLE_TASKS_BY_MODEL: Record<HubModelType, Set<string>> = {
   text: new Set([
@@ -344,7 +354,9 @@ const INCOMPATIBLE_TASKS_BY_MODEL: Record<HubModelType, Set<string>> = {
 };
 
 function isPretrainingDataset(dataset: HfDatasetResult): boolean {
-  if (dataset.plainTags.some((t) => PRETRAINING_PLAIN_TAGS.has(t.toLowerCase())))
+  if (
+    dataset.plainTags.some((t) => PRETRAINING_PLAIN_TAGS.has(t.toLowerCase()))
+  )
     return true;
   if (
     dataset.sizeCategory &&
@@ -443,7 +455,15 @@ export function useHubDatasetSearch(
         ...(accessToken ? { credentials: { accessToken } } : {}),
       }) as AsyncGenerator<unknown>;
     },
-    [useCuratedOnly, hasQuery, query, accessToken, sortBy, sortDirection, hfEndpoint],
+    [
+      useCuratedOnly,
+      hasQuery,
+      query,
+      accessToken,
+      sortBy,
+      sortDirection,
+      hfEndpoint,
+    ],
   );
 
   const search = useHubPaginatedSearch(createIter, mapDataset, {

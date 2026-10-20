@@ -35,7 +35,10 @@ import {
   removeRecentSearch,
   useRecentSearches,
 } from "../lib/recent-searches";
-import type { DatasetModality } from "../lib/dataset-filters";
+import type {
+  DatasetAccessFilter,
+  DatasetModality,
+} from "../lib/dataset-filters";
 import { FORMAT_FILTER_OPTIONS } from "../lib/view-models";
 import type {
   ModelFormatFilter,
@@ -90,6 +93,8 @@ export const ModelsToolbar = memo(function ModelsToolbar({
   isolateFirstCapability,
   datasetModalities,
   onDatasetModalitiesChange,
+  datasetAccess,
+  onDatasetAccessChange,
   fitOnDeviceOnly,
   onFitOnDeviceOnlyChange,
   onManageLocalFolders,
@@ -141,6 +146,9 @@ export const ModelsToolbar = memo(function ModelsToolbar({
   /** Empty means every modality. */
   datasetModalities: DatasetModality[];
   onDatasetModalitiesChange: (value: DatasetModality[]) => void;
+  /** "any" lists gated and open datasets alike. */
+  datasetAccess: DatasetAccessFilter;
+  onDatasetAccessChange: (value: DatasetAccessFilter) => void;
   /** Shared with the chat model selector: hide models over the device budget. */
   fitOnDeviceOnly: boolean;
   onFitOnDeviceOnlyChange: (value: boolean) => void;
@@ -289,7 +297,10 @@ export const ModelsToolbar = memo(function ModelsToolbar({
       SORT_OPTIONS.filter(
         (option) =>
           // Latest ranks Hugging Face models; datasets and ModelScope have no such ranking.
-          !(option.value === "fresh" && (isDataset || hubSource === "modelscope")) &&
+          !(
+            option.value === "fresh" &&
+            (isDataset || hubSource === "modelscope")
+          ) &&
           (hubSource !== "modelscope" || option.value !== "createdAt"),
       ).map((option) => ({
         value: option.value,
@@ -448,6 +459,8 @@ export const ModelsToolbar = memo(function ModelsToolbar({
           datasetSections={isDiscover && isDataset}
           modalities={datasetModalities}
           onModalitiesChange={onDatasetModalitiesChange}
+          access={datasetAccess}
+          onAccessChange={onDatasetAccessChange}
           onDatasetsChange={(on) =>
             onResourceTypeChange(on ? "datasets" : "models")
           }
@@ -606,7 +619,6 @@ export const ModelsToolbar = memo(function ModelsToolbar({
             }
           />
         )}
-
       </div>
     </div>
   );
