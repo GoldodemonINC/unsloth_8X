@@ -68,9 +68,17 @@ class SpecialToken:
     role: str
     token: str | None = None
     token_id: int | None = None
+    # Which file the id came from, so a disagreement can be traced to a source
+    # instead of looking like a contradiction between two equally good claims.
+    source: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"role": self.role, "token": self.token, "token_id": self.token_id}
+        return {
+            "role": self.role,
+            "token": self.token,
+            "token_id": self.token_id,
+            "source": self.source,
+        }
 
     @property
     def declared(self) -> bool:
@@ -293,17 +301,27 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
 
     special: dict[str, SpecialToken] = {}
     for role in ALL_ROLES:
-        token, token_id = _role_from_config(special_map, role)
+        token, map_id = _role_from_config(special_map, role)
         config_token, config_id = _role_from_config(tokenizer_config, role)
         token = token if token is not None else config_token
-        token_id = token_id if token_id is not None else config_id
+        token_id = config_id if config_id is not None else map_id
+        token_id_source = (
+            "tokenizer_config.json"
+            if config_id is not None
+            else ("special_tokens_map.json" if map_id is not None else None)
+        )
         if token_id is None and token is not None:
             token_id = decoder_map.get(token)
+            token_id_source = "added_tokens_decoder" if token_id is not None else None
         if token_id is None and token is not None:
             token_id = added_map.get(token)
+            token_id_source = "added_tokens.json" if token_id is not None else None
         if role in ("bos_token", "eos_token") and token_id is None:
             token_id = _first_int(model_config, role if role.endswith("_id") else f"{role}_id")
-        special[role] = SpecialToken(role = role, token = token, token_id = token_id)
+            token_id_source = "config.json" if token_id is not None else None
+        special[role] = SpecialToken(
+            role = role, token = token, token_id = token_id, source = token_id_source
+        )
 
     # Anything still unlabelled gets one last look in the fast tokeniser's own
     # tables, so a checkpoint that only keeps its vocabulary there is not
@@ -316,7 +334,10 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
                 resolved_id = late_ids.get(item.token)
                 if resolved_id is not None:
                     special[role] = SpecialToken(
-                        role = role, token = item.token, token_id = resolved_id
+                        role = role,
+                        token = item.token,
+                        token_id = resolved_id,
+                        source = "tokenizer.json",
                     )
 
     template = tokenizer_config.get("chat_template")
@@ -357,7 +378,8 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
 
 def _describe(token: SpecialToken) -> str:
     if token.token is not None and token.token_id is not None:
-        return f"{token.token!r} (id {token.token_id})"
+        origin = f", from {token.source}" if token.source else ""
+        return f"{token.token!r} (id {token.token_id}{origin})"
     if token.token_id is not None:
         return f"id {token.token_id}"
     if token.token is not None:
@@ -376,6 +398,20 @@ def _same_role(left: SpecialToken, right: SpecialToken) -> tuple[list[str], list
     """
     if left.token_id is not None and right.token_id is not None:
         if left.token_id != right.token_id:
+            # The most confusing case, and the most dangerous: identical labels at
+            # different indices mean the two vocabularies were built with different
+            # added tokens, so blending pairs embedding rows that stand for
+            # different text.
+            if (
+                left.token is not None
+                and right.token is not None
+                and left.token == right.token
+            ):
+                return [
+                    f"the same token sits at id {left.token_id} in one parent and "
+                    f"{right.token_id} in the other, so its embedding row would be "
+                    "blended against a different token's row"
+                ], []
             return [f"id {left.token_id} vs {right.token_id}"], []
         if left.token is not None and right.token is not None and left.token != right.token:
             return [], [

@@ -290,6 +290,21 @@ def test_a_corrupt_tokenizer_json_does_not_crash_the_gate(tmp_path: Path):
     assert report.status == "conflict"
 
 
+def test_the_same_label_at_different_ids_explains_the_vocab_shift(tmp_path: Path):
+    """Two builds of the same tokenizer can place <|im_end|> at different indices.
+
+    The labels match, so "id A vs id B" reads like a typo; what it means is that
+    the embedding rows would be blended across different tokens.
+    """
+    a = _write_checkpoint(tmp_path / "a", eos = "<|im_end|>", eos_id = 248044)
+    b = _write_checkpoint(tmp_path / "b", eos = "<|im_end|>", eos_id = 248046)
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "conflict"
+    joined = " ".join(report.conflicts)
+    assert "same token sits at id 248044" in joined
+    assert "248046" in joined
+
+
 def test_different_bos_ids_conflict(tmp_path: Path):
     a = _write_checkpoint(tmp_path / "a", bos = "<s>", bos_id = 1)
     b = _write_checkpoint(tmp_path / "b", bos = "<|start|>", bos_id = 3)
