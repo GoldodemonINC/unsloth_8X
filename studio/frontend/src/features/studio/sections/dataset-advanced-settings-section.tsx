@@ -15,6 +15,7 @@ export function DatasetAdvancedSettingsSection() {
   const platformDeviceType = usePlatformStore((state) => state.deviceType);
   const {
     datasetEvalSplit,
+    evalDataset,
     datasetFormat,
     datasetSliceEnd,
     datasetSliceStart,
@@ -37,6 +38,7 @@ export function DatasetAdvancedSettingsSection() {
   } = useTrainingConfigStore(
     useShallow((state) => ({
       datasetEvalSplit: state.datasetEvalSplit,
+      evalDataset: state.evalDataset,
       datasetFormat: state.datasetFormat,
       datasetSliceEnd: state.datasetSliceEnd,
       datasetSliceStart: state.datasetSliceStart,
@@ -60,6 +62,7 @@ export function DatasetAdvancedSettingsSection() {
   );
   const streamingBlockers = getDatasetStreamingBlockers({
     datasetEvalSplit,
+    evalDataset,
     datasetSource,
     datasetSplit,
     evalSteps,

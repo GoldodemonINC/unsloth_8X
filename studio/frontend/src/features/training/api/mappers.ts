@@ -249,7 +249,18 @@ export function buildTrainingStartPayload(
       hfDataset && !config.datasetStreaming ? config.datasetLocalPath : null,
     subset: hfDataset ? config.datasetSubset : null,
     train_split: hfDataset ? config.datasetSplit : null,
-    eval_split: hfDataset ? config.datasetEvalSplit : null,
+    // With a second dataset selected, the eval split belongs to that dataset; its
+    // own "train" split is the usual choice and is what the picker defaults to.
+    eval_split: hfDataset
+      ? config.evalDataset
+        ? (config.evalDatasetSplit ?? "train")
+        : config.datasetEvalSplit
+      : null,
+    eval_hf_dataset: hfDataset ? (config.evalDataset ?? null) : null,
+    eval_dataset_subset: hfDataset ? (config.evalDatasetSubset ?? null) : null,
+    // Full finetuning already trains every expert, and the backend refuses the pair,
+    // so a scope only rides a LoRA/QLoRA run.
+    moe_expert_scope: adapterMethod ? (config.moeExpertScope ?? null) : null,
     dataset_streaming:
       hfDataset && !isDecision ? config.datasetStreaming : false,
     dataset_slice_start: parseSliceValue(config.datasetSliceStart),

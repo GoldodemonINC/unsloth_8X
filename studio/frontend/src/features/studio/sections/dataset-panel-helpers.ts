@@ -39,6 +39,7 @@ export function normalizeSliceInput(value: string): string | null {
 
 export function getDatasetStreamingBlockers({
   datasetEvalSplit,
+  evalDataset,
   datasetSource,
   datasetSplit,
   evalSteps,
@@ -52,6 +53,7 @@ export function getDatasetStreamingBlockers({
   trainOnCompletions,
 }: {
   datasetEvalSplit: string | null;
+  evalDataset: string | null;
   datasetSource: DatasetSource;
   datasetSplit: string | null;
   evalSteps: number;
@@ -79,6 +81,7 @@ export function getDatasetStreamingBlockers({
       evalSteps,
       datasetSplit,
       datasetEvalSplit,
+      evalDataset,
     })
   ) {
     blockers.push("evalSplit");

@@ -49,6 +49,8 @@ type Props = {
   datasetEvalSplit: string | null;
   setDatasetEvalSplit: (v: string | null) => void;
   datasetStreaming: boolean;
+  /** Repo id of a separate evaluation dataset, which owns the eval split instead. */
+  separateEvalDataset?: string | null;
   setManualDatasetOptionsValid: (v: boolean) => void;
   markManualDatasetOptionsEdited: (optionsValid: boolean) => void;
 };
@@ -87,6 +89,7 @@ export function HfDatasetSubsetSplitSelectors({
   datasetEvalSplit,
   setDatasetEvalSplit,
   datasetStreaming,
+  separateEvalDataset = null,
   setManualDatasetOptionsValid,
   markManualDatasetOptionsEdited,
 }: Props) {
@@ -156,14 +159,20 @@ export function HfDatasetSubsetSplitSelectors({
       <SelectorDropdown
         variant={variant}
         label={t("studio.dataset.selectors.evaluationSplit")}
-        tooltip={t("studio.dataset.selectors.evaluationSplitTooltip")}
-        value={disabled ? null : datasetEvalSplit}
+        tooltip={
+          // A second dataset brings its own split, so this pick would be ignored.
+          // Saying so beats leaving a value that silently never reaches the run.
+          separateEvalDataset
+            ? `${separateEvalDataset} is evaluated instead; its own split applies.`
+            : t("studio.dataset.selectors.evaluationSplitTooltip")
+        }
+        value={disabled || separateEvalDataset ? null : datasetEvalSplit}
         onChange={setDatasetEvalSplit}
-        options={disabled ? [] : hfSplits}
-        placeholder={t("studio.dataset.selectors.none")}
+        options={disabled || separateEvalDataset ? [] : hfSplits}
+        placeholder={separateEvalDataset ?? t("studio.dataset.selectors.none")}
         noneLabel={t("studio.dataset.selectors.none")}
         allowNone={true}
-        disabled={disabled}
+        disabled={disabled || separateEvalDataset !== null}
       />
     </>
   );

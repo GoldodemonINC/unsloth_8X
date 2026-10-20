@@ -98,6 +98,28 @@ test("migration keeps method-default learning rates automatic", () => {
   );
 });
 
+test("merge completes an advanced block that predates module groups", () => {
+  const merged = mergeTrainingConfig(
+    {
+      advanced: {
+        layerLrEnabled: true,
+        layerLrZones: { early: 0.1 },
+      },
+    },
+    { trainingMethod: "qlora" } as never,
+  );
+
+  // The group sliders read these records directly, so a stale localStorage
+  // entry must not leave them missing.
+  assert.equal(merged.advanced.layerLrKinds.attention, 1);
+  assert.equal(merged.advanced.layerLrKinds.moe_expert, 1);
+  assert.equal(merged.advanced.layerLrZones.early, 0.1);
+  // Fields the stale entry does not carry come back at their defaults.
+  assert.equal(merged.advanced.layerLrZones.head, 1);
+  assert.deepEqual(merged.advanced.blendSlots, []);
+  assert.ok(merged.advanced.autoEvalSuites.length > 0);
+});
+
 test("merge never restores a persisted W&B token", () => {
   const merged = mergeTrainingConfig({ wandbToken: "persisted-secret-token" }, {
     trainingMethod: "qlora",

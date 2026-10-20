@@ -70,6 +70,7 @@ import {
   formatStreamingDisabledOptions,
   hasSeparateStreamingEvalSplit,
   initialTrainingConfigState,
+  moeModelPatch,
   resolveDeferredTrainOnCompletionsDefault,
   streamingCompatiblePatch,
 } from "./training-config-policy";
@@ -401,6 +402,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
                 modelDefaultsAppliedFor: modelName,
                 maxPositionEmbeddings:
                   modelDetails.max_position_embeddings ?? null,
+                ...moeModelPatch(modelDetails),
               });
               if (!canContinue) {
                 toast.error(translate("studio.modelPicker.cantUseModel"), {
@@ -663,6 +665,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
                 : {}),
               maxPositionEmbeddings:
                 modelDetails.max_position_embeddings ?? null,
+              ...moeModelPatch(modelDetails),
             });
             if (restoreStreaming) {
               trainingDatasetCacheRejections.reset(get().dataset);
@@ -966,6 +969,10 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
         datasetSliceStart: null,
         datasetSliceEnd: null,
         uploadedEvalFile: null,
+        // The second selector belongs to the dataset that was just replaced.
+        evalDataset: null,
+        evalDatasetSubset: null,
+        evalDatasetSplit: null,
         isDatasetImage: null,
         isDatasetAudio: false,
         isCheckingDataset: false,
@@ -1549,6 +1556,27 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             uploadedEvalFile,
             evalSteps: uploadedEvalFile ? 0.1 : 0,
           }),
+        // The evaluation dataset is optional: selecting one turns evaluation on
+        // (identical to picking an eval split), clearing it turns it back off.
+        selectEvalHfDataset: (dataset) => {
+          const evalDataset = dataset?.trim() || null;
+          setUserEdit({
+            evalDataset,
+            evalDatasetSubset: null,
+            evalDatasetSplit: null,
+            evalSteps: evalDataset
+              ? get().evalSteps > 0
+                ? get().evalSteps
+                : 0.1
+              : 0,
+            ...(evalDataset ? {} : { uploadedEvalFile: null }),
+          });
+        },
+        setEvalDatasetSubset: (evalDatasetSubset) =>
+          setUserEdit({ evalDatasetSubset }),
+        setEvalDatasetSplit: (evalDatasetSplit) =>
+          setUserEdit({ evalDatasetSplit }),
+        setMoeExpertScope: (moeExpertScope) => setUserEdit({ moeExpertScope }),
         setEpochs: (epochs) => setUserEdit({ epochs }),
         setContextLength: (contextLength) => setUserEdit({ contextLength }),
         setVisionImageSize: (visionImageSize) =>
@@ -1624,8 +1652,7 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
           setUserEdit({ drafterLearningRate }),
         setDrafterDraftSteps: (drafterDraftSteps) =>
           setUserEdit({ drafterDraftSteps }),
-        setDrafterCapability: (drafterCapability) =>
-          set({ drafterCapability }),
+        setDrafterCapability: (drafterCapability) => set({ drafterCapability }),
         setPacking: (packing) => setUserEdit({ packing }),
         setTrainOnCompletions: (trainOnCompletions) => {
           _trainOnCompletionsManuallySet = true;
@@ -1677,6 +1704,9 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
               layerLrZones: patch.layerLrZones
                 ? { ...state.advanced.layerLrZones, ...patch.layerLrZones }
                 : state.advanced.layerLrZones,
+              layerLrKinds: patch.layerLrKinds
+                ? { ...state.advanced.layerLrKinds, ...patch.layerLrKinds }
+                : state.advanced.layerLrKinds,
             },
           })),
         restoreRunConfig: (config) => {
@@ -1748,7 +1778,10 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             config.training ?? {},
             "early_stopping_patience",
           );
-          const importsDrafter = Object.hasOwn(config.training ?? {}, "drafter");
+          const importsDrafter = Object.hasOwn(
+            config.training ?? {},
+            "drafter",
+          );
           setUserEdit((state) => {
             const importsCompletionsInCpt =
               state.trainingMethod === "cpt" &&

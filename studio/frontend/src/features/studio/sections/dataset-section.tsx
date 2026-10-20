@@ -10,6 +10,7 @@ import { useShallow } from "zustand/react/shallow";
 import { DatasetAdvancedSettingsSection } from "./dataset-advanced-settings-section";
 import { DatasetSelectionSection } from "./dataset-selection";
 import { DatasetUploadField } from "./dataset-upload";
+import { EvalDatasetSection } from "./eval-dataset-section";
 import { FieldHint } from "./field-hint";
 import { S3ConfigForm } from "./s3-config-form";
 import { useDatasetUploads } from "./use-dataset-uploads";
@@ -84,6 +85,11 @@ export function DatasetPanel() {
         localInventorySettled={localDatasetInventory.settled}
         uploads={uploads}
       />
+      {datasetSource === "huggingface" && modelType !== "decision" ? (
+        <div className="rounded-2xl border border-border/60 bg-card p-4">
+          <EvalDatasetSection />
+        </div>
+      ) : null}
       <DatasetAdvancedSettingsSection />
     </div>
   );

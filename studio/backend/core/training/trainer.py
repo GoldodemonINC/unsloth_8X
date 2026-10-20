@@ -3230,6 +3230,8 @@ class UnslothTrainer:
         format_type: str = "auto",
         local_datasets: Optional[List[str]] = None,
         local_eval_datasets: Optional[List[str]] = None,
+        eval_dataset_source: Optional[str] = None,
+        eval_dataset_subset: Optional[str] = None,
         custom_format_mapping: Optional[Dict[str, Any]] = None,
         subset: Optional[str] = None,
         train_split: str = "train",
@@ -3284,6 +3286,17 @@ class UnslothTrainer:
             eval_dataset = None
             dataset_attestation_source = None
             has_separate_eval_source = False
+            # A second selector's repo id: evaluation reads this instead of a split
+            # of the training dataset. It is a different source, so nothing about
+            # its cache, revision or attestation may be borrowed from the training
+            # one.
+            eval_dataset_source = (eval_dataset_source or "").strip() or None
+            eval_dataset_subset = (
+                (eval_dataset_subset or "").strip() or None
+                if eval_dataset_source
+                else None
+            )
+            eval_from_other_dataset = eval_dataset_source is not None
             # Not `eval_steps > 0`: inf and NaN pass that and codec-encode a split later discarded.
             eval_enabled = evaluation_enabled(eval_steps)
             raw_text_mode = is_cpt or format_type == "raw"
@@ -3536,12 +3549,22 @@ class UnslothTrainer:
 
                 if eval_enabled:
                     effective_train = train_split or "train"
-                    if eval_split and eval_split != effective_train:
-                        logger.info(f"Loading explicit eval split: '{eval_split}'\n")
-                        eval_load_kwargs = {"path": dataset_source, "split": eval_split}
-                        if subset:
-                            eval_load_kwargs["name"] = subset
-                        if dataset_revision:
+                    # A separate eval dataset brings its own split namespace: its
+                    # "train" split is not the training dataset's, so the usual
+                    # "must differ from train" rule stops applying.
+                    eval_source = eval_dataset_source or dataset_source
+                    eval_subset = eval_dataset_subset if eval_from_other_dataset else subset
+                    if eval_from_other_dataset and not eval_split:
+                        logger.info(
+                            "Separate eval dataset has no split selected; reading its 'train' split\n"
+                        )
+                    if eval_from_other_dataset or (eval_split and eval_split != effective_train):
+                        requested_eval_split = eval_split or "train"
+                        logger.info(f"Loading explicit eval split: '{requested_eval_split}'\n")
+                        eval_load_kwargs = {"path": eval_source, "split": requested_eval_split}
+                        if eval_subset:
+                            eval_load_kwargs["name"] = eval_subset
+                        if dataset_revision and not eval_from_other_dataset:
                             eval_load_kwargs["revision"] = dataset_revision
                         if hf_token:
                             eval_load_kwargs["token"] = hf_token
@@ -3551,10 +3574,10 @@ class UnslothTrainer:
                             # a typo would only surface on the first eval batch.
                             from datasets import get_dataset_split_names
 
-                            probe_kwargs = {"path": dataset_source}
-                            if subset:
-                                probe_kwargs["config_name"] = subset
-                            if dataset_revision:
+                            probe_kwargs = {"path": eval_source}
+                            if eval_subset:
+                                probe_kwargs["config_name"] = eval_subset
+                            if dataset_revision and not eval_from_other_dataset:
                                 probe_kwargs["revision"] = dataset_revision
                             if hf_token:
                                 probe_kwargs["token"] = hf_token
@@ -3562,15 +3585,15 @@ class UnslothTrainer:
                                 available_splits = get_dataset_split_names(**probe_kwargs)
                             except Exception as probe_err:
                                 raise ValueError(
-                                    f"Could not list splits for '{dataset_source}' "
-                                    f"to validate eval_split='{eval_split}': {probe_err}"
+                                    f"Could not list splits for '{eval_source}' "
+                                    f"to validate eval_split='{requested_eval_split}': {probe_err}"
                                 )
                             # Streaming rejects HF slice syntax and the request validator blocks bracketed streaming
                             # splits, so eval_split is always a bare split name here.
-                            if eval_split not in available_splits:
+                            if requested_eval_split not in available_splits:
                                 raise ValueError(
-                                    f"Requested eval split '{eval_split}' not found in "
-                                    f"dataset '{dataset_source}'. Available splits: "
+                                    f"Requested eval split '{requested_eval_split}' not found in "
+                                    f"dataset '{eval_source}'. Available splits: "
                                     f"{available_splits}"
                                 )
                             eval_dataset = load_dataset(**eval_load_kwargs, streaming = True)
@@ -3583,7 +3606,9 @@ class UnslothTrainer:
                                     f"{STREAMING_EVAL_MAX_SAMPLES} samples\n"
                                 )
                         else:
-                            if dataset_loaded_from_cache:
+                            # A cached copy belongs to the training repo; a separate eval
+                            # dataset has no snapshot here, so it always reads the Hub.
+                            if dataset_loaded_from_cache and not eval_from_other_dataset:
                                 try:
                                     eval_dataset = _load_selected_cached_dataset(eval_split)
                                     if require_exact_resume_resources and eval_dataset is None:
@@ -3622,10 +3647,14 @@ class UnslothTrainer:
                         has_separate_eval_source = True
                         if hasattr(eval_dataset, "__len__"):
                             logger.info(
-                                f"Loaded eval split '{eval_split}' with {len(eval_dataset)} rows\n"
+                                f"Loaded eval split '{requested_eval_split}' from '{eval_source}' "
+                                f"with {len(eval_dataset)} rows\n"
                             )
                         else:
-                            logger.info(f"Loaded eval split '{eval_split}' in streaming mode\n")
+                            logger.info(
+                                f"Loaded eval split '{requested_eval_split}' from '{eval_source}' "
+                                "in streaming mode\n"
+                            )
                     elif eval_split and eval_split == effective_train:
                         if dataset_streaming:
                             raise ValueError(
@@ -3677,7 +3706,11 @@ class UnslothTrainer:
                     snapshot, _ = attest_loaded_dataset(
                         dataset_source,
                         train_attestation_source,
-                        eval_dataset if has_separate_eval_source else None,
+                        # A separate eval repo is not this snapshot; attesting it here
+                        # would label its rows with the training dataset's identity.
+                        eval_dataset
+                        if has_separate_eval_source and not eval_from_other_dataset
+                        else None,
                     )
                     if snapshot is not None:
                         self.dataset_snapshot_path = snapshot
@@ -4341,7 +4374,9 @@ class UnslothTrainer:
             base_lr = float(getattr(getattr(trainer, "args", None), "learning_rate", 2e-4))
             report = integration.patch_layer_lr(trainer, self.model, config, base_lr)
             if report is not None:
-                logger.info("Layer-wise learning rates enabled")
+                kinds = report.get("kinds") or {}
+                detail = f"; module groups: {', '.join(sorted(kinds))}" if kinds else ""
+                logger.info(f"Layer-wise learning rates enabled{detail}")
             sampler = integration.patch_stream_sampler(
                 trainer,
                 config,

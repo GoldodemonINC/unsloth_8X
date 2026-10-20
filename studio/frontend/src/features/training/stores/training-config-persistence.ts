@@ -19,6 +19,7 @@ import type {
   TrainingConfigStore,
   TrainingMethodProvenance,
 } from "../types/config";
+import { DEFAULT_ADVANCED_TRAINING } from "@/features/advanced/types";
 import { drafterStateFrom } from "../lib/drafter-config";
 import {
   createHfBrowseDatasetSelection,
@@ -42,6 +43,9 @@ const NON_PERSISTED_STATE_KEYS: ReadonlySet<keyof TrainingConfigState> =
     "manualDatasetOptionsValid",
     "trainOnCompletionsDefaultPendingFor",
     "maxPositionEmbeddings",
+    "isMoeModel",
+    "numExperts",
+    "numExpertsPerToken",
     "decisionCheckpoints",
     "decisionLayout",
     "s3Config",
@@ -451,9 +455,31 @@ export function mergeTrainingConfig(
     baselineTrainOnCompletions === undefined
       ? modelDefaultsAppliedFor
       : null;
+  // A persisted blob can predate fields added to advanced training (module
+  // kinds, blend slots, eval suites). Rebuilding it over the defaults keeps a
+  // stale localStorage entry from leaving a nested record missing.
+  const persistedAdvanced = (persistedState.advanced ??
+    {}) as Partial<TrainingConfigState["advanced"]>;
+  const advanced: TrainingConfigState["advanced"] = {
+    ...DEFAULT_ADVANCED_TRAINING,
+    ...persistedAdvanced,
+    layerLrZones: {
+      ...DEFAULT_ADVANCED_TRAINING.layerLrZones,
+      ...(persistedAdvanced.layerLrZones ?? {}),
+    },
+    layerLrKinds: {
+      ...DEFAULT_ADVANCED_TRAINING.layerLrKinds,
+      ...(persistedAdvanced.layerLrKinds ?? {}),
+    },
+    blendSlots: persistedAdvanced.blendSlots ?? [],
+    autoEvalSuites: persistedAdvanced.autoEvalSuites ?? [
+      ...DEFAULT_ADVANCED_TRAINING.autoEvalSuites,
+    ],
+  };
   const merged: TrainingConfigStore = {
     ...current,
     ...persistedState,
+    advanced,
     wandbToken: current.wandbToken,
     trainOnCompletions,
     modelDefaultsAppliedFor,

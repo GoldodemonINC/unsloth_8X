@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import {
+  MOE_EXPERT_SCOPES,
+  type MoeExpertScope,
+} from "@/features/advanced/types";
 import { translate } from "@/i18n";
 import type { TrainingConfigState } from "../types/config";
+
+function isMoeExpertScope(value: unknown): value is MoeExpertScope {
+  return (
+    typeof value === "string" &&
+    (MOE_EXPERT_SCOPES as readonly string[]).includes(value)
+  );
+}
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
@@ -63,6 +74,9 @@ export function runConfigDraftSelections(
         : config.is_dataset_image === true
           ? "vision"
           : "text";
+  // eval_split belongs to the second dataset when one was recorded, so it must
+  // not also come back as the training dataset's evaluation split.
+  const evalDataset = stringValue(config.eval_hf_dataset);
   return {
     selectedModel,
     modelType,
@@ -113,7 +127,15 @@ export function runConfigDraftSelections(
         : { source: "upload", uploadedFile },
     datasetSubset: stringValue(config.subset),
     datasetSplit: stringValue(config.train_split),
-    datasetEvalSplit: stringValue(config.eval_split),
+    datasetEvalSplit: evalDataset ? null : stringValue(config.eval_split),
+    evalDataset,
+    evalDatasetSubset: evalDataset
+      ? stringValue(config.eval_dataset_subset)
+      : null,
+    evalDatasetSplit: evalDataset ? stringValue(config.eval_split) : null,
+    moeExpertScope: isMoeExpertScope(config.moe_expert_scope)
+      ? config.moe_expert_scope
+      : null,
     datasetStreaming: config.dataset_streaming === true,
     datasetSliceStart:
       typeof config.dataset_slice_start === "number"

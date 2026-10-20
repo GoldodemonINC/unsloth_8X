@@ -34,6 +34,11 @@ export interface TrainingStartRequest {
   dataset_slice_end: number | null;
   local_datasets: string[];
   local_eval_datasets: string[];
+  /** MoE training scope; LoRA/QLoRA only. */
+  moe_expert_scope?: string | null;
+  /** Separate evaluation dataset; null keeps the eval split of the training set. */
+  eval_hf_dataset?: string | null;
+  eval_dataset_subset?: string | null;
   /** S3 bucket configuration; only sent when the dataset source is "s3". */
   s3_config?: S3Config | null;
   format_type: string;

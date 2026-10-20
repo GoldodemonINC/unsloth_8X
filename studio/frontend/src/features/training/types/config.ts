@@ -16,7 +16,10 @@ import type {
   DecisionLayout,
 } from "../api/models-api";
 import type { DrafterCapability } from "./api";
-import type { AdvancedTrainingState } from "@/features/advanced/types";
+import type {
+  AdvancedTrainingState,
+  MoeExpertScope,
+} from "@/features/advanced/types";
 
 export type LoraVariant = "lora" | "rslora" | "loftq" | "dora";
 
@@ -113,6 +116,10 @@ export interface TrainingConfigState {
   datasetSliceEnd: string | null;
   uploadedFile: string | null;
   uploadedEvalFile: string | null;
+  /** A second dataset for evaluation only; null = eval split of the training set. */
+  evalDataset: string | null;
+  evalDatasetSubset: string | null;
+  evalDatasetSplit: string | null;
   epochs: number;
   contextLength: number;
   learningRate: number;
@@ -180,6 +187,12 @@ export interface TrainingConfigState {
   finetuneMLPModules: boolean;
   targetModules: string[];
   maxPositionEmbeddings: number | null;
+  /** A MoE finetune's module scope; null keeps Studio's default target list. */
+  moeExpertScope: MoeExpertScope | null;
+  /** Reported by the model config, not chosen: whether this model has experts at all. */
+  isMoeModel: boolean;
+  numExperts: number | null;
+  numExpertsPerToken: number | null;
   visionImageSize: number | null;
   s3Config: S3Config | null;
   /** Advanced Studio block: QAT, curriculum, layer LR, blending, auto-eval, RL. */
@@ -244,11 +257,17 @@ export interface TrainingConfigActions {
   ensureModelDefaultsLoaded: () => void;
   ensureDatasetChecked: () => void;
   setTrainingMethod: (method: TrainingMethod) => void;
+  /** Pick what a MoE finetune trains; null restores Studio's default list. */
+  setMoeExpertScope: (scope: MoeExpertScope | null) => void;
   selectHfDataset: (
     dataset: string | null,
     options?: DatasetCacheReferenceOptions,
   ) => void;
   selectLocalDataset: (file: string | null) => void;
+  /** Pick the separate evaluation dataset (Hugging Face repo id, or null to clear). */
+  selectEvalHfDataset: (dataset: string | null) => void;
+  setEvalDatasetSubset: (subset: string | null) => void;
+  setEvalDatasetSplit: (split: string | null) => void;
   selectS3Source: () => void;
   restoreBrowseDatasetSource: () => void;
   setDatasetFormat: (format: DatasetFormat) => void;

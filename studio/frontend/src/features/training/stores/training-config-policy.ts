@@ -2,7 +2,11 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { DEFAULT_HYPERPARAMS } from "@/config/training";
-import { DEFAULT_ADVANCED_TRAINING, DEFAULT_LAYER_ZONE_MULTIPLIERS } from "@/features/advanced/types";
+import {
+  DEFAULT_ADVANCED_TRAINING,
+  DEFAULT_LAYER_KIND_MULTIPLIERS,
+  DEFAULT_LAYER_ZONE_MULTIPLIERS,
+} from "@/features/advanced/types";
 import { getLocale, translate } from "@/i18n";
 import type { DatasetFormat } from "@/types/training";
 import { isRawTextDatasetFormat } from "../lib/training-methods";
@@ -13,6 +17,26 @@ import type {
 } from "../types/config";
 export function emptyManualMapping(): TrainingConfigState["datasetManualMapping"] {
   return {};
+}
+
+/** The MoE fields a model config settles, and the scope it invalidates.
+ *
+ * A scope chosen for the previous model names experts this one may not have, so it is
+ * dropped rather than posted: the backend refuses a scope on a dense model, and the
+ * failure would arrive after the model load.
+ */
+export function moeModelPatch(details: {
+  is_moe?: boolean;
+  num_experts?: number | null;
+  num_experts_per_tok?: number | null;
+}): Partial<TrainingConfigState> {
+  const isMoe = details.is_moe === true;
+  return {
+    isMoeModel: isMoe,
+    numExperts: isMoe ? (details.num_experts ?? null) : null,
+    numExpertsPerToken: isMoe ? (details.num_experts_per_tok ?? null) : null,
+    ...(isMoe ? {} : { moeExpertScope: null }),
+  };
 }
 
 export function createHfBrowseDatasetSelection(
@@ -96,6 +120,9 @@ export const initialTrainingConfigState: TrainingConfigState = {
   datasetSliceEnd: null,
   uploadedFile: null,
   uploadedEvalFile: null,
+  evalDataset: null,
+  evalDatasetSubset: null,
+  evalDatasetSplit: null,
   isCheckingVision: false,
   isVisionModel: false,
   isEmbeddingModel: false,
@@ -111,10 +138,15 @@ export const initialTrainingConfigState: TrainingConfigState = {
   isDatasetAudio: false,
   datasetCheckFailed: false,
   maxPositionEmbeddings: null,
+  moeExpertScope: null,
+  isMoeModel: false,
+  numExperts: null,
+  numExpertsPerToken: null,
   drafterCapability: null,
   advanced: {
     ...DEFAULT_ADVANCED_TRAINING,
     layerLrZones: { ...DEFAULT_LAYER_ZONE_MULTIPLIERS },
+    layerLrKinds: { ...DEFAULT_LAYER_KIND_MULTIPLIERS },
     blendSlots: [],
     autoEvalSuites: [...DEFAULT_ADVANCED_TRAINING.autoEvalSuites],
   },
@@ -123,10 +155,15 @@ export const initialTrainingConfigState: TrainingConfigState = {
 export function hasSeparateStreamingEvalSplit(
   state: Pick<
     TrainingConfigState,
-    "evalSteps" | "datasetSplit" | "datasetEvalSplit"
+    "evalSteps" | "datasetSplit" | "datasetEvalSplit" | "evalDataset"
   >,
 ): boolean {
   if (state.evalSteps <= 0) {
+    return true;
+  }
+  // A second dataset carries its own split namespace, so its "train" split is
+  // not the training set's and streaming needs nothing else from the user.
+  if (state.evalDataset) {
     return true;
   }
   const trainSplit = state.datasetSplit || "train";

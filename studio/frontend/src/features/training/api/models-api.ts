@@ -98,6 +98,10 @@ export interface ModelConfigResponse {
   model_type?: "text" | "vision" | "audio" | "embeddings" | "decision" | null;
   max_position_embeddings?: number | null;
   model_size_bytes?: number | null;
+  /** True only when the model's config publishes a routed-expert count. */
+  is_moe?: boolean;
+  num_experts?: number | null;
+  num_experts_per_tok?: number | null;
 }
 
 // laya: a Laya checkpoint. clef: Cloudflare Clef. llm: a text or vision LLM trained with a Clef decision head.
