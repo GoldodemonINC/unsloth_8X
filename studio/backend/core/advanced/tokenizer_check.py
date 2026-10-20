@@ -197,6 +197,73 @@ def _role_from_config(config: Mapping[str, Any], role: str) -> tuple[str | None,
     return token, token_id
 
 
+def _ids_from_decoder(tokenizer_config: Mapping[str, Any]) -> dict[str, int]:
+    """Token -> id from ``added_tokens_decoder`` (``{"151643": {"content": ...}}``).
+
+    Most Qwen-family checkpoints record their special tokens this way instead of
+    shipping ``added_tokens.json``.
+    """
+    decoder = tokenizer_config.get("added_tokens_decoder")
+    if not isinstance(decoder, Mapping):
+        return {}
+    found: dict[str, int] = {}
+    for key, value in decoder.items():
+        content: Any = value
+        token_id: int | None = None
+        if isinstance(value, Mapping):
+            content = value.get("content")
+            token_id = _first_int(value, "id")
+        # The key is the id in files written by transformers, but the entry's own
+        # ``id`` wins when both exist.
+        if token_id is None:
+            token_id = _first_int({"id": key}, "id")
+        if isinstance(content, str) and token_id is not None:
+            found.setdefault(content, token_id)
+    return found
+
+
+def _ids_from_tokenizer_json(root: Path, wanted: Iterable[str]) -> dict[str, int]:
+    """Resolve tokens through ``tokenizer.json``'s own vocabulary.
+
+    The fast-tokeniser file is the last word on what an id is, so a checkpoint
+    that keeps every table there can still be proven identical. It is large, so
+    it is only read when a special token has no id from any smaller file.
+    """
+    wanted_tokens = {token for token in wanted if token}
+    path = root / "tokenizer.json"
+    if not wanted_tokens or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding = "utf-8", errors = "replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    found: dict[str, int] = {}
+    added = payload.get("added_tokens")
+    if isinstance(added, list):
+        for entry in added:
+            if not isinstance(entry, dict):
+                continue
+            content, token_id = entry.get("content"), entry.get("id")
+            if (
+                isinstance(content, str)
+                and content in wanted_tokens
+                and isinstance(token_id, int)
+                and not isinstance(token_id, bool)
+            ):
+                found.setdefault(content, token_id)
+    model = payload.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    if isinstance(vocab, dict):
+        for token in wanted_tokens - found.keys():
+            token_id = vocab.get(token)
+            if isinstance(token_id, int) and not isinstance(token_id, bool):
+                found[token] = token_id
+    return found
+
+
 def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
     """Read one checkpoint's tokenizer identity, tolerating missing files."""
     root = _checkpoint_root(source)
@@ -222,6 +289,7 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
         else {}
     )
     added_count = len(added) if isinstance(added, dict) else None
+    decoder_map = _ids_from_decoder(tokenizer_config)
 
     special: dict[str, SpecialToken] = {}
     for role in ALL_ROLES:
@@ -230,10 +298,26 @@ def fingerprint_tokenizer(source: str | Path) -> TokenizerFingerprint:
         token = token if token is not None else config_token
         token_id = token_id if token_id is not None else config_id
         if token_id is None and token is not None:
+            token_id = decoder_map.get(token)
+        if token_id is None and token is not None:
             token_id = added_map.get(token)
         if role in ("bos_token", "eos_token") and token_id is None:
             token_id = _first_int(model_config, role if role.endswith("_id") else f"{role}_id")
         special[role] = SpecialToken(role = role, token = token, token_id = token_id)
+
+    # Anything still unlabelled gets one last look in the fast tokeniser's own
+    # tables, so a checkpoint that only keeps its vocabulary there is not
+    # refused merely for lack of a smaller file to read.
+    unresolved = [item.token for item in special.values() if item.token_id is None]
+    if unresolved:
+        late_ids = _ids_from_tokenizer_json(root, unresolved)
+        for role, item in list(special.items()):
+            if item.token_id is None and item.token is not None:
+                resolved_id = late_ids.get(item.token)
+                if resolved_id is not None:
+                    special[role] = SpecialToken(
+                        role = role, token = item.token, token_id = resolved_id
+                    )
 
     template = tokenizer_config.get("chat_template")
     if template is None:

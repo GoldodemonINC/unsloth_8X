@@ -30,6 +30,8 @@ def _write_checkpoint(
     template: str | None = None,
     include_ids: bool = True,
     added: dict[str, int] | None = None,
+    decoder: dict[str, int] | None = None,
+    tokenizer_json: dict[str, int] | None = None,
 ) -> Path:
     """A tiny but complete checkpoint: config, tokenizer files and one shard."""
     np = pytest.importorskip("numpy")
@@ -60,12 +62,31 @@ def _write_checkpoint(
             config_tokens["pad_token_id"] = pad_id
     if template is not None:
         config_tokens["chat_template"] = template
+    if decoder is not None:
+        # ``{"151643": {"content": "<|endoftext|>", "special": true}}``, as Qwen ships it.
+        config_tokens["added_tokens_decoder"] = {
+            str(index): {"id": token_id, "content": token, "special": True}
+            for index, (token, token_id) in enumerate(decoder.items())
+        }
     (directory / "special_tokens_map.json").write_text(json.dumps(special), encoding = "utf-8")
     (directory / "tokenizer_config.json").write_text(
         json.dumps(config_tokens), encoding = "utf-8"
     )
     if added is not None:
         (directory / "added_tokens.json").write_text(json.dumps(added), encoding = "utf-8")
+    if tokenizer_json is not None:
+        (directory / "tokenizer.json").write_text(
+            json.dumps(
+                {
+                    "model": {"vocab": dict(tokenizer_json)},
+                    "added_tokens": [
+                        {"id": token_id, "content": token, "special": True}
+                        for token, token_id in tokenizer_json.items()
+                    ],
+                }
+            ),
+            encoding = "utf-8",
+        )
     save_file(
         {"model.embed_tokens.weight": np.zeros((vocab, 8), dtype = np.float32)},
         str(directory / "model.safetensors"),
@@ -172,6 +193,63 @@ def test_different_eos_ids_explain_why_it_matters(tmp_path: Path):
     report = tokenizer_check.compare_tokenizers([a, b])
     assert report.status == "conflict"
     assert any("Generation would stop" in conflict for conflict in report.conflicts)
+
+
+def test_added_tokens_decoder_resolves_ids(tmp_path: Path):
+    """Qwen ships ``added_tokens_decoder`` in tokenizer_config.json, not added_tokens.json."""
+    payload = {"<|endoftext|>": 151643, "<|end_of_text|>": 151643}
+    a = _write_checkpoint(
+        tmp_path / "a", eos = "<|endoftext|>", eos_id = None, include_ids = False, decoder = payload
+    )
+    b = _write_checkpoint(
+        tmp_path / "b", eos = "<|end_of_text|>", eos_id = None, include_ids = False, decoder = payload
+    )
+    # A pad token named without an id must resolve through the same table.
+    c = _write_checkpoint(
+        tmp_path / "c",
+        eos = "<|endoftext|>",
+        pad = "<|endoftext|>",
+        eos_id = None,
+        include_ids = False,
+        decoder = payload,
+    )
+    assert tokenizer_check.compare_tokenizers([a, b]).status == "ok"
+    report = tokenizer_check.compare_tokenizers([a, c])
+    # Only one parent declares a pad token, so that is a warning -- but the id
+    # itself must resolve, which is what keeps it out of the conflict list.
+    assert report.status == "warning", report.conflicts
+    assert not report.conflicts
+    assert report.fingerprints[1].special["pad_token"].token_id == 151643
+
+
+def test_tokenizer_json_resolves_ids_as_a_last_resort(tmp_path: Path):
+    """With no id anywhere smaller, the fast tokeniser's vocabulary settles it."""
+    payload = {"<|endoftext|>": 151643, "<|end_of_text|>": 151643}
+    a = _write_checkpoint(
+        tmp_path / "a",
+        eos = "<|endoftext|>",
+        eos_id = None,
+        include_ids = False,
+        tokenizer_json = payload,
+    )
+    b = _write_checkpoint(
+        tmp_path / "b",
+        eos = "<|end_of_text|>",
+        eos_id = None,
+        include_ids = False,
+        tokenizer_json = payload,
+    )
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "ok", report.conflicts
+    assert report.fingerprints[0].special["eos_token"].token_id == 151643
+
+
+def test_a_corrupt_tokenizer_json_does_not_crash_the_gate(tmp_path: Path):
+    a = _write_checkpoint(tmp_path / "a", eos = "<eos-a>", eos_id = None, include_ids = False)
+    b = _write_checkpoint(tmp_path / "b", eos = "<eos-b>", eos_id = None, include_ids = False)
+    (a / "tokenizer.json").write_text("{not json", encoding = "utf-8")
+    report = tokenizer_check.compare_tokenizers([a, b])
+    assert report.status == "conflict"
 
 
 def test_different_bos_ids_conflict(tmp_path: Path):
