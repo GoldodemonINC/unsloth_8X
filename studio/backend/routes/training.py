@@ -514,6 +514,7 @@ def _validate_advanced_request(request: TrainingStartRequest) -> None:
                 float(request.learning_rate),
                 {
                     "zone_multipliers": advanced.layer_lr.zone_multipliers,
+                    "kind_multipliers": advanced.layer_lr.kind_multipliers,
                     "layer_multipliers": advanced.layer_lr.layer_multipliers,
                     "depth_curve": advanced.layer_lr.depth_curve,
                 },
@@ -1605,6 +1606,7 @@ _RESUME_CHECKPOINT_STRUCTURE_FIELDS = (
     "lora_alpha",
     "lora_dropout",
     "target_modules",
+    "moe_expert_scope",
     "gradient_checkpointing",
     "use_rslora",
     "use_loftq",
@@ -2204,6 +2206,24 @@ async def start_training(
             request.local_eval_datasets = _validate_local_dataset_paths(
                 request.local_eval_datasets, "Local eval dataset"
             )
+        if request.eval_hf_dataset and request.local_eval_datasets:
+            raise HTTPException(
+                status_code = 400,
+                detail = (
+                    "Pick one evaluation source: an eval_hf_dataset repo or local eval files, "
+                    "not both."
+                ),
+            )
+        if request.eval_hf_dataset and not (request.hf_dataset or "").strip():
+            # Uploaded / S3 training data already has its own eval-file slot; the HF
+            # eval repo is read beside an HF training repo, not beside a local file.
+            raise HTTPException(
+                status_code = 400,
+                detail = (
+                    "A separate evaluation dataset needs a Hugging Face training dataset; "
+                    "with an uploaded or S3 dataset, attach eval files instead."
+                ),
+            )
 
         from utils.hardware import hardware as _hw
         from utils.hardware import ensure_hardware_detected
@@ -2242,7 +2262,9 @@ async def start_training(
                     status_code = 422,
                     detail = "dataset_streaming is not supported with train_on_completions yet.",
                 )
-            if evaluation_enabled(request.eval_steps):
+            if evaluation_enabled(request.eval_steps) and not request.eval_hf_dataset:
+                # Only the same-repo case needs a split that differs from train; a
+                # separate eval dataset streams on its own.
                 train_split = request.train_split or "train"
                 if not request.eval_split or request.eval_split == train_split:
                     raise HTTPException(
@@ -2327,6 +2349,25 @@ async def start_training(
 
         _validate_advanced_request(request)
 
+        # A MoE scope is a leaf list: resolved here so the run, the manifest and the
+        # resume comparison all read the same targets the loader got.
+        moe_scope_patch: dict[str, Any] = {}
+        if request.moe_expert_scope:
+            from core.training.moe_targets import resolve_target_modules, scope_selectors
+
+            try:
+                resolved_targets = resolve_target_modules(
+                    request.moe_expert_scope,
+                    request.target_modules or [],
+                    training_type = request.training_type,
+                )
+            except ValueError as error:
+                raise HTTPException(status_code = 400, detail = str(error)) from error
+            moe_scope_patch = {
+                "target_modules": resolved_targets,
+                **scope_selectors(request.moe_expert_scope),
+            }
+
         training_kwargs = {
             "model_name": model_preflight.model_name,
             "project_name": request.project_name,
@@ -2348,6 +2389,8 @@ async def start_training(
             "dataset_snapshot_path": request.dataset_snapshot_path,
             "local_datasets": request.local_datasets,
             "local_eval_datasets": request.local_eval_datasets,
+            "eval_hf_dataset": request.eval_hf_dataset,
+            "eval_dataset_subset": request.eval_dataset_subset,
             "format_type": request.format_type,
             "subset": request.subset,
             "train_split": request.train_split,
@@ -2385,7 +2428,9 @@ async def start_training(
             "lora_r": request.lora_r,
             "lora_alpha": request.lora_alpha,
             "lora_dropout": request.lora_dropout,
-            "target_modules": request.target_modules if request.target_modules else None,
+            "target_modules": moe_scope_patch.get("target_modules")
+            or (request.target_modules if request.target_modules else None),
+            "moe_expert_scope": request.moe_expert_scope,
             "gradient_checkpointing": request.gradient_checkpointing.strip()
             if request.gradient_checkpointing and request.gradient_checkpointing.strip()
             else "unsloth",
@@ -2398,9 +2443,15 @@ async def start_training(
             "use_dora": request.use_dora,
             "train_on_completions": request.train_on_completions,
             "finetune_vision_layers": request.finetune_vision_layers,
-            "finetune_language_layers": request.finetune_language_layers,
-            "finetune_attention_modules": request.finetune_attention_modules,
-            "finetune_mlp_modules": request.finetune_mlp_modules,
+            "finetune_language_layers": moe_scope_patch.get(
+                "finetune_language_layers", request.finetune_language_layers
+            ),
+            "finetune_attention_modules": moe_scope_patch.get(
+                "finetune_attention_modules", request.finetune_attention_modules
+            ),
+            "finetune_mlp_modules": moe_scope_patch.get(
+                "finetune_mlp_modules", request.finetune_mlp_modules
+            ),
             "is_dataset_image": request.is_dataset_image,
             "is_dataset_audio": request.is_dataset_audio,
             "is_embedding": request.is_embedding,

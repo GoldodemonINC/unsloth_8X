@@ -21,11 +21,18 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { useTrainingConfigStore } from "@/features/training";
 import {
+  DEFAULT_LAYER_KIND_MULTIPLIERS,
+  LAYER_PARAM_KINDS,
   LAYER_ZONES,
+  MOE_EXPERT_SCOPES,
+  MOE_SCOPE_DESCRIPTIONS,
+  MOE_SCOPE_LABELS,
+  type MoeExpertScope,
   QAT_FORMATS,
   REWARD_PRESETS,
   RL_METHODS,
   newBlendSlot,
+  type LayerParamKind,
   type LayerZone,
   type QatFormat,
   type RewardPreset,
@@ -44,6 +51,15 @@ const EVAL_SUITES = [
   { id: "humaneval", label: "HumanEval" },
   { id: "ifeval", label: "IFEval" },
 ] as const;
+
+const KIND_LABELS: Record<LayerParamKind, string> = {
+  attention: "Attention",
+  mlp: "MLP / FFN",
+  norm: "Layer norms",
+  moe_expert: "MoE experts",
+  moe_router: "MoE routers",
+  hybrid_block: "Mamba / hybrid",
+};
 
 const ZONE_LABELS: Record<LayerZone, string> = {
   embedding: "Embeddings",
@@ -144,6 +160,13 @@ export function AdvancedTrainingSection() {
   const advanced = useTrainingConfigStore((s) => s.advanced);
   const setAdvanced = useTrainingConfigStore((s) => s.setAdvanced);
   const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
+  const isMoeModel = useTrainingConfigStore((s) => s.isMoeModel);
+  const numExperts = useTrainingConfigStore((s) => s.numExperts);
+  const numExpertsPerToken = useTrainingConfigStore(
+    (s) => s.numExpertsPerToken,
+  );
+  const moeExpertScope = useTrainingConfigStore((s) => s.moeExpertScope);
+  const setMoeExpertScope = useTrainingConfigStore((s) => s.setMoeExpertScope);
   const isPolicyAlignment = trainingMethod === "rl";
 
   const totalRatio = useMemo(
@@ -174,7 +197,9 @@ export function AdvancedTrainingSection() {
           {advanced.layerLrEnabled ? (
             <Badge variant="secondary">Layer LR</Badge>
           ) : null}
-          {advanced.blendEnabled ? <Badge variant="secondary">Blend</Badge> : null}
+          {advanced.blendEnabled ? (
+            <Badge variant="secondary">Blend</Badge>
+          ) : null}
           {advanced.autoEvalEnabled ? (
             <Badge variant="secondary">Regression Guard</Badge>
           ) : null}
@@ -227,7 +252,12 @@ export function AdvancedTrainingSection() {
                       value={String(advanced.qatGroupSize)}
                       onValueChange={(value) =>
                         setAdvanced({
-                          qatGroupSize: Number(value) as 16 | 32 | 64 | 128 | 256,
+                          qatGroupSize: Number(value) as
+                            | 16
+                            | 32
+                            | 64
+                            | 128
+                            | 256,
                         })
                       }
                     >
@@ -245,6 +275,95 @@ export function AdvancedTrainingSection() {
                   </Field>
                 </div>
               ) : null}
+            </div>
+          </AccordionContent>
+        </AccordionItem>
+
+        <AccordionItem value="moe">
+          <AccordionTrigger className="px-3 text-ui-12p5">
+            MoE experts
+            {isMoeModel ? (
+              <Badge variant="secondary" className="ml-2">
+                {numExperts ? `${numExperts} experts` : "mixture of experts"}
+              </Badge>
+            ) : null}
+          </AccordionTrigger>
+          <AccordionContent className="h-auto! px-3 pb-5">
+            <div className="flex flex-col gap-4">
+              {!isMoeModel ? (
+                <p className="text-ui-11p5 leading-ui-16 text-muted-foreground/85">
+                  The selected model has no mixture-of-experts layers, so there
+                  are no experts to train. Pick a MoE checkpoint (Mixtral,
+                  Qwen3-MoE, DeepSeek-MoE, gpt-oss) to see this choice.
+                </p>
+              ) : (
+                <>
+                  <p className="text-ui-11p5 leading-ui-16 text-muted-foreground/85">
+                    {numExperts ?? "Some"} routed experts
+                    {numExpertsPerToken
+                      ? `, ${numExpertsPerToken} per token`
+                      : ""}
+                    .
+                    {(numExpertsPerToken ?? 0) > 0 && numExperts
+                      ? ` Each token reads ${Math.round(((numExpertsPerToken ?? 0) / numExperts) * 100)}% of the experts, so a LoRA on the experts only moves the weights a prompt actually routes to.`
+                      : ""}
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field
+                      label="Train scope"
+                      hint="What the run teaches. Attention and router stay frozen unless the scope names them."
+                    >
+                      <Select
+                        value={moeExpertScope ?? "default"}
+                        disabled={trainingMethod === "full"}
+                        onValueChange={(value) =>
+                          setMoeExpertScope(
+                            value === "default"
+                              ? null
+                              : (value as MoeExpertScope),
+                          )
+                        }
+                      >
+                        <SelectTrigger className="h-8">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="default">
+                            {MOE_SCOPE_LABELS.experts_and_attention} (Studio
+                            default)
+                          </SelectItem>
+                          {MOE_EXPERT_SCOPES.filter(
+                            (scope) => scope !== "experts_and_attention",
+                          ).map((scope) => (
+                            <SelectItem key={scope} value={scope}>
+                              {MOE_SCOPE_LABELS[scope]}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Field>
+                  </div>
+                  <div className="rounded-xl bg-muted/30 p-3 text-ui-10p5 leading-ui-15 text-muted-foreground">
+                    {
+                      MOE_SCOPE_DESCRIPTIONS[
+                        moeExpertScope ?? "experts_and_attention"
+                      ]
+                    }
+                  </div>
+                  {trainingMethod === "full" ? (
+                    <p className="text-ui-10p5 leading-ui-15 text-amber-600 dark:text-amber-400">
+                      Full finetuning ignores this choice: it already trains
+                      every expert.
+                    </p>
+                  ) : (
+                    <p className="text-ui-10p5 leading-ui-15 text-muted-foreground/70">
+                      The run resolves this into PEFT&apos;s expert parameters,
+                      so the payload and the manifest record the same leaves the
+                      loader trained.
+                    </p>
+                  )}
+                </>
+              )}
             </div>
           </AccordionContent>
         </AccordionItem>
@@ -364,6 +483,53 @@ export function AdvancedTrainingSection() {
                         </>
                       ) : null}
                     </div>
+                    <div className="flex flex-col gap-2 border-t border-border/50 pt-3">
+                      <div>
+                        <p className="text-ui-11p5 font-medium text-foreground">
+                          Module groups
+                        </p>
+                        <p className="mt-0.5 text-ui-10p5 leading-ui-14 text-muted-foreground/70">
+                          A second axis by weight type. Multiplies with the zone
+                          above, so 0.5 early attention is 0.25× overall.
+                        </p>
+                      </div>
+                      {LAYER_PARAM_KINDS.map((kind) => (
+                        <div
+                          key={kind}
+                          className="grid grid-cols-[minmax(104px,0.8fr)_minmax(0,1.4fr)_48px] items-center gap-3"
+                        >
+                          <span className="text-ui-11p5 text-muted-foreground">
+                            {KIND_LABELS[kind]}
+                          </span>
+                          <Slider
+                            value={[
+                              (advanced.layerLrKinds ??
+                                DEFAULT_LAYER_KIND_MULTIPLIERS)[kind] ?? 1,
+                            ]}
+                            min={0}
+                            max={2}
+                            step={0.05}
+                            onValueChange={([value]) =>
+                              setAdvanced({
+                                layerLrKinds: {
+                                  ...(advanced.layerLrKinds ??
+                                    DEFAULT_LAYER_KIND_MULTIPLIERS),
+                                  [kind]: value,
+                                },
+                              })
+                            }
+                            aria-label={`${KIND_LABELS[kind]} learning-rate multiplier`}
+                          />
+                          <span className="text-right font-mono text-ui-11 text-foreground">
+                            {(
+                              (advanced.layerLrKinds ??
+                                DEFAULT_LAYER_KIND_MULTIPLIERS)[kind] ?? 1
+                            ).toFixed(2)}
+                            ×
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ) : null}
               </div>
@@ -436,7 +602,9 @@ export function AdvancedTrainingSection() {
                                     item.id === slot.id
                                       ? {
                                           ...item,
-                                          source: value as "huggingface" | "local",
+                                          source: value as
+                                            | "huggingface"
+                                            | "local",
                                         }
                                       : item,
                                   ),
@@ -448,7 +616,9 @@ export function AdvancedTrainingSection() {
                               </SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="huggingface">Hub</SelectItem>
-                                <SelectItem value="local">Local file</SelectItem>
+                                <SelectItem value="local">
+                                  Local file
+                                </SelectItem>
                               </SelectContent>
                             </Select>
                             <Button
@@ -510,12 +680,14 @@ export function AdvancedTrainingSection() {
                       Add dataset stream
                     </Button>
                     <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-                      Streams are concatenated and sampled per optimizer step using
-                      these weights. Hub streams are downloaded and formatted at
-                      start.
+                      Streams are concatenated and sampled per optimizer step
+                      using these weights. Hub streams are downloaded and
+                      formatted at start.
                     </p>
                     {advanced.blendSlots.length > 0 &&
-                    advanced.blendSlots.every((slot) => !slot.dataset.trim()) ? (
+                    advanced.blendSlots.every(
+                      (slot) => !slot.dataset.trim(),
+                    ) ? (
                       <p className="text-ui-10p5 text-amber-600 dark:text-amber-400">
                         Every stream needs a dataset id or local path.
                       </p>
@@ -587,8 +759,9 @@ export function AdvancedTrainingSection() {
                     />
                   </Field>
                   <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-                    Requires lm-evaluation-harness in the Studio environment. If it
-                    is missing the run reports an install hint instead of failing.
+                    Requires lm-evaluation-harness in the Studio environment. If
+                    it is missing the run reports an install hint instead of
+                    failing.
                   </p>
                 </div>
               ) : null}
@@ -609,7 +782,10 @@ function PlanBadge({ cadence }: { cadence: string }) {
     .filter(Boolean)
     .map((part) => {
       const [name, raw] = part.includes(":")
-        ? [part.slice(0, part.lastIndexOf(":")), part.slice(part.lastIndexOf(":") + 1)]
+        ? [
+            part.slice(0, part.lastIndexOf(":")),
+            part.slice(part.lastIndexOf(":") + 1),
+          ]
         : ["stage", part];
       return { name: name.trim(), steps: Number(raw) };
     });
@@ -641,8 +817,9 @@ function PolicyAlignmentPanel() {
             Policy Alignment lab
           </h3>
           <p className="text-ui-11 leading-ui-15 text-muted-foreground/85">
-            DPO learns from chosen/rejected pairs; GRPO scores a group of samples
-            against a reward. Dataset columns are validated before the run starts.
+            DPO learns from chosen/rejected pairs; GRPO scores a group of
+            samples against a reward. Dataset columns are validated before the
+            run starts.
           </p>
         </div>
         <div className="flex gap-1 rounded-full border border-border/60 p-0.5">

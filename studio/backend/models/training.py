@@ -161,6 +161,7 @@ class LayerLrTrainingConfig(BaseModel):
 
     enabled: bool = False
     zone_multipliers: Dict[str, float] = Field(default_factory = dict)
+    kind_multipliers: Dict[str, float] = Field(default_factory = dict)
     layer_multipliers: Dict[str, float] = Field(default_factory = dict)
     depth_curve: Optional[List[float]] = Field(None, min_length = 2, max_length = 2)
 
@@ -301,6 +302,16 @@ class TrainingStartRequest(BaseModel):
     local_eval_datasets: List[str] = Field(
         default_factory = list, description = "List of local eval dataset paths"
     )
+    # A second, separate dataset for evaluation. When set, evaluation reads this
+    # dataset instead of carving a split out of the training one -- the shape
+    # people already use in the notebooks as `eval_dataset`.
+    eval_hf_dataset: Optional[str] = Field(
+        None,
+        description = "HuggingFace dataset used for evaluation, when it differs from the training one",
+    )
+    eval_dataset_subset: Optional[str] = Field(
+        None, description = "Config/subset name inside eval_hf_dataset"
+    )
     # The history detail references these, and Resume replays that payload.
     _resolve_the_dataset_handles = field_validator("local_datasets", "local_eval_datasets")(
         _resolve_inventory_handles
@@ -406,7 +417,23 @@ class TrainingStartRequest(BaseModel):
             raise ValueError("hf_dataset contains invalid characters or path segments")
         return v
 
-    @field_validator("subset")
+    @field_validator("eval_hf_dataset")
+    @classmethod
+    def _check_eval_hf_dataset(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > 256:
+            raise ValueError("eval_hf_dataset is too long (max 256 chars)")
+        if ".." in v:
+            raise ValueError("eval_hf_dataset must not contain '..'")
+        if any(_HF_DATASET_ID_SEGMENT_RE.fullmatch(segment) is None for segment in v.split("/")):
+            raise ValueError("eval_hf_dataset contains invalid characters or path segments")
+        return v
+
+    @field_validator("subset", "eval_dataset_subset")
     @classmethod
     def _check_subset(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
@@ -729,6 +756,17 @@ class TrainingStartRequest(BaseModel):
     use_dora: bool = Field(False, description = "Use DoRA")
     train_on_completions: bool = Field(False, description = "Train on completions only")
 
+    # Which module families a MoE finetune teaches. None keeps Studio's default target
+    # list, which already reaches the experts of a fused-expert MoE model.
+    moe_expert_scope: Optional[
+        Literal["experts_only", "experts_and_attention", "experts_and_router", "router_only"]
+    ] = Field(
+        None,
+        description = (
+            "MoE training scope: experts_only, experts_and_attention, experts_and_router or "
+            "router_only. LoRA/QLoRA only."
+        ),
+    )
     finetune_vision_layers: bool = Field(False, description = "Finetune vision layers")
     finetune_language_layers: bool = Field(True, description = "Finetune language layers")
     finetune_attention_modules: bool = Field(True, description = "Finetune attention modules")
@@ -788,6 +826,19 @@ class TrainingStartRequest(BaseModel):
         return [] if value is None else value
 
     @model_validator(mode = "after")
+    def _validate_moe_expert_scope(self) -> "TrainingStartRequest":
+        # Full finetuning trains every expert already, so a scope there would only
+        # suggest a choice that is not being made.
+        if self.moe_expert_scope is None:
+            return self
+        if self.training_type == "Full Finetuning":
+            raise ValueError(
+                "moe_expert_scope applies to LoRA/QLoRA only: full finetuning trains every "
+                "expert already."
+            )
+        return self
+
+    @model_validator(mode = "after")
     def _validate_streaming_splits(self) -> "TrainingStartRequest":
         # Streaming load_dataset does not accept HF slice syntax (probe-confirmed "Bad split"), so reject
         # early with a clear message.
@@ -801,6 +852,31 @@ class TrainingStartRequest(BaseModel):
                         f"dataset_streaming requires a plain split name in {field_name} "
                         f"(got {split_val!r}); use a name such as 'train' or 'validation'."
                     )
+        return self
+
+    @model_validator(mode = "after")
+    def _validate_separate_eval_dataset(self) -> "TrainingStartRequest":
+        # A second dataset is only read when evaluation runs. Reject the pair up
+        # front: silently training without ever evaluating it is the failure mode
+        # nobody notices until the loss curve is done.
+        if self.eval_hf_dataset is None:
+            return self
+        try:
+            eval_steps = float(self.eval_steps)
+        except (TypeError, ValueError, OverflowError):
+            eval_steps = 0.0
+        if not (eval_steps > 0 and eval_steps == eval_steps and eval_steps != float("inf")):
+            raise ValueError(
+                "eval_hf_dataset needs evaluation enabled: set eval_steps above 0, "
+                "or clear the evaluation dataset."
+            )
+        if self.eval_hf_dataset == (self.hf_dataset or "").strip():
+            # Same repo in both slots is just the normal eval split; say so rather
+            # than downloading it twice under two identities.
+            raise ValueError(
+                "eval_hf_dataset is the training dataset; leave it empty and pick the "
+                "Evaluation split instead."
+            )
         return self
 
     @model_validator(mode = "after")

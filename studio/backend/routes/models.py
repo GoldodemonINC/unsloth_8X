@@ -2541,6 +2541,7 @@ async def get_model_config(
             is_lora = False
             base_model = None
             max_position_embeddings = None
+            is_moe, num_experts, num_experts_per_tok = False, None, None
             try:
                 model_config = ModelConfig.from_identifier(
                     inspection_target,
@@ -2549,6 +2550,9 @@ async def get_model_config(
                 is_lora = model_config.is_lora
                 base_model = model_config.base_model if is_lora else None
                 max_position_embeddings = _get_max_position_embeddings(model_config)
+                from utils.models.moe_config import moe_info
+
+                is_moe, num_experts, num_experts_per_tok = moe_info(model_config)
             except Exception:
                 pass
 
@@ -2567,6 +2571,12 @@ async def get_model_config(
                             return d
 
                         max_position_embeddings = _get_max_position_embeddings(_to_ns(_cfg))
+                        if not is_moe:
+                            from utils.models.moe_config import moe_info
+
+                            is_moe, num_experts, num_experts_per_tok = moe_info(
+                                _to_ns(_cfg)
+                            )
                 except Exception:
                     pass
 
@@ -2599,6 +2609,9 @@ async def get_model_config(
                 model_type = derive_model_type(is_vision, audio_type, is_embedding, is_decision),
                 base_model = base_model,
                 max_position_embeddings = max_position_embeddings,
+                is_moe = is_moe,
+                num_experts = num_experts,
+                num_experts_per_tok = num_experts_per_tok,
                 # Keyed on the target, not the flag: the bare repo id an anonymous caller
                 # gets sizes as a relative path and returns None, public repos included.
                 model_size_bytes = (

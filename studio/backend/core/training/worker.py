@@ -618,6 +618,16 @@ def _load_hf_train_and_eval_datasets(
     eval_split = config.get("eval_split")
     revision = config.get("dataset_revision")
     eval_enabled = evaluation_enabled(config.get("eval_steps"))
+    # A second dataset from the Dataset panel's evaluation selector: it brings its
+    # own subset and split namespace, so a split named "train" is not the train
+    # split of the dataset being trained on.
+    eval_hf_dataset = (config.get("eval_hf_dataset") or "").strip()
+    eval_subset = (
+        (config.get("eval_dataset_subset") or "").strip() or None
+        if eval_hf_dataset
+        else None
+    )
+    eval_from_other = bool(eval_hf_dataset and eval_hf_dataset != hf_dataset)
     require_exact = bool(
         config.get("require_exact_resume_resources") or config.get("require_exact_dataset_resource")
     )
@@ -638,6 +648,14 @@ def _load_hf_train_and_eval_datasets(
         if revision:
             kwargs["revision"] = revision
         return load_dataset(hf_dataset, **kwargs)
+
+    def load_eval_remote(split: str):
+        if not eval_from_other:
+            return load_remote(split)
+        kwargs = {"split": split, "token": token}
+        if eval_subset:
+            kwargs["name"] = eval_subset
+        return load_dataset(eval_hf_dataset, **kwargs)
 
     if _dataset_local_files_only(config):
         status_callback(f"Loading cached dataset: {hf_dataset}")
@@ -664,7 +682,12 @@ def _load_hf_train_and_eval_datasets(
 
     eval_dataset = None
     explicit_separate_eval = bool(eval_split and eval_split != train_split)
-    if eval_enabled and explicit_separate_eval:
+    if eval_enabled and eval_from_other:
+        # Reads the eval repo regardless of how the training data was loaded, and
+        # never from the training repo's cached snapshot.
+        status_callback(f"Loading eval dataset: {eval_hf_dataset}...")
+        eval_dataset = load_eval_remote(eval_split or "train")
+    elif eval_enabled and explicit_separate_eval:
         if loaded_from_cache:
             try:
                 eval_dataset = _load_cached_dataset_for_config(config, eval_split, token)
@@ -686,7 +709,7 @@ def _load_hf_train_and_eval_datasets(
                 loaded_from_cache = False
         else:
             eval_dataset = load_remote(eval_split)
-    elif eval_enabled and not eval_split:
+    elif eval_enabled and not eval_split and not eval_from_other:
         auto_errors: list[tuple[str, Exception]] = []
         try:
             split_info = getattr(getattr(dataset, "info", None), "splits", None)
@@ -751,7 +774,13 @@ def _load_hf_train_and_eval_datasets(
         exact_dataset_snapshot_path,
     )
 
-    snapshot, _ = attest_loaded_dataset(hf_dataset, dataset, eval_dataset)
+    # A separate eval repo is not part of this snapshot; attesting it here would
+    # stamp its rows with the training dataset's identity.
+    snapshot, _ = attest_loaded_dataset(
+        hf_dataset,
+        dataset,
+        eval_dataset if not eval_from_other else None,
+    )
     if snapshot is None and loaded_from_cache:
         snapshot = exact_dataset_snapshot_path(
             config.get("dataset_snapshot_path"),
@@ -934,6 +963,41 @@ def _requests_all_linear(config: dict) -> bool:
     if isinstance(target_modules, (list, tuple)):
         return list(target_modules) == ["all-linear"]
     return False
+
+
+MOE_SCOPE_NEEDS_MOE_MODEL = (
+    "This model has no MoE experts, so moe_expert_scope '{}' has nothing to train. "
+    "Clear the MoE scope, or pick a model with experts (Mixtral, Qwen3-MoE, DeepSeek-MoE, ...)."
+)
+
+
+def _check_moe_expert_scope(trainer, config: dict) -> None:
+    """Refuse a MoE scope on a model that has no experts.
+
+    The request model cannot know: whether a repo is MoE is settled by the config the
+    loader read. This runs after load and before the adapters are built, so the run
+    fails with a message about the choice instead of finishing as a plain LoRA run.
+    """
+    scope = config.get("moe_expert_scope")
+    if not scope:
+        return
+    from core.training import moe_targets
+    from core.training.moe_targets import is_moe_model
+
+    model = getattr(trainer, "model", None)
+    if not is_moe_model(model):
+        raise ValueError(MOE_SCOPE_NEEDS_MOE_MODEL.format(scope))
+    logger.info(moe_targets.describe_scope(scope, model))
+    targets = moe_targets.expert_parameter_targets(model, config.get("target_modules") or [])
+    if targets:
+        logger.info(f"MoE expert parameters: {', '.join(targets)}")
+    elif moe_targets.scope_trains_experts(scope):
+        # Per-expert Linear layouts are reached through target_modules instead, so this
+        # is informational rather than an error.
+        logger.info(
+            "MoE experts are per-expert modules, so they train through target_modules "
+            f"({config.get('target_modules')})"
+        )
 
 
 def _check_finetune_targets_after_detect(trainer, config: dict) -> None:
@@ -4789,6 +4853,8 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
                 format_type = config.get("format_type", ""),
                 local_datasets = config.get("local_datasets") or None,
                 local_eval_datasets = config.get("local_eval_datasets") or None,
+                eval_dataset_source = config.get("eval_hf_dataset") or None,
+                eval_dataset_subset = config.get("eval_dataset_subset") or None,
                 custom_format_mapping = config.get("custom_format_mapping"),
                 subset = config.get("subset"),
                 train_split = config.get("train_split", "train"),
@@ -5233,6 +5299,10 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
             )
         elif use_lora:
             _send_status(event_queue, "Configuring LoRA adapters...")
+            # A scope only means something on a model that has the experts it names; say
+            # so before the adapters are built, or the run looks like a plain LoRA run
+            # that quietly trained nothing new.
+            _check_moe_expert_scope(trainer, config)
             success = trainer.prepare_model_for_training(
                 use_lora = True,
                 finetune_vision_layers = config.get("finetune_vision_layers", True),

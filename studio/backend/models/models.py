@@ -123,6 +123,15 @@ class ModelDetails(BaseModel):
     max_position_embeddings: Optional[int] = Field(
         None, description = "Maximum context length supported by the model"
     )
+    is_moe: bool = Field(
+        False, description = "Whether the model has mixture-of-experts layers"
+    )
+    num_experts: Optional[int] = Field(
+        None, description = "Routed experts per MoE layer, when the config publishes it"
+    )
+    num_experts_per_tok: Optional[int] = Field(
+        None, description = "Experts each token is routed to (top-k), when published"
+    )
     model_size_bytes: Optional[int] = Field(
         None, description = "Total size of model weight files in bytes"
     )
