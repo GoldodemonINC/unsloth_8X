@@ -3,7 +3,6 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -23,6 +22,7 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { useEffect, useRef, useState } from "react";
+import { MergeModelSlot } from "./merge-model-slot";
 import {
   planScaler,
   runScaler,
@@ -53,7 +53,8 @@ export function ScalerPanel({
 }) {
   const [source, setSource] = useState(defaultSource);
   const [method, setMethod] = useState<ScalerMethod>("depth");
-  const [target, setTarget] = useState<number | null>(null);
+  // The slider's quantity: parameters added on top of the checkpoint's own count.
+  const [added, setAdded] = useState<number | null>(null);
   const [plan, setPlan] = useState<ScalerPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -86,15 +87,15 @@ export function ScalerPanel({
     let cancelled = false;
     setPlanning(true);
     const timer = setTimeout(() => {
-      planScaler({ source: trimmed, method, target_params: target })
+      planScaler({ source: trimmed, method, added_params: added })
         .then((result) => {
           if (cancelled) return;
           setPlan(result);
           setPlanError(null);
-          setTarget((current) => {
-            if (current == null) return result.default_target_params;
-            if (current < result.min_params) return result.min_params;
-            if (current > result.max_params) return result.max_params;
+          setAdded((current) => {
+            if (current == null) return result.default_added_params;
+            if (current < result.min_added_params) return result.min_added_params;
+            if (current > result.max_added_params) return result.max_added_params;
             return current;
           });
         })
@@ -111,12 +112,12 @@ export function ScalerPanel({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [source, method, target]);
+  }, [source, method, added]);
 
   const start = async () => {
     setRunError(null);
     setAdopted(false);
-    if (!plan || target == null) {
+    if (!plan || added == null) {
       setRunError("Plan a checkpoint first.");
       return;
     }
@@ -124,7 +125,7 @@ export function ScalerPanel({
     try {
       const created = await runScaler({
         source: plan.source,
-        target_params: target,
+        added_params: added,
         method,
       });
       setJob(created);
@@ -146,12 +147,17 @@ export function ScalerPanel({
         100,
         Math.max(
           0,
-          ((plan.floor_params - plan.min_params) /
-            Math.max(1, plan.max_params - plan.min_params)) *
-            100,
+          (plan.floor_added_params / Math.max(1, plan.max_added_params)) * 100,
         ),
       )
     : 0;
+  // While the slider moves, the readout follows the thumb instead of waiting
+  // for the debounced plan to come back.
+  const addedValue = plan ? (added ?? plan.default_added_params) : 0;
+  const targetPreview = plan ? plan.base_params + addedValue : 0;
+  const growthPreview = plan
+    ? targetPreview / Math.max(1, plan.base_params)
+    : 1;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -177,25 +183,23 @@ export function ScalerPanel({
         ) : null}
       </div>
 
-      <label className="flex flex-col gap-1.5">
-        <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
-          Checkpoint to expand
-        </span>
-        <Input
+      <div className="flex flex-col gap-1.5">
+        <MergeModelSlot
+          label="Checkpoint to expand"
           value={source}
-          onChange={(event) => {
-            setSource(event.target.value);
-            setTarget(null);
+          onChange={(next) => {
+            setSource(next);
+            setAdded(null);
             setJob(null);
           }}
-          placeholder="path/to/model or org/model"
-          className="font-mono text-ui-12"
+          placeholder="C:\\models\\llama-3.2-1b"
+          disabled={running}
         />
         <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
-          A local folder, or a Hugging Face repo id. Only config.json is read to
-          plan; the weights load when you run.
+          Search the Hugging Face Hub, or point at a local checkpoint. Only
+          config.json is read to plan; the weights load when you run.
         </span>
-      </label>
+      </div>
 
       {planError ? (
         <p className="text-ui-11 text-destructive">{planError}</p>
@@ -207,19 +211,18 @@ export function ScalerPanel({
             <div className="flex flex-col gap-2">
               <div className="flex items-baseline justify-between gap-3">
                 <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
-                  Target size
+                  Added parameters
                 </span>
                 <span className="font-mono text-ui-13 text-foreground">
-                  {params(target ?? plan.target_params)}
-                  {plan.projection ? (
-                    <span className="ml-1 text-muted-foreground">
-                      ({plan.projection.growth_factor.toFixed(2)}x)
-                    </span>
-                  ) : null}
+                  +{params(addedValue)}
+                  <span className="ml-2 font-normal text-muted-foreground">
+                    {params(plan.base_params)} → {params(targetPreview)} (
+                    {growthPreview.toFixed(2)}x)
+                  </span>
                 </span>
               </div>
 
-              {/* The refused zone, drawn under the Radix track: from the base up to the floor. */}
+              {/* The refused zone, drawn under the Radix track: 0 added up to the floor. */}
               <div className="relative py-1">
                 <div
                   aria-hidden={true}
@@ -237,36 +240,40 @@ export function ScalerPanel({
                 />
                 <div className="relative [&_[data-slot=slider-track]]:bg-transparent">
                   <Slider
-                    value={[target ?? plan.target_params]}
-                    min={plan.min_params}
-                    max={plan.max_params}
+                    value={[addedValue]}
+                    min={plan.min_added_params}
+                    max={plan.max_added_params}
                     step={plan.step_params}
                     disabled={plan.blocked || running}
-                    onValueChange={([value]) => setTarget(value)}
+                    onValueChange={([value]) => setAdded(value)}
                     thumbValueText={(value) =>
-                      `${params(value)} parameters, ${(
-                        value / Math.max(1, plan.base_params)
+                      `plus ${params(value)} parameters, ${(
+                        (plan.base_params + value) /
+                        Math.max(1, plan.base_params)
                       ).toFixed(2)}x the base`
                     }
-                    aria-label="Expanded parameter count"
+                    aria-label="Parameters to add"
                   />
                 </div>
                 <div className="mt-1 flex items-center justify-between text-ui-10p5 text-muted-foreground/70">
-                  <span className="font-mono">{params(plan.min_params)}</span>
+                  <span className="font-mono">+0</span>
                   <span
                     className="absolute -translate-x-1/2 font-mono text-amber-700 dark:text-amber-400"
                     style={{ left: `${floorPercent}%` }}
                   >
                     {plan.growth_floor}x floor
                   </span>
-                  <span className="font-mono">{params(plan.max_params)}</span>
+                  <span className="font-mono">
+                    +{params(plan.max_added_params)}
+                  </span>
                 </div>
               </div>
               <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-                Slider runs from the base count to base +{" "}
-                {params(plan.cap_added_params)}. Growth below{" "}
-                {plan.growth_floor}x is refused: no growth study reports a gain
-                there, and the run costs as much as a real one.
+                Slider adds 0 to {params(plan.max_added_params)} parameters on top
+                of the checkpoint. Adding less than{" "}
+                {params(plan.floor_added_params)} (below {plan.growth_floor}x) is
+                refused: no growth study reports a gain there, and the run costs
+                as much as a real one.
               </p>
             </div>
 
@@ -278,7 +285,7 @@ export function ScalerPanel({
                 value={method}
                 onValueChange={(value) => {
                   setMethod(value as ScalerMethod);
-                  setTarget(null);
+                  setAdded(null);
                 }}
               >
                 <SelectTrigger className="h-9">
@@ -369,7 +376,7 @@ export function ScalerPanel({
             <Button
               size="sm"
               onClick={() => void start()}
-              disabled={running || !plan.runnable || target == null}
+              disabled={running || !plan.runnable}
             >
               {running ? (
                 <Spinner className="size-3.5" />

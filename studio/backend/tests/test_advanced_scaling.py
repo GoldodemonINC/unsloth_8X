@@ -75,6 +75,29 @@ def test_a_big_checkpoint_has_no_valid_target_in_range(tmp_path):
     assert "2x" in message and "base + 3.00B" in message
 
 
+def test_added_params_sets_the_target_on_top_of_the_base(tmp_path):
+    """The slider asks for growth, not a total: target is always base + added."""
+    plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)), added_params=300_000_000)
+
+    assert plan["added_params"] == 300_000_000
+    assert plan["target_params"] == plan["base_params"] + 300_000_000
+    assert plan["min_added_params"] == 0
+    assert plan["max_added_params"] == scaling.CAP_ADDED_PARAMS
+    assert plan["floor_added_params"] == plan["floor_params"] - plan["base_params"]
+    assert plan["projection"]["projected_params"] == pytest.approx(
+        plan["target_params"], rel=0.02
+    )
+
+
+def test_target_and_added_together_are_rejected(tmp_path):
+    with pytest.raises(ValueError):
+        scaling.plan(
+            str(_checkpoint(tmp_path, SMOLLM2_135M)),
+            target_params=200_000_000,
+            added_params=100_000_000,
+        )
+
+
 def test_target_below_the_floor_is_refused_with_the_floor_in_the_message(tmp_path):
     source = str(_checkpoint(tmp_path, SMOLLM2_135M))
     plan = scaling.plan(source, target_params=170_000_000)

@@ -261,6 +261,13 @@ export interface ScalerPlan {
   growth_floor: number;
   target_params: number;
   default_target_params: number;
+  /** The slider's own quantity: parameters added on top of the checkpoint. */
+  added_params: number;
+  min_added_params: number;
+  max_added_params: number;
+  default_added_params: number;
+  /** Adding less than this is under the growth floor, and is refused. */
+  floor_added_params: number;
   step_params: number;
   method: ScalerMethod;
   method_label: string;
@@ -490,6 +497,8 @@ export function runSplit(body: {
 /** The Slider's range, the growth floor, and every refusal reason. Reads config.json only. */
 export function planScaler(body: {
   source: string;
+  /** Parameters to add. The target size is base + this. */
+  added_params?: number | null;
   target_params?: number | null;
   method?: ScalerMethod;
   hf_token?: string | null;
@@ -499,7 +508,7 @@ export function planScaler(body: {
 
 export function runScaler(body: {
   source: string;
-  target_params: number;
+  added_params: number;
   method: ScalerMethod;
   output_dir?: string | null;
   insert_strategy?: "even" | "middle" | "tail";

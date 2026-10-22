@@ -188,9 +188,16 @@ class SplitRunRequest(SplitPlanRequest):
 
 
 class ScalePlanRequest(BaseModel):
-    """A checkpoint to grow, and how far. Planning reads config.json only."""
+    """A checkpoint to grow, and how far. Planning reads config.json only.
+
+    ``added_params`` is what the slider sets (0 to 3B); ``target_params`` is the
+    absolute size, for callers that think in totals.
+    """
     source: str = Field(..., min_length = 1)
     target_params: Optional[float] = Field(None, gt = 0, description = "Absolute parameter count")
+    added_params: Optional[float] = Field(
+        None, ge = 0, description = "Parameters to add, on top of the checkpoint's own count"
+    )
     method: Literal["depth", "mlp_width", "depth+mlp_width"] = "depth"
     hf_token: Optional[str] = None
 
@@ -1201,6 +1208,7 @@ def scale_plan(request: ScalePlanRequest) -> dict[str, Any]:
         return scaling.plan(
             request.source,
             target_params = request.target_params,
+            added_params = request.added_params,
             method = request.method,
             token = request.hf_token,
         )
@@ -1216,6 +1224,7 @@ def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
         planned = scaling.plan(
             request.source,
             target_params = request.target_params,
+            added_params = request.added_params,
             method = request.method,
             token = request.hf_token,
         )

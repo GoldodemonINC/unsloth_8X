@@ -384,12 +384,20 @@ def plan(
     source: str,
     *,
     target_params: Optional[float] = None,
+    added_params: Optional[float] = None,
     method: str = "depth",
     token: Optional[str] = None,
 ) -> dict[str, Any]:
-    """The slider's range, the growth floor, and every refusal reason. Reads config.json only."""
+    """The slider's range, the growth floor, and every refusal reason. Reads config.json only.
+
+    The slider speaks in *added* parameters (0 to 3B), because that is the quantity the
+    control actually sets; ``target_params`` is still accepted for callers that think in
+    absolute sizes.
+    """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}.")
+    if target_params is not None and added_params is not None:
+        raise ValueError("Give target_params or added_params, not both.")
 
     label, config = merge.read_model_config(source, token = token)
     base_params = _base_params(config)
@@ -402,7 +410,12 @@ def plan(
 
     # The default target is the floor: the smallest growth this tool will run.
     default_target = min(max(min_params, floor_params), cap) if base_params else min_params
-    target = float(target_params) if target_params else float(default_target)
+    if added_params is not None and base_params:
+        target = float(base_params) + float(added_params)
+    elif target_params:
+        target = float(target_params)
+    else:
+        target = float(default_target)
     target = float(min(max(target, min_params), cap)) if base_params else target
 
     projection = (
@@ -460,6 +473,11 @@ def plan(
         "growth_floor": GROWTH_FLOOR,
         "target_params": int(target),
         "default_target_params": int(default_target),
+        "min_added_params": 0,
+        "max_added_params": CAP_ADDED_PARAMS,
+        "added_params": max(0, int(target) - min_params),
+        "default_added_params": max(0, int(default_target) - min_params),
+        "floor_added_params": max(0, floor_params - min_params),
         "step_params": max(1_000_000, int(CAP_ADDED_PARAMS / 300)),
         "method": method,
         "method_label": METHOD_LABELS[method],

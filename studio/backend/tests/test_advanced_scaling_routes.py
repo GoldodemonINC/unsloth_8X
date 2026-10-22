@@ -54,6 +54,18 @@ def test_plan_endpoint_returns_the_slider_range(client, tmp_path):
     assert body["methods"][0]["id"] == "depth"
 
 
+def test_plan_endpoint_accepts_added_params(client, tmp_path):
+    response = client.post(
+        "/api/advanced/scale/plan",
+        json={"source": _checkpoint(tmp_path, CONFIG), "added_params": 300_000_000},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["added_params"] == 300_000_000
+    assert body["target_params"] == body["base_params"] + 300_000_000
+
+
 def test_plan_endpoint_reports_a_rotten_source_as_400(client, tmp_path):
     response = client.post(
         "/api/advanced/scale/plan", json = {"source": str(tmp_path / "missing")}
