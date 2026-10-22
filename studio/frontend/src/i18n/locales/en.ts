@@ -781,6 +781,7 @@ export const en = {
       hub: "Model hub",
       train: "Train",
       merge: "Merge",
+      scale: "Scaler",
       recipes: "Recipes",
       images: "Images",
       video: "Video",

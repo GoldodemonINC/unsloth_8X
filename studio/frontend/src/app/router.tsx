@@ -12,6 +12,7 @@ import { Route as dataRecipeRoute } from "./routes/data-recipes.$recipeId";
 import { Route as chatRoute } from "./routes/chat";
 import { Route as exportRoute } from "./routes/export";
 import { Route as mergeRoute } from "./routes/merge";
+import { Route as scaleRoute } from "./routes/scale";
 import { Route as imagesRoute } from "./routes/images";
 import { Route as videoRoute } from "./routes/video";
 import { Route as audioRoute } from "./routes/audio";
@@ -32,6 +33,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   studioRoute,
   mergeRoute,
+  scaleRoute,
   chatRoute,
   projectsRoute,
   libraryRoute,

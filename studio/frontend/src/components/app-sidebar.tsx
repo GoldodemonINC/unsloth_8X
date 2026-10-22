@@ -252,6 +252,7 @@ import { cn } from "@/lib/utils";
 import {
   ApiIcon,
   Archive03Icon,
+  ArrowExpand02Icon,
   ArrowUpDownIcon,
   BadgeInfoIcon,
   Cancel01Icon,
@@ -3669,6 +3670,22 @@ export function AppSidebar() {
       },
       onIntent: () => {
         preloadSilently(router.preloadRoute({ to: "/merge" }));
+      },
+    },
+    scale: {
+      icon: ArrowExpand02Icon,
+      label: t("shell.navigation.scale"),
+      active: pathname === "/scale" || pathname.startsWith("/scale/"),
+      // Expansion loads and saves a checkpoint on CPU, so like merging it must not be
+      // greyed out by a verdict about training accelerators.
+      pending: capabilitiesUnknown,
+      pendingTooltip: t("shell.navigation.trainChecking"),
+      onClick: () => {
+        navigateFromRow({ to: "/scale" });
+        closeMobileIfOpen();
+      },
+      onIntent: () => {
+        preloadSilently(router.preloadRoute({ to: "/scale" }));
       },
     },
     // A host with no video device at all is disabled with a hint instead of bouncing off the root guard.

@@ -288,6 +288,9 @@ const CHAT_ONLY_ALLOWED = new Set([
   // Merging is CPU work: it streams tensors and never needs an accelerator. A chat-only host
   // gets the page at its smaller two-to-three-parent tier instead of bouncing to /chat.
   "/merge",
+  // Expansion loads a checkpoint, so it is CPU work too, and a chat-only host must be able to
+  // read its own refusal reasons instead of being redirected away from them.
+  "/scale",
   // Chat-only hosts serve the API like any other, so the monitor must be reachable there
   // or the overlay's "Expand" and the Settings API card redirect to /chat.
   "/api-monitor",

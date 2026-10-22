@@ -113,9 +113,18 @@ test("a customized version-5 sidebar keeps its order and only gains the rows add
   );
   assert.deepEqual(
     customization.sidebarNav.map((item) => item.id),
-    [...customizedV5.map((item) => item.id), "library", "audio"],
+    [...customizedV5.map((item) => item.id), "library", "audio", "merge", "scale"],
   );
-  assert.equal(customization.sidebarNav.at(-1)?.pinned, false);
+  // Each appended row keeps the default it shipped with.
+  assert.deepEqual(
+    customization.sidebarNav.slice(-4).map((item) => [item.id, item.pinned]),
+    [
+      ["library", true],
+      ["audio", false],
+      ["merge", true],
+      ["scale", true],
+    ],
+  );
 });
 
 test("a user-arranged sidebar survives the migration", () => {
@@ -135,7 +144,15 @@ test("an install sitting on the version-6 default adopts the current layout", ()
   const migrated = migrateShippedSidebarNavDefault(customization, 6, 8);
   assert.deepEqual(migrated.sidebarNav, DEFAULT_CUSTOMIZATION.sidebarNav);
   const ids = migrated.sidebarNav.filter((item) => item.pinned).map((i) => i.id);
-  assert.deepEqual(ids, ["hub", "projects", "library", "images", "train"]);
+  assert.deepEqual(ids, [
+    "hub",
+    "projects",
+    "library",
+    "images",
+    "train",
+    "merge",
+    "scale",
+  ]);
 });
 
 test("an install sitting on the version-7 default gains Library and moves Video to More", () => {
