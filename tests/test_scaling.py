@@ -403,6 +403,16 @@ def test_a_same_compute_baseline_changes_the_label_and_the_table():
     assert result["gpu_hours_expanded"] == 1.5
 
 
+def test_a_single_task_suite_still_clears_the_bar():
+    base, candidate = _tiny(), _tiny()
+    base._scores = {"only": 0.2}
+    candidate._scores = {"only": 0.8}
+    result = scaling.evaluate_pipeline(
+        base, candidate, _scores(base._scores), tokenizer = _FakeTokenizer()
+    )
+    assert result["verdict"] == "better"
+
+
 def test_a_one_task_gain_is_not_better():
     base, candidate = _tiny(), _tiny()
     base._scores = {"a": 0.2, "b": 0.3}

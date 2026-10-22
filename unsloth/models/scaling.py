@@ -603,6 +603,13 @@ def assert_function_preserved(
     ``atol`` defaults to 1e-4 for fp32 and 1e-2 otherwise. A checkpoint that loads is
     not evidence of anything; matching logits is.
 
+    Depth growth is bit-exact (the new block contributes exactly zero) and reports 0.0.
+    Width growth cannot be: the widened ``down_proj`` sums more terms, so float32
+    reassociates the sum and the logits move by roughly 1e-5 of their own magnitude.
+    The working tolerance is therefore ``atol + 1e-5 * max|base logits|`` - strict
+    enough that a block which really does change the function (a diff of order the
+    logit spread) still fails.
+
     On a model too large to hold twice, capture the logits before growing it and pass
     them as ``base_logits`` (with ``base_model=None``): expansion mutates the model in
     place, so the same object cannot serve as both sides of this check.
@@ -646,10 +653,13 @@ def assert_function_preserved(
         expanded_model.train(expanded_was_training)
 
     max_diff = float((base_values - expanded_values).abs().max().item())
-    if not math.isfinite(max_diff) or max_diff > atol:
+    scale = float(base_values.abs().max().item())
+    allowed = atol + 1e-5 * scale
+    if not math.isfinite(max_diff) or max_diff > allowed:
         raise AssertionError(
             f"Expanded model is not function-preserving: max |delta logit| = {max_diff:.3e} "
-            f"> atol {atol:g}. The new blocks must contribute exactly zero at step 0."
+            f"> allowed {allowed:.3e} (atol {atol:g}, logit scale {scale:.3g}). The new "
+            "blocks and channels must contribute zero at step 0."
         )
     return max_diff
 
@@ -954,6 +964,8 @@ def evaluate_pipeline(
 
     * ``better`` - at least ``improved_tasks`` tasks improve by ``improvement_points``,
       no task regresses by more than ``regression_points``, and the mean improves.
+      A run of fewer tasks needs only as many as it has, so a single-task suite can
+      still clear the bar instead of being stuck at ``same`` forever.
     * ``same`` - the mean is within ``same_tolerance_points`` either way, or it
       improved by less than the ``better`` bar.
     * ``worse`` - the mean regresses by more than ``same_tolerance_points``.
@@ -988,7 +1000,8 @@ def evaluate_pipeline(
 
     improved = [name for name, delta in deltas.items() if delta >= improvement_points]
     regressed = [name for name, delta in deltas.items() if delta <= -regression_points]
-    if len(improved) >= improved_tasks and not regressed and mean_delta > 0:
+    required = min(improved_tasks, max(1, len(tasks)))
+    if len(improved) >= required and not regressed and mean_delta > 0:
         verdict = "better"
         reason = (
             f"{len(improved)} task(s) improved by at least {improvement_points:g} pt with no "
@@ -1005,7 +1018,7 @@ def evaluate_pipeline(
     else:
         verdict = "same"
         reason = (
-            f"Mean improved {mean_delta:+.2f} pt, but the bar is {improved_tasks} task(s) up "
+            f"Mean improved {mean_delta:+.2f} pt, but the bar is {required} task(s) up "
             f"{improvement_points:g} pt with no regression over {regression_points:g} pt."
         )
 
