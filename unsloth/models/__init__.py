@@ -36,6 +36,18 @@ except ImportError:
     pass
 from ._utils import is_bfloat16_supported, is_vLLM_available, __version__
 from .rl import PatchFastRL, vLLMSamplingParams
+from .scaling import (
+    GROWTH_FLOOR,
+    assert_function_preserved,
+    cpt_train,
+    default_eval_suite,
+    eval_only,
+    evaluate_pipeline,
+    expand_model,
+    heldout_perplexity_suite,
+    refresh_shard_index,
+    save_expanded_model,
+)
 from .lora_init import patch_peft_calibration_eager as _patch_peft_calibration_eager
 
 _patch_peft_calibration_eager()

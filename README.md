@@ -273,6 +273,34 @@ Install torchao first on Windows: `--torch-backend` looks for it only on the PyT
 See our [Blackwell guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth) and [DGX Spark guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-nvidia-dgx-spark-and-unsloth). <br>
 To install Unsloth on **AMD** and **Intel** GPUs, follow our [AMD Guide](https://unsloth.ai/docs/basics/amd) and [Intel Guide](https://unsloth.ai/docs/get-started/install/intel).
 
+## 🧬 Model expansion (upscale → CPT → eval)
+
+`expand_model`, `cpt_train` and `evaluate_pipeline` are exported from `unsloth`. The pipeline is **expand → CPT → eval**:
+
+```python
+from unsloth import FastLanguageModel, assert_function_preserved, cpt_train, expand_model, save_expanded_model
+
+model, tokenizer = FastLanguageModel.from_pretrained("Qwen/Qwen2.5-1.5B", load_in_4bit = False)
+probe = tokenizer("function-preservation probe", return_tensors = "pt").input_ids
+base_logits = model(input_ids = probe).logits.float().clone()   # before growth, in place
+
+model, report = expand_model(model, target_params = 3.4e9, method = "depth+mlp_width")
+assert_function_preserved(None, model, probe, base_logits = base_logits)
+save_expanded_model(model, tokenizer, "./expanded")
+```
+
+A full runnable script is [scripts/upscale_cpt_eval.py](scripts/upscale_cpt_eval.py). What it does and does not claim:
+
+- **Step 0 logits match the base.** Growth is a warm start, verified numerically rather than assumed; the value of the pipeline is the post-CPT eval delta.
+- **Growth ≥ 2x is enforced by default.** Below it the evidence predicts no capability gain, so a 1.7B → 1.9B run is refused unless `force_small_growth=True` (which sets a warning).
+- **The verdict is `vs base only`** unless a same-compute baseline — the base trained for the same tokens or GPU-hours — is supplied. That is the comparison the growth literature is missing; running it is how you produce the evidence instead of assuming it.
+- **Compute is a number in the report**: `gpu_hours`, `tokens_seen` and `peak_mem_gb` for the expanded run, side by side with the baseline when one was run.
+- **Depth is the default axis** (LLaMA Pro style identity blocks, zeroed `o_proj`/`down_proj`), because depth growth has the best evidence; `mlp_width` widens only `gate_proj`/`up_proj`/`down_proj`, which keeps embeddings, attention and the head intact.
+
+Refused with a clear error: quantized checkpoints (start from fp16/bf16 — the quantization scales encode the old shapes), PEFT-wrapped models (expand first, adapt after) and MoE checkpoints (packed expert tensors need a dedicated path in v1).
+
+Prior art: [LLaMA Pro](https://arxiv.org/html/2401.02415v1) (block expansion), [Stacking Your Transformers](https://arxiv.org/html/2405.15319v2) (depth growth, NeurIPS 2024), [LEMON](https://arxiv.org/html/2310.07999v1), [LiGO](https://arxiv.org/html/2303.00980v1), [`llm-grow`](https://github.com/jianzhnie/llm-grow) and Apple [`ml-hypercloning`](https://github.com/apple-aiml-research/ml-hypercloning).
+
 ## 📒 Free Notebooks
 
 Train for free with our notebooks.
