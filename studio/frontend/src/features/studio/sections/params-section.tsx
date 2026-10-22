@@ -149,10 +149,10 @@ export function ParamsSection({
         {isCora ? (
           <p
             data-testid="cora-params-note"
-            className="rounded-lg border border-teal-500/30 bg-teal-500/5 px-3 py-2 text-ui-11 leading-ui-15 text-muted-foreground"
+            className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-ui-11 leading-ui-15 text-muted-foreground"
           >
-            CoRA fixes the optimizer, schedule, batch, context and adapter size.
-            Edits here are ignored for this method.
+            CoRA runs with its own fixed context length, optimizer, schedule, batch and
+            adapter size, so only the settings it leaves open are shown here.
           </p>
         ) : null}
         <div className="grid grid-cols-1 items-start gap-4 @xl/train-section:grid-cols-2 @xl/train-section:gap-x-6 @xl/train-section:gap-y-5">
@@ -285,7 +285,7 @@ export function ParamsSection({
             </div>
           </div>
 
-          {!store.isDecision && (
+          {!store.isDecision && !isCora && (
             <div className="flex flex-col gap-2">
               <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 {t("studio.params.contextLength")}
@@ -368,6 +368,7 @@ export function ParamsSection({
             </div>
           )}
 
+          {!isCora && (
           <div className="flex flex-col gap-2">
             <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
               {t("studio.params.learningRate")}
@@ -425,6 +426,7 @@ export function ParamsSection({
               className="w-full font-mono"
             />
           </div>
+          )}
 
           {isCpt && (
             <div className="flex flex-col gap-2">

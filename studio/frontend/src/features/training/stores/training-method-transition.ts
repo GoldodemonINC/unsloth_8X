@@ -43,9 +43,22 @@ type TrainingMethodStatePatch = Partial<
   >
 >;
 
-function getCoraTrainingPatch(): TrainingMethodStatePatch {
+/**
+ * CoRA's recipe for this device. A CPU host has neither a bitsandbytes 8-bit optimizer nor the
+ * bitsandbytes quantization LoftQ initialises from, so it gets torch AdamW and plain LoRA; the
+ * adapter shape, schedule, batch and context stay the recipe's own.
+ */
+function coraRecipe(cpu: boolean) {
   return {
     ...CORA_HYPERPARAMS,
+    optimizerType: cpu ? "adamw_torch" : CORA_HYPERPARAMS.optimizerType,
+    loraVariant: cpu ? "lora" : CORA_HYPERPARAMS.loraVariant,
+  } as const;
+}
+
+function getCoraTrainingPatch(cpu: boolean): TrainingMethodStatePatch {
+  return {
+    ...coraRecipe(cpu),
     advanced: {
       ...DEFAULT_ADVANCED_TRAINING,
       qatEnabled: true,
@@ -57,12 +70,12 @@ function getCoraTrainingPatch(): TrainingMethodStatePatch {
 function getRestoreFromCoraPatch(
   state: Pick<TrainingConfigState, "advanced"> &
     Partial<Pick<TrainingConfigState, keyof typeof CORA_HYPERPARAMS>>,
+  cpu: boolean,
 ): TrainingMethodStatePatch {
   const patch: TrainingMethodStatePatch = {};
-  for (const key of Object.keys(CORA_HYPERPARAMS) as Array<
-    keyof typeof CORA_HYPERPARAMS
-  >) {
-    if (state[key] === CORA_HYPERPARAMS[key]) {
+  const recipe = coraRecipe(cpu);
+  for (const key of Object.keys(recipe) as Array<keyof typeof recipe>) {
+    if (state[key] === recipe[key]) {
       Object.assign(patch, { [key]: DEFAULT_HYPERPARAMS[key] });
     }
   }
@@ -190,16 +203,20 @@ export function buildTrainingMethodPatch(
     | "advanced"
   >,
   nextMethod: TrainingMethod,
+  deviceType?: string,
+  cpuOnly = false,
 ): TrainingMethodStatePatch {
   const prevMethod = state.trainingMethod;
   const patch: TrainingMethodStatePatch = { trainingMethod: nextMethod };
   const provenance = { ...state.trainingMethodProvenance };
+  // "cpu" is the legacy deviceType callers used; cpuOnly is the measured compute backend.
+  const cpu = cpuOnly || deviceType === "cpu";
 
   if (prevMethod === "cora" && nextMethod !== "cora") {
-    Object.assign(patch, getRestoreFromCoraPatch(state));
+    Object.assign(patch, getRestoreFromCoraPatch(state, cpu));
   }
   if (prevMethod !== "cora" && nextMethod === "cora") {
-    Object.assign(patch, getCoraTrainingPatch());
+    Object.assign(patch, getCoraTrainingPatch(cpu));
   }
 
   if (prevMethod !== "cpt" && nextMethod === "cpt") {

@@ -3444,6 +3444,8 @@ export const he = {
       hardware: "חומרה",
       vram: "VRAM",
       noGpu: "לא זוהה GPU",
+      cpuWorkspace:
+        "סביבת עבודה CPU: צ'אט, אימון CoRA/QLoRA, ייצוא ומיזוג פועלים כאן. תמונות ווידאו דורשים GPU.",
       hfToken: "טוקן HF",
       saved: "נשמר",
       notSet: "לא הוגדר",
@@ -3538,6 +3540,12 @@ export const he = {
       vramApprox: "כ-{est}GB VRAM",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA למעבד: LoRA רגיל בהקשר של 1k (בסיס 4-bit עם LoftQ על GPU), QAT וקצבי למידה לפי שכבות.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "קוונטיזציה של 4-bit. השימוש הנמוך ביותר ב-VRAM, המהיר ביותר להתחלה.",
@@ -3557,6 +3565,12 @@ export const he = {
         label: "המשך אימון מקדים (CPT)",
         hint: "המשך אימון מקדים עבור תחומים או שפות חדשות.",
         note: "המשך",
+      },
+      rl: {
+        label: "יישור מדיניות / RL",
+        hint:
+          "DPO או GRPO: עיצוב ההתנהגות באמצעות העדפות או ציוני תגמול.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3821,6 +3835,7 @@ export const he = {
       memoryEfficient: "חסכוני בזיכרון",
       weightDecomposed: "פירוק משקולות (Weight-Decomposed)",
       notSupportedAppleSilicon: "אינו נתמך ב-Apple Silicon",
+      notSupportedCpu: "לא נתמך במעבד — בחר CoRA או QLoRA",
       doraNeedsVisionLayersOff: "כבה את אימון שכבות הראייה כדי להשתמש ב-DoRA",
       optimization: "אופטימיזציה",
       schedule: "תזמון",
@@ -3906,6 +3921,9 @@ export const he = {
       duplicateDraftChanged: "הגדרות האימון השתנו במהלך הטעינה. נסה לשכפל שוב.",
       duplicateNoModel: "להרצה זו אין תצורת מודל שמורה.",
       startTraining: "התחל אימון",
+      startSimulated: "התחל הרצה מדומה",
+      simulatedNote:
+        "הרצה מדומה: לא נעשה שימוש ב-GPU, במודל או במערך נתונים, והמדדים נוצרים באופן מלאכותי.",
       starting: "מתחיל...",
       loadingModel: "טוען מודל...",
       checkingDataset: "בודק מערך נתונים...",

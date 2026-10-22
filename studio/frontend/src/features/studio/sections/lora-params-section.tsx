@@ -29,6 +29,7 @@ import { selectableOptionStateClassName } from "./params-section-styles";
 export function LoraParamsSection(): ReactElement | null {
   const t = useT();
   const deviceType = usePlatformStore((state) => state.deviceType);
+  const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
   const store = useTrainingConfigStore(
     useShallow((state) => ({
       trainingMethod: state.trainingMethod,
@@ -84,9 +85,13 @@ export function LoraParamsSection(): ReactElement | null {
               data-testid="cora-lora-note"
               className="text-ui-10p5 leading-ui-14 text-muted-foreground/70"
             >
-              CoRA runs r=8, alpha=24 with LoftQ initialisation.
+              {cpuOnly
+                ? "CoRA runs r=8, alpha=24 as a plain LoRA on this CPU host; LoftQ needs bitsandbytes."
+                : "CoRA runs r=8, alpha=24 with LoftQ initialisation."}
             </p>
           ) : null}
+          {store.trainingMethod !== "cora" && (
+          <>
           <ParamsSliderRow
             label={t("studio.params.rank")}
             tooltip={
@@ -129,6 +134,8 @@ export function LoraParamsSection(): ReactElement | null {
             max={256}
             step={4}
           />
+          </>
+          )}
           <ParamsSliderRow
             label={t("studio.params.dropout")}
             tooltip={
@@ -232,7 +239,7 @@ export function LoraParamsSection(): ReactElement | null {
             </div>
           )}
 
-          {!store.isDecision && (
+          {!store.isDecision && store.trainingMethod !== "cora" && (
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {(
                 [
@@ -263,6 +270,7 @@ export function LoraParamsSection(): ReactElement | null {
                     option.value,
                     store.trainingMethod,
                     deviceType,
+                    cpuOnly,
                   );
                 const needsVisionOff =
                   option.value === "dora" && doraNeedsVisionOff;
@@ -278,7 +286,11 @@ export function LoraParamsSection(): ReactElement | null {
                     <p className="text-xs font-medium">{option.label}</p>
                     <p className="text-ui-10 text-muted-foreground">
                       {unsupportedOnMlx
-                        ? t("studio.params.notSupportedAppleSilicon")
+                        ? t(
+                            cpuOnly
+                              ? "studio.params.notSupportedCpu"
+                              : "studio.params.notSupportedAppleSilicon",
+                          )
                         : needsVisionOff
                           ? t("studio.params.doraNeedsVisionLayersOff")
                           : option.desc}

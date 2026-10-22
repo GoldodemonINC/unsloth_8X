@@ -25,7 +25,7 @@ import json
 import math
 import os
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -369,12 +369,70 @@ def common_target_spec(specs: Sequence[ModelSpec]) -> ModelSpec:
         parameter_count=None,
     )
 
+def choose_template_index(specs: Sequence[ModelSpec]) -> int:
+    """The parent whose architecture the merged checkpoint keeps.
+
+    Weight-space blending can only meet at one shape, and the smallest parent is
+    the one whose dimensions the others can be cropped down to without inventing
+    parameters. The template decides the copied config and tokenizer too, which
+    is what keeps the written tensors and the written config consistent: a
+    per-axis minimum can take a wide model's attention rows and pair them with a
+    narrow model's `head_dim`, which no loader accepts. Ties keep the first.
+    """
+
+    def rank(index: int) -> tuple[float, float, float, float, int]:
+        spec = specs[index]
+        return (
+            spec.hidden_size or math.inf,
+            spec.num_layers or math.inf,
+            spec.intermediate_size or math.inf,
+            spec.vocab_size or math.inf,
+            index,
+        )
+
+    return min(range(len(specs)), key = rank)
+
+
+def _meet_strategy(target: int | None, current: int | None) -> str:
+    if not target or not current or target == current:
+        return "keep"
+    return "crop" if current > target else "pad"
+
+
 def plan_alignment_many(specs: Sequence[ModelSpec]) -> list[AlignmentPlan]:
-    """One plan per parent, every one resolving to the same target shape."""
+    """One plan per parent, every one resolving to the template parent's shape."""
     if not specs:
         raise ValueError("A merge needs at least two checkpoints.")
-    target = common_target_spec(specs)
-    return [plan_alignment(target, spec) for spec in specs]
+    template = specs[choose_template_index(specs)]
+    cross_scale = any(
+        spec.hidden_size != template.hidden_size
+        or spec.num_layers != template.num_layers
+        or spec.intermediate_size != template.intermediate_size
+        or spec.vocab_size != template.vocab_size
+        for spec in specs
+    )
+    scale_warning = (
+        "Cross-scale merge: the smallest parent's architecture is the target, so every wider "
+        "tensor is cropped to it. The output is loadable and internally consistent, but the "
+        "larger parent's extra dimensions are discarded -- evaluate quality before use."
+    )
+    plans: list[AlignmentPlan] = []
+    for spec in specs:
+        pair = plan_alignment(template, spec)
+        plans.append(
+            replace(
+                pair,
+                target_hidden = template.hidden_size or pair.target_hidden,
+                target_layers = template.num_layers or pair.target_layers,
+                target_intermediate = template.intermediate_size or pair.target_intermediate,
+                target_vocab = template.vocab_size or pair.target_vocab,
+                hidden_strategy = _meet_strategy(template.hidden_size, spec.hidden_size),
+                layer_strategy = _meet_strategy(template.num_layers, spec.num_layers),
+                vocab_strategy = _meet_strategy(template.vocab_size, spec.vocab_size),
+                warnings = pair.warnings + ((scale_warning,) if cross_scale else ()),
+            )
+        )
+    return plans
 
 def _resize_axis(array, axis: int, target: int, *, pad_value: float = 0.0):
     """Crop or zero-pad one axis of a numpy array to `target` length."""
@@ -629,24 +687,39 @@ def _to_numpy(tensor):
     """Float32 numpy view of a tensor, torch or numpy."""
     return tensor_io.to_float32(tensor)
 
+# FFN and attention projections carry different axes, and the shape alone cannot tell them
+# apart: Qwen3's q_proj is [heads * head_dim, hidden] with more rows than hidden, which the old
+# shape heuristic mistook for an up_proj and padded to the FFN width.
+_FFN_DOWN_NAMES = ("down_proj", "ffn_down", "fc2", "w2")
+_FFN_UP_NAMES = ("up_proj", "gate_proj", "ffn_up", "ffn_gate", "fc1", "w1", "w3")
+_ATTN_OUT_NAMES = ("o_proj", "out_proj", "attn_output")
+_ATTN_IN_NAMES = ("q_proj", "k_proj", "v_proj", "qkv_proj", "query", "key", "value")
+
+
 def _aligned_shape(shape: Sequence[int], key: str, plan: AlignmentPlan) -> tuple[int, ...]:
     """The shape `_align_for_key` would produce, without touching any data.
 
-    The streaming blend needs this as a predicate: a tensor can be read in row
-    chunks only when alignment leaves its shape alone, because cropping shifts
-    rows and padding invents them.
+    Keyed by projection name, not by which axis happens to equal the hidden size.
     """
     shape = tuple(int(dim) for dim in shape)
+    lowered = key.lower()
+    is_tied = "embed" in lowered or "lm_head" in lowered
     if len(shape) == 1:
-        target = plan.target_vocab if "embed" in key or "lm_head" in key else shape[0]
-        return (target or shape[0],)
-    if len(shape) == 2:
-        rows = plan.target_vocab if ("embed" in key or "lm_head" in key) else shape[0]
-
-        cols = plan.target_hidden or shape[1]
-        if shape[0] < shape[1] and plan.target_intermediate and "down" not in key:
-            rows = plan.target_intermediate
-        return (rows or shape[0], cols or shape[1])
+        return (plan.target_vocab or shape[0],) if is_tied else shape
+    if len(shape) != 2:
+        return shape
+    if is_tied:
+        return (plan.target_vocab or shape[0], plan.target_hidden or shape[1])
+    if "router" in lowered or ".gate." in lowered:
+        return shape
+    if any(name in lowered for name in _FFN_DOWN_NAMES):
+        return (plan.target_hidden or shape[0], plan.target_intermediate or shape[1])
+    if any(name in lowered for name in _FFN_UP_NAMES):
+        return (plan.target_intermediate or shape[0], plan.target_hidden or shape[1])
+    if any(name in lowered for name in _ATTN_OUT_NAMES):
+        return (plan.target_hidden or shape[0], shape[1])
+    if any(name in lowered for name in _ATTN_IN_NAMES):
+        return (shape[0], plan.target_hidden or shape[1])
     return shape
 
 def _align_for_key(array, key: str, plan: AlignmentPlan):
@@ -802,29 +875,26 @@ def _can_stream(
     entries,
     key: str,
     present: Sequence[int],
-    plans: Sequence[AlignmentPlan],
+    target_shape: Sequence[int],
     method: str = "linear",
 ) -> bool:
     """Whether this key can be blended a chunk of rows at a time.
 
     Alignment must be the identity for every owner: cropping shifts rows and
     padding invents them, so a chunk index would no longer mean the same rows in
-    every parent. Equal shapes on disk are exactly that case.
+    every parent. Every parent matching the template shape exactly is that case.
 
     N-way SLERP is the one method that cannot stream, because its running result
     is the tensor the next pair's angle is measured against: the whole result has
     to exist before the fold can continue. Two-parent SLERP is elementwise once
     the global norms are known, and streams like the rest.
     """
-    shapes = {_disk_shape(entries[index], key) for index in present}
-    if len(shapes) != 1:
-        return False
-    shape = shapes.pop()
-    if not shape or shape[0] <= 0:
+    target = tuple(int(dim) for dim in target_shape)
+    if not target or target[0] <= 0:
         return False
     if method == "slerp" and len(present) != 2:
         return False
-    if any(_aligned_shape(shape, key, plans[index]) != shape for index in present):
+    if any(_disk_shape(entries[index], key) != target for index in present):
         return False
     return all(
         tensor_io.is_float_dtype_name(entries[index][key][3]) for index in present
@@ -1064,15 +1134,28 @@ def _stream_blend(entries, key, present, weights, *, method, density, seed):
         return _stream_dare(entries, key, present, weights, density, seed, shape, rows)
     return _stream_linear(entries, key, present, weights, shape, rows)
 
-def _merge_key(entries, key, present, plans, method, normalized, density, seed):
+def _merge_key(
+    entries,
+    key,
+    present,
+    target_shape,
+    template_index,
+    method,
+    normalized,
+    density,
+    seed,
+):
     """One key's merged tensor, plus how it was produced.
 
-    ``streamed`` and ``blended`` are both "averaged"; the split exists so the
-    report can say how much of a merge stayed inside the RAM budget instead of
-    materialising a float32 copy per parent.
+    Every owner is cropped or padded to the template's exact shape, so the result
+    always matches the config and tokenizer copied from that same parent. The
+    template tensor also fixes the output dtype. ``streamed`` and ``blended`` are
+    both "averaged"; the split lets the report say how much stayed inside the RAM
+    budget instead of materialising a float32 copy per parent.
     """
     weights = [normalized[index] for index in present]
-    if len(present) > 1 and _can_stream(entries, key, present, plans, method):
+    template_position = present.index(template_index)
+    if len(present) > 1 and _can_stream(entries, key, present, target_shape, method):
         streamed = _stream_blend(
             entries,
             key,
@@ -1086,15 +1169,17 @@ def _merge_key(entries, key, present, plans, method, normalized, density, seed):
             return streamed, "streamed"
     if len(present) > 1:
         tensors = [_read_tensor(entries[index], key) for index in present]
-        arrays = [tensor_io.to_float32(tensor) for tensor in tensors]
+        template_tensor = tensors[template_position]
+        try:
+            aligned = [
+                align_tensor(tensor_io.to_float32(tensor), target_shape)
+                for tensor in tensors
+            ]
+        except (ValueError, TypeError):
+            return template_tensor, "skipped"
 
-        aligned = [
-            _align_for_key(array, key, plans[index])
-            for array, index in zip(arrays, present)
-        ]
-
-        if all(array.shape == aligned[0].shape for array in aligned) and tensor_io.is_floating(
-            tensors[0]
+        if all(array.shape == tuple(target_shape) for array in aligned) and tensor_io.is_floating(
+            template_tensor
         ):
             return (
                 tensor_io.cast_like(
@@ -1105,12 +1190,12 @@ def _merge_key(entries, key, present, plans, method, normalized, density, seed):
                         density = density,
                         seed = seed,
                     ),
-                    tensors[0],
+                    template_tensor,
                 ),
                 "blended",
             )
 
-        return tensors[0], "skipped"
+        return template_tensor, "skipped"
     return _read_tensor(entries[present[0]], key), "copied"
 
 def shard_budget_bytes(requested: int) -> int:
@@ -1275,6 +1360,49 @@ def check_model_count(count: int, limit: int) -> None:
         f"{MAX_MERGE_MODELS}."
     )
 
+def _verify_merged_against_template(
+    out: Path, template: Mapping[str, _Entry], template_config: dict[str, Any] | None
+) -> None:
+    """Fail the merge unless the written inventory matches the template exactly.
+
+    The config and tokenizer are copied from the template, so one missing, extra
+    or reshaped tensor makes the folder load with random weights or not at all.
+    Reading shard headers costs milliseconds and turns a silently bad merge into
+    a named error before a report calls it completed.
+    """
+    written, _ = _open_state(str(out))
+    expected = {key: entry[2] for key, entry in template.items()}
+    actual = {key: entry[2] for key, entry in written.items()}
+    if expected != actual:
+        missing = sorted(set(expected) - set(actual))[:4]
+        extra = sorted(set(actual) - set(expected))[:4]
+        wrong = sorted(
+            key for key in set(expected) & set(actual) if expected[key] != actual[key]
+        )[:4]
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if extra:
+            details.append("unexpected " + ", ".join(extra))
+        if wrong:
+            details.append("wrong shape " + ", ".join(wrong))
+        raise ValueError(
+            "The merged checkpoint does not match its template parent"
+            + (f" ({'; '.join(details)})" if details else "")
+            + "; refusing to report a checkpoint that would load with mismatched tensors."
+        )
+    if template_config is not None:
+        try:
+            written_config = json.loads((out / "config.json").read_text(encoding = "utf-8"))
+        except (OSError, ValueError) as error:
+            raise ValueError(f"The merged config.json is not readable: {error}") from error
+        if written_config != template_config:
+            raise ValueError(
+                "The merged config.json does not match the template parent's config; "
+                "the weights and the architecture would disagree."
+            )
+
+
 def merge_checkpoints_many(
     sources: Sequence[str],
     output_dir: str,
@@ -1342,7 +1470,7 @@ def merge_checkpoints_many(
     specs = [probe_model_spec(source) for source in resolved]
 
     plans = plan_alignment_many(specs)
-
+    template_index = choose_template_index(specs)
     tokenizer_report = tokenizer_check.check_before_merge(
         resolved, allow_conflict = allow_tokenizer_conflict
     )
@@ -1357,7 +1485,12 @@ def merge_checkpoints_many(
     out = Path(output_dir)
     out.mkdir(parents = True, exist_ok = True)
 
-    keys = sorted(set().union(*(set(entry) for entry in entries)))
+    template_entries = entries[template_index]
+    # The template's inventory, not the union: a key the template does not have has no shape
+    # the copied config can describe, and a deeper parent's extra layers would otherwise be
+    # written while the config declared fewer, leaving the loader to invent the missing ones.
+    keys = sorted(template_entries)
+    dropped_keys = sorted(set().union(*(set(entry) for entry in entries)) - set(keys))
     total_keys = max(len(keys), 1)
     shard: dict[str, Any] = {}
     shard_bytes = 0
@@ -1383,7 +1516,15 @@ def merge_checkpoints_many(
     for position, key in enumerate(keys, start = 1):
         present = [index for index, entry in enumerate(entries) if key in entry]
         merged, status = _merge_key(
-            entries, key, present, plans, method, normalized, density, seed
+            entries,
+            key,
+            present,
+            _disk_shape(template_entries, key),
+            template_index,
+            method,
+            normalized,
+            density,
+            seed,
         )
         if status in ("streamed", "blended"):
             blended += 1
@@ -1421,17 +1562,24 @@ def merge_checkpoints_many(
         json.dumps(index, indent = 2), encoding = "utf-8"
     )
 
+    # The template's own files: its config describes the tensor shapes just written, and its
+    # tokenizer's ids index those embedding rows. Mixing in another parent's tokenizer would
+    # decode the merged vocabulary with the wrong ids.
+    template_source = Path(resolved[template_index])
     for name in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
-        for source in resolved:
-            candidate = Path(source) / name
-            if candidate.is_file():
-                try:
-                    (out / name).write_bytes(candidate.read_bytes())
-                except OSError:
-                    pass
-                break
+        candidate = template_source / name
+        if candidate.is_file():
+            try:
+                (out / name).write_bytes(candidate.read_bytes())
+            except OSError:
+                pass
 
-    output_tokenizer = tokenizer_check.verify_output(out, tokenizer_report.fingerprints[0])
+    _verify_merged_against_template(
+        out, template_entries, _config_from_dir(template_source)
+    )
+    output_tokenizer = tokenizer_check.verify_output(
+        out, tokenizer_report.fingerprints[template_index]
+    )
 
     report_block = {
         "status": "completed",
@@ -1446,6 +1594,11 @@ def merge_checkpoints_many(
         "weight": normalized[1] if count == 2 else None,
         "weights": list(normalized),
         "models": [spec.to_dict() for spec in specs],
+        "template": {
+            "index": template_index,
+            "source": specs[template_index].source,
+            "reason": "smallest architecture; config, tokenizer and tensor shapes come from it",
+        },
         "alignment": plans[1].to_dict() if count > 1 else plans[0].to_dict(),
         "alignments": [plan.to_dict() for plan in plans],
         "tokenizer": {
@@ -1474,10 +1627,12 @@ def merge_checkpoints_many(
             "streamed_tensors": streamed,
             "copied_tensors": copied,
             "skipped_tensors": skipped,
+            "dropped_tensors": len(dropped_keys),
             "shards": shard_index - 1,
             "shard_buffer_bytes": shard_buffer_bytes,
             "total_bytes": total_bytes,
         },
+        "dropped_keys": dropped_keys[:20],
     }
     manifest = run_manifest.build_manifest(
         "merge",
@@ -1489,6 +1644,7 @@ def merge_checkpoints_many(
             "max_shard_bytes": max_shard_bytes,
             "shard_buffer_bytes": shard_buffer_bytes,
             "max_models": model_limit,
+            "template_index": template_index,
             "alignment": plans[1].to_dict() if count > 1 else None,
         },
         seeds={"seed": seed},

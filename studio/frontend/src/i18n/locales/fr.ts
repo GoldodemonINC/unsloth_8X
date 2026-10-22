@@ -3377,6 +3377,8 @@ export const fr = {
       hardware: "Matériel",
       vram: "VRAM",
       noGpu: "Aucun GPU détecté",
+      cpuWorkspace:
+        "Espace de travail CPU : Chat, entraînement CoRA/QLoRA, Export et Merge tournent ici. Images et Vidéo nécessitent un GPU.",
       hfToken: "Token HF",
       saved: "Enregistré",
       notSet: "Non défini",
@@ -3482,6 +3484,12 @@ export const fr = {
       vramTightBadge: "Limite",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA pour CPU : LoRA simple en contexte 1k (base 4 bits avec LoftQ sur GPU), QAT et taux d'apprentissage par couche.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "Quantification 4 bits. VRAM minimale et démarrage le plus rapide.",
@@ -3501,6 +3509,12 @@ export const fr = {
         label: "Pré-entraînement continu",
         hint: "Pré-entraînement continu pour de nouveaux domaines ou de nouvelles langues.",
         note: "continu",
+      },
+      rl: {
+        label: "Alignement de politique / RL",
+        hint:
+          "DPO ou GRPO : façonner le comportement avec des préférences ou des scores de récompense.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3779,6 +3793,7 @@ export const fr = {
       memoryEfficient: "Économe en mémoire",
       weightDecomposed: "Poids décomposés",
       notSupportedAppleSilicon: "Non pris en charge sur Apple Silicon",
+      notSupportedCpu: "Non pris en charge sur CPU — choisissez CoRA ou QLoRA",
       doraNeedsVisionLayersOff: "Désactivez l'entraînement des couches de vision pour utiliser DoRA",
       optimization: "Optimisation",
       schedule: "Planification",
@@ -3869,6 +3884,9 @@ export const fr = {
       duplicateNoModel:
         "Cet entraînement n'a pas de configuration de modèle enregistrée.",
       startTraining: "Démarrer l'entraînement",
+      startSimulated: "Lancer une exécution simulée",
+      simulatedNote:
+        "Exécution simulée : aucun GPU, modèle ni jeu de données n'est utilisé, les métriques sont générées.",
       starting: "Démarrage...",
       loadingModel: "Chargement du modèle...",
       checkingDataset: "Vérification du jeu de données...",

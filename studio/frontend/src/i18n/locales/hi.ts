@@ -3335,6 +3335,8 @@ export const hi = {
       hardware: "हार्डवेयर",
       vram: "VRAM",
       noGpu: "कोई GPU नहीं मिला",
+      cpuWorkspace:
+        "CPU कार्यक्षेत्र: चैट, CoRA/QLoRA प्रशिक्षण, निर्यात और मर्ज यहाँ चलते हैं। इमेज और वीडियो के लिए GPU चाहिए।",
       hfToken: "HF टोकन",
       saved: "सहेजा गया",
       notSet: "सेट नहीं",
@@ -3437,6 +3439,12 @@ export const hi = {
       vramTightBadge: "कम जगह",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "CPU के लिए LoRA: 1k कॉन्टेक्स्ट वाला सामान्य LoRA (GPU पर 4-बिट बेस और LoftQ), QAT और परत-वार लर्निंग रेट।",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-बिट क्वांटाइज़ेशन। सबसे कम VRAM और सबसे तेज़ शुरुआत।",
@@ -3456,6 +3464,12 @@ export const hi = {
         label: "निरंतर प्री-ट्रेनिंग",
         hint: "नए डोमेन या भाषाओं के लिए निरंतर प्री-ट्रेनिंग।",
         note: "निरंतर",
+      },
+      rl: {
+        label: "पॉलिसी अलाइनमेंट / RL",
+        hint:
+          "DPO या GRPO: प्राथमिकताओं या रिवॉर्ड स्कोर से व्यवहार को आकार दें।",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3723,6 +3737,7 @@ export const hi = {
       memoryEfficient: "मेमोरी कुशल",
       weightDecomposed: "भार-विघटित",
       notSupportedAppleSilicon: "Apple Silicon पर समर्थित नहीं",
+      notSupportedCpu: "CPU पर समर्थित नहीं — CoRA या QLoRA चुनें",
       doraNeedsVisionLayersOff: "DoRA उपयोग करने के लिए विज़न लेयर्स ट्रेनिंग बंद करें",
       optimization: "ऑप्टिमाइज़ेशन",
       schedule: "शेड्यूल",
@@ -3808,6 +3823,9 @@ export const hi = {
         "लोड करते समय ट्रेनिंग सेटिंग्स बदल गईं। फिर से डुप्लिकेट करने का प्रयास करें।",
       duplicateNoModel: "इस रन में कोई सहेजा गया मॉडल कॉन्फ़िगरेशन नहीं है।",
       startTraining: "ट्रेनिंग शुरू करें",
+      startSimulated: "सिम्युलेटेड रन शुरू करें",
+      simulatedNote:
+        "एक सिम्युलेटेड रन: कोई GPU, मॉडल या डेटासेट उपयोग नहीं होता, मेट्रिक्स जनरेट किए जाते हैं।",
       starting: "शुरू हो रहा है...",
       loadingModel: "मॉडल लोड हो रहा है...",
       checkingDataset: "डेटासेट जांचा जा रहा है...",

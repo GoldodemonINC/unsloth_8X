@@ -49,7 +49,30 @@ if _dynamo_config is not None and hasattr(_dynamo_config, "recompile_limit"):
 from core.import_guards import ensure_real_packages as _ensure_real_packages
 
 _ensure_real_packages("unsloth_zoo", "unsloth")
-from unsloth import FastLanguageModel, FastVisionModel, is_bfloat16_supported
+
+# Unsloth's import raises on a host with no torch accelerator, and this module is what runs a CPU
+# CoRA job. Keep it importable there; the GPU-only branches below still name these objects and are
+# never reached in CPU mode.
+try:
+    from unsloth import FastLanguageModel, FastVisionModel, is_bfloat16_supported
+    _UNSLOTH_TRAIN_IMPORT_ERROR = None
+except Exception as _unsloth_train_exc:  # noqa: BLE001 - a CPU host is an expected state
+    FastLanguageModel = None
+    FastVisionModel = None
+    _UNSLOTH_TRAIN_IMPORT_ERROR = _unsloth_train_exc
+
+    def is_bfloat16_supported():
+        return False
+
+
+def cpu_training_host() -> bool:
+    """True when there is no torch accelerator, so CoRA trains through transformers + PEFT."""
+    try:
+        from utils.hardware import DeviceType, get_device
+
+        return get_device() == DeviceType.CPU
+    except Exception:
+        return False
 
 import json
 import threading
@@ -560,6 +583,11 @@ class UnslothTrainer:
         self.is_audio_vlm = False
         self._audio_type = None
         self.diffusion_lm_profile = None
+        # Set by load_model on an accelerator-less host: the whole run then uses plain
+        # transformers + PEFT rather than Unsloth's patched loader.
+        self._cpu_training = False
+        # Named recipe from the request ("cora" or "qlora"); a CPU host runs no other preset.
+        self.training_preset = None
         self._use_gradient_checkpointing = "unsloth"
         self._offload_layers = 0
         self._prefetch_depth = 2
@@ -1252,6 +1280,140 @@ class UnslothTrainer:
             "speaker_col": speaker_col,
         }
 
+    def _load_cpu_model(
+        self,
+        model_name: str,
+        *,
+        lookup_name: str,
+        max_seq_length: int,
+        hf_token: Optional[str],
+        trust_remote_code: bool,
+        revision: Optional[str],
+        local_files_only: bool,
+        on_model_resolved: Optional[Callable[[str], None]],
+        actual_model_repo_id: Optional[str],
+        full_finetuning: bool,
+    ) -> bool:
+        """Load a text model for CPU training with stock transformers.
+
+        CoRA and QLoRA are both LoRA recipes, so the base is loaded in fp32 and the adapter is
+        attached by prepare_model_for_training. Unsloth's loaders and patches are not used: they
+        require an accelerator, which is the one thing this host does not have. fp32 rather than
+        bf16 because most CPUs emulate bfloat16 in software, and the run has no autocast to hide
+        that cost -- except when the fp32 weights do not fit in the RAM left on the host: a 1.7B
+        model needs ~7 GB in fp32, which cannot fit beside the OS on an 8 GB machine, while bf16
+        needs half that. PEFT keeps the adapter in fp32, so only the frozen base is bf16. QLoRA's
+        4-bit load is dropped: bitsandbytes has no CPU training kernel, so it trains as a
+        full-precision LoRA here.
+        """
+        if self.is_audio or self.is_audio_vlm or self.is_vlm:
+            raise RuntimeError(
+                "CPU training supports text models only. Choose a text model and dataset for a "
+                "CoRA run, or run vision/audio training on a GPU."
+            )
+        if full_finetuning:
+            raise RuntimeError(
+                "CPU training supports the CoRA LoRA recipe only; a full finetune needs an "
+                "accelerator. Select CoRA as the training method."
+            )
+
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        dtype = torch.float32
+        dtype_note = ""
+        try:
+            import psutil
+
+            from core.training.training import cpu_fp32_weights_fit
+            from utils.hardware.hardware import estimate_fp16_model_size_bytes
+
+            fp16_bytes, size_source = estimate_fp16_model_size_bytes(
+                lookup_name, hf_token = hf_token
+            )
+            # weight_bytes is the size the files already have on disk, which may be fp32: only the
+            # param-count estimates describe a 2-byte-per-parameter model.
+            fp32_bytes = (
+                int(fp16_bytes) * 2
+                if fp16_bytes and size_source != "weight_bytes"
+                else None
+            )
+            available = int(psutil.virtual_memory().available)
+            if fp32_bytes and not cpu_fp32_weights_fit(fp32_bytes, available):
+                dtype = torch.bfloat16
+                dtype_note = "fp32 weights do not fit in RAM, so the base is bf16"
+                logger.warning(
+                    "%s needs about %.1f GB for fp32 weights but only %.1f GB of RAM is "
+                    "available; loading the base in bf16 instead.",
+                    lookup_name,
+                    fp32_bytes / 1024**3,
+                    available / 1024**3,
+                )
+        except Exception as error:  # noqa: BLE001 - a missing estimate keeps the fp32 path
+            logger.debug("CPU weight-size estimate skipped, using fp32: %s", error)
+
+        logger.info(
+            "Loading %s on the CPU for CoRA training (dtype=%s%s, max_seq_length=%s)",
+            lookup_name,
+            dtype,
+            f", {dtype_note}" if dtype_note else "",
+            max_seq_length,
+        )
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            lookup_name,
+            token = hf_token,
+            trust_remote_code = trust_remote_code,
+            revision = revision,
+            local_files_only = local_files_only,
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        model = AutoModelForCausalLM.from_pretrained(
+            lookup_name,
+            dtype = dtype,
+            token = hf_token,
+            trust_remote_code = trust_remote_code,
+            revision = revision,
+            local_files_only = local_files_only,
+            low_cpu_mem_usage = True,
+        )
+        model.config.use_cache = False
+
+        self.model = model
+        self.tokenizer = tokenizer
+        self._cpu_training = True
+        # Nothing is 4-bit on the CPU path, and the adapter metadata must say so.
+        self.load_in_4bit = False
+        self._use_gradient_checkpointing = False
+
+        if on_model_resolved is not None:
+            try:
+                on_model_resolved(lookup_name)
+            except Exception as error:  # noqa: BLE001 - reporting must not fail the load
+                logger.debug("model-load resolution callback failed: %s", error)
+        try:
+            restored_repo_id = restore_hf_cache_repo_identity(
+                model,
+                lookup_name,
+                expected_repo_id = actual_model_repo_id or model_name,
+            )
+            if restored_repo_id:
+                logger.info("Restored Hub model identity for saved adapter metadata: %s", restored_repo_id)
+        except Exception as error:  # noqa: BLE001 - metadata only
+            logger.debug("Could not restore the Hub model identity: %s", error)
+
+        self._update_progress(
+            status_message = (
+                "Model loaded on CPU (CPU training recipe, bf16 base)"
+                if dtype == torch.bfloat16
+                else "Model loaded on CPU (CPU training recipe)"
+            )
+        )
+        logger.info("Model loaded on CPU for CPU training")
+        return True
+
     def load_model(
         self,
         model_name: str,
@@ -1425,6 +1587,27 @@ class UnslothTrainer:
                         logger.error(f"Gated model check failed: {gate_err}")
                         self._update_progress(error = friendly, is_training = False)
                         return False
+
+            if cpu_training_host():
+                preset = (getattr(self, "training_preset", None) or "").strip().lower()
+                if preset not in ("cora", "qlora"):
+                    raise RuntimeError(
+                        "This machine has no GPU, so only CoRA and QLoRA can train here. Select "
+                        "one of those methods; plain LoRA, full finetuning, CPT and RL need an "
+                        "accelerator and would crash here."
+                    )
+                return self._load_cpu_model(
+                    model_name,
+                    lookup_name = lookup_name,
+                    max_seq_length = max_seq_length,
+                    hf_token = hf_token,
+                    trust_remote_code = trust_remote_code,
+                    revision = model_revision,
+                    local_files_only = local_files_only,
+                    on_model_resolved = on_model_resolved,
+                    actual_model_repo_id = actual_model_repo_id,
+                    full_finetuning = full_finetuning,
+                )
 
             device_map = get_device_map(gpu_ids)
             logger.info(
@@ -1839,6 +2022,85 @@ class UnslothTrainer:
         logger.info("LoRA adapters configured successfully\n")
         return True
 
+    def _prepare_cpu_lora(
+        self,
+        target_modules: Optional[list],
+        lora_r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        use_rslora: bool,
+        use_dora: bool,
+        modules_to_save: Optional[list],
+    ) -> bool:
+        """Attach a PEFT adapter to the CPU-loaded base.
+
+        Unsloth's get_peft_model owns kernel selection and 4-bit init, neither of which exists here,
+        so plain PEFT is used with the same rank/alpha/dropout the recipe asked for. LoftQ is not
+        applied: it quantizes through bitsandbytes, which needs CUDA.
+        """
+        try:
+            if getattr(self.model, "peft_config", None):
+                self._update_progress(status_message = "Continuing from existing LoRA adapters")
+                logger.info("Model already carries LoRA adapters; continuing without a new adapter")
+                return True
+
+            # PEFT's dispatch_torchao imports a class torchao 0.18 deleted, and plain LoRA falls
+            # through to it, so get_peft_model would raise on a CPU box that never uses torchao.
+            # Same guard the diffusion paths install; no-op when both classes are present.
+            try:
+                from core.inference.diffusion_torchao_patches import (
+                    install_peft_torchao_dispatch_guard,
+                )
+
+                install_peft_torchao_dispatch_guard()
+            except Exception as guard_error:  # noqa: BLE001 - never block LoRA setup
+                logger.debug("torchao dispatch guard not installed: %s", guard_error)
+
+            from peft import LoraConfig, get_peft_model
+
+            targets = target_modules or [
+                "q_proj",
+                "k_proj",
+                "v_proj",
+                "o_proj",
+                "gate_proj",
+                "up_proj",
+                "down_proj",
+            ]
+            logger.info(
+                "Configuring CPU LoRA (r=%s, alpha=%s, dropout=%s, targets=%s)",
+                lora_r,
+                lora_alpha,
+                lora_dropout,
+                targets,
+            )
+            config = LoraConfig(
+                r = lora_r,
+                lora_alpha = lora_alpha,
+                lora_dropout = lora_dropout,
+                bias = "none",
+                target_modules = targets,
+                use_rslora = use_rslora,
+                use_dora = use_dora,
+                modules_to_save = modules_to_save or None,
+                task_type = "CAUSAL_LM",
+            )
+            self.model = get_peft_model(self.model, config)
+            self.model.train()
+            try:
+                self.model.print_trainable_parameters()
+            except Exception:  # noqa: BLE001 - cosmetic
+                pass
+            self._update_progress(status_message = "LoRA adapters configured (CPU)")
+            return True
+        except Exception as error:
+            logger.error("CPU LoRA setup failed: %s", error)
+            import traceback
+
+            logger.error(traceback.format_exc())
+            self._update_progress(error = f"Could not prepare the CPU LoRA adapter: {error}")
+            return False
+
     def prepare_model_for_training(
         self,
         use_lora: bool = True,
@@ -1880,6 +2142,17 @@ class UnslothTrainer:
                 return True
 
             self._use_gradient_checkpointing = use_gradient_checkpointing
+
+            if getattr(self, "_cpu_training", False):
+                return self._prepare_cpu_lora(
+                    target_modules,
+                    lora_r,
+                    lora_alpha,
+                    lora_dropout,
+                    use_rslora,
+                    use_dora,
+                    modules_to_save,
+                )
 
             # Saved LoRA dirs load as PeftModel via from_pretrained; do not stack a second adapter (#13140).
             if getattr(self.model, "peft_config", None):
@@ -5006,6 +5279,36 @@ class UnslothTrainer:
             if online_decision.enabled:
                 eval_dataset = self._online_eval_dataset
 
+            if getattr(self, "_cpu_training", False):
+                # Stock transformers on a CPU: no fp16/bf16 autocast (unsloth's bf16 probe reads
+                # False here, which would otherwise pick fp16), no bitsandbytes optimizer, no
+                # packing kernels, and no DataLoader worker processes.
+                config_args.update(
+                    {
+                        "fp16": False,
+                        "bf16": False,
+                        "use_cpu": True,
+                        "optim": "adamw_torch",
+                        "packing": False,
+                        "gradient_checkpointing": False,
+                        "dataloader_num_workers": 0,
+                        "dataset_num_proc": 1,
+                    }
+                )
+                # Unpatched TRL names the context field max_length; Unsloth's patched config adds
+                # max_seq_length. Rename rather than pass a kwarg the dataclass does not declare.
+                try:
+                    from trl import SFTConfig as _SFTConfig
+
+                    _fields = getattr(_SFTConfig, "__dataclass_fields__", {})
+                    if "max_seq_length" not in _fields and "max_length" in _fields:
+                        config_args["max_length"] = config_args.pop("max_seq_length")
+                except Exception as _config_error:  # noqa: BLE001 - config construction reports it
+                    logger.debug("CPU SFTConfig field probe failed: %s", _config_error)
+                logger.info(
+                    "CPU training: fp16/bf16 off, optim=adamw_torch, packing off, single-process loader"
+                )
+
             logger.info(f"The configuration is: {config_args}")
 
             logger.info("Training configuration prepared\n")
@@ -5129,9 +5432,11 @@ class UnslothTrainer:
                         trainer_kwargs["eval_dataset"] = eval_dataset
                     self.trainer = _UnslothCPTTrainer(**trainer_kwargs)
                 else:
+                    # TRL renamed `tokenizer` to `processing_class`; the CPU path runs unpatched
+                    # upstream TRL, which rejects the old keyword outright.
                     trainer_kwargs = {
                         "model": self.model,
-                        "tokenizer": sft_tokenizer,
+                        "processing_class": sft_tokenizer,
                         "train_dataset": dataset["dataset"],
                         "data_collator": data_collator,
                         "args": SFTConfig(**config_args),
@@ -5151,6 +5456,14 @@ class UnslothTrainer:
                 if (is_cpt or raw_text_mode or user_labels)
                 else training_args.get("train_on_completions", False)
             )
+            if train_on_responses_enabled and getattr(self, "_cpu_training", False):
+                # unsloth.chat_templates is unavailable without an accelerator; the dataset
+                # formatter already applied the chosen completion handling.
+                logger.warning(
+                    "Train on completions uses Unsloth's response masking, which is unavailable on "
+                    "CPU; the run trains on every token in each formatted sample."
+                )
+                train_on_responses_enabled = False
 
             if is_cpt:
                 logger.info("CPT mode: skipping train_on_responses_only — training on all tokens\n")

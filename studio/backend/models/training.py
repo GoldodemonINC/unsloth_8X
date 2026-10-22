@@ -247,6 +247,11 @@ class TrainingStartRequest(BaseModel):
         ...,
         description = "Training type: LoRA/QLoRA, Full Finetuning, Continued Pretraining, or Policy Alignment",
     )
+    training_preset: Optional[Literal["cora", "qlora"]] = Field(
+        None,
+        description = "Named recipe behind training_type. 'cora' and 'qlora' are the recipes a host "
+        "without an accelerator can run; every other preset is refused there.",
+    )
     advanced: Optional[AdvancedTrainingConfig] = Field(
         None,
         description = "Advanced Studio settings: QAT, curriculum, layer-wise LR, dataset blending, auto-eval, RL.",

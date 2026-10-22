@@ -109,7 +109,9 @@ Unsloth works on **Windows, Linux, WSL** and **macOS**. We support **Multi GPU s
 ### Platform scope
 Unsloth Studio is **three studios** — **Training**, **Merging**, **Export** — with a run layer underneath them (jobs, resource arbitration, run manifests). Merging, MMoE and export are engines inside those studios, not separate headlines.
 
-**On any CPU (8 GB+ available RAM):** merge (streaming), policy alignment, VRAM Fit sharding, structural validation. **Training, RL, QAT, MMoE and benchmarks need a GPU.** Colab covers MMoE and small training runs.
+**CPU is not recommended — use it only if you have no GPU.** On CPU (8 GB+ available RAM) you get **basic merge, slow training, and all recipes**. **A GPU is recommended (8 GB+ VRAM) and gets all features.** Colab covers MMoE and small training runs.
+
+CPU training is limited to the CoRA / QLoRA LoRA recipes on text models: the base loads in fp32 with torch's AdamW, 4-bit and bitsandbytes optimizers are dropped, and runs are far slower than on a GPU. Full fine-tuning, RL, QAT, MMoE and benchmarks still need an accelerator. CPU export covers 16-bit merged models, PEFT adapters and GGUF; 4-bit and compressed-tensor / torchao merges need a GPU.
 
 A CPU merge is **streaming only**: it holds one tensor pair in memory instead of both parents, which is what makes the 8 GB tier real. A full-load merge would not fit and is not offered. The result is written into the folder the Library, Export and Chat scan, so a CPU merge feeds straight into GGUF quantization.
 
@@ -278,6 +280,7 @@ Read our [guide](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide). Ad
 
 | Model | Free Notebooks | Performance | Memory use |
 |-----------|---------|--------|----------|
+| **Unsloth Studio (X8)**      | [▶️ Start for free](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_X8_Colab.ipynb)               | free T4 |  |
 | **Unsloth Studio**      | [▶️ Start for free](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_Colab.ipynb)               |  |  |
 | **Decision model (Qwen3.5-4B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)-Decision.ipynb)               | 1.5x faster | 60% less |
 | **Gemma 4 (E2B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(E2B)-Vision.ipynb)               | 1.5x faster | 50% less |

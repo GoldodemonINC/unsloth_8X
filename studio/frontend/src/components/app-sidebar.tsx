@@ -1380,10 +1380,13 @@ export function AppSidebar() {
   // rows on a measured verdict and let them spin until it lands.
   const capabilitiesUnknown = usePlatformStore((s) => s.capabilitiesUnknown());
   const chatOnlyMeasured = chatOnly && !capabilitiesUnknown;
+  // A CPU-only host can still run CoRA: it trains through transformers + PEFT on the CPU.
+  // Asked of the compute backend (deviceType is the OS), so this matches what the trainer does.
+  const cpuCoraHost = usePlatformStore((s) => s.isCpuTrainingHost());
   // Settings -> Debugging: a simulated run needs no accelerator, so the row a
   // chat-only host greys out has to open for it.
   const simulatedTraining = useDebugTrainingSimulation();
-  const trainBlocked = chatOnlyMeasured && !simulatedTraining;
+  const trainBlocked = chatOnlyMeasured && !simulatedTraining && !cpuCoraHost;
   // Explain a greyed-out Train (chat-only host) on hover. Export stays navigable so its page
   // can show a precise reason.
   const trainDisabledHint: string | undefined = trainBlocked
@@ -1417,6 +1420,13 @@ export function AppSidebar() {
   // Everything without a hint reaches VideoPage, which answers from the backend's video verdict.
   const videoDisabledHint = videoNavHint(chatOnlyMeasured, chatOnlyReason);
   const videoDisabled = videoDisabledHint !== undefined;
+  // Diffusion on a CPU takes minutes per image, so Images is closed rather than offered and
+  // abandoned. The root guard redirects a direct link for the same reason.
+  const cpuOnlyHost = usePlatformStore((s) => s.isCpuOnly());
+  const imagesDisabledHint = cpuOnlyHost
+    ? "Images need a GPU. Generating on a CPU is far too slow to be usable."
+    : undefined;
+  const imagesDisabled = imagesDisabledHint !== undefined;
 
   // Two things can change the verdict after the first /api/health: the backend MLX self-heal
   // (utils/mlx_repair) can reinstall MLX and flip chat_only false without a restart, and detection
@@ -3615,7 +3625,10 @@ export function AppSidebar() {
       label: t("shell.navigation.images"),
       // No "New" pill: the row's trailing slot holds the workflow disclosure instead.
       active: pathname === "/images" || pathname.startsWith("/images/"),
+      disabled: imagesDisabled,
+      tooltip: imagesDisabledHint,
       onClick: () => {
+        if (imagesDisabled) return;
         navigateFromRow({ to: "/images" });
         closeMobileIfOpen();
       },

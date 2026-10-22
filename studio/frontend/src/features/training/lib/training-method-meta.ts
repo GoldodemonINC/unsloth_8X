@@ -26,7 +26,7 @@ export const TRAINING_METHOD_META: Record<TrainingMethod, TrainingMethodMeta> =
       labelKey: "studio.methods.cora.label",
       hintKey: "studio.methods.cora.hint",
       noteKey: "studio.methods.cora.note",
-      dotClass: "bg-teal-500/70",
+      dotClass: "bg-blue-500/70",
     },
     qlora: {
       labelKey: "studio.methods.qlora.label",

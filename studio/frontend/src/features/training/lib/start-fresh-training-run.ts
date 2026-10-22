@@ -281,6 +281,7 @@ export async function startFreshTrainingRun(): Promise<boolean> {
     attempt.config,
     usePlatformStore.getState().deviceType,
     isAccountOwner(),
+    usePlatformStore.getState().isCpuTrainingHost(),
   );
   if (!validation.ok) {
     return attempt.cancel(translate(validation.errorKey));
@@ -562,6 +563,7 @@ async function submitFreshTrainingRun(
       attempt.config,
       usePlatformStore.getState().deviceType,
       isAccountOwner(),
+      usePlatformStore.getState().isCpuTrainingHost(),
     );
     if (!validation.ok) {
       return attempt.cancel(translate(validation.errorKey));

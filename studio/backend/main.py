@@ -2272,6 +2272,13 @@ async def health_check(request: Request):
         except Exception:
             authed["chat_only_hint"] = None
         authed["device_type"] = device_type
+        # What training and export actually run on (cuda/xpu/mlx/cpu), as opposed to the OS above.
+        # The two differ exactly where the CPU paths matter: a CUDA host reports "windows", and a
+        # CPU-only Windows box does too, so the client needs this to tell them apart.
+        try:
+            authed["device_backend"] = _hw_module.get_device().value
+        except Exception:
+            authed["device_backend"] = None
         authed["apple_silicon"] = is_apple_silicon()
         from utils.paths.file_manager import file_manager_kind
 

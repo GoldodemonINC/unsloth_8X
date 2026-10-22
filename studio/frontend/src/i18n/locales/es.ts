@@ -3368,6 +3368,8 @@ export const es = {
       hardware: "Hardware",
       vram: "VRAM",
       noGpu: "No se detectó ninguna GPU",
+      cpuWorkspace:
+        "Espacio de trabajo CPU: Chat, entrenamiento CoRA/QLoRA, Exportación y Merge se ejecutan aquí. Imágenes y Vídeo necesitan una GPU.",
       hfToken: "Token de HF",
       saved: "Guardado",
       notSet: "Sin configurar",
@@ -3471,6 +3473,12 @@ export const es = {
       vramTightBadge: "Ajustado",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA para CPU: LoRA simple con contexto de 1k (base de 4 bits con LoftQ en GPU), QAT y tasas de aprendizaje por capas.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "Cuantización de 4 bits. Menor uso de VRAM y arranque más rápido.",
@@ -3490,6 +3498,12 @@ export const es = {
         label: "Preentrenamiento continuo",
         hint: "Preentrenamiento continuo para nuevos dominios o idiomas.",
         note: "continuo",
+      },
+      rl: {
+        label: "Alineación de política / RL",
+        hint:
+          "DPO o GRPO: moldea el comportamiento con preferencias o puntuaciones de recompensa.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3766,6 +3780,7 @@ export const es = {
       memoryEfficient: "Eficiente en memoria",
       weightDecomposed: "Pesos descompuestos",
       notSupportedAppleSilicon: "No compatible con Apple Silicon",
+      notSupportedCpu: "No compatible con CPU — elige CoRA o QLoRA",
       doraNeedsVisionLayersOff: "Desactiva el entrenamiento de las capas de visión para usar DoRA",
       optimization: "Optimización",
       schedule: "Programación",
@@ -3854,6 +3869,9 @@ export const es = {
       duplicateNoModel:
         "Esta ejecución no tiene una configuración de modelo guardada.",
       startTraining: "Iniciar entrenamiento",
+      startSimulated: "Iniciar ejecución simulada",
+      simulatedNote:
+        "Una ejecución simulada: no se usa GPU, modelo ni dataset, y las métricas se generan.",
       starting: "Iniciando...",
       loadingModel: "Cargando modelo...",
       checkingDataset: "Comprobando conjunto de datos...",

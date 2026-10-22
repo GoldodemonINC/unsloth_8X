@@ -1901,7 +1901,17 @@ def _gpu_present_but_unusable_message(
 
 
 def export_capability() -> dict:
-    """Whether model export can run here, with a torch-aware reason when it cannot. Export runs through Unsloth, which hard-requires an accelerator (it calls ``torch.cuda`` at import and has no CPU path), so it is supported iff ``get_device() in {CUDA, XPU, MLX}``. The reason distinguishes a --no-torch install from a bare-CPU host. Safe to call without torch. Returns {export_supported, export_unsupported_reason, export_unsupported_message, torchao_export_supported}; the last is False where the installed torchao is below 0.15 (transformers refuses it) or, on Windows ROCm, not loadable; the portable FP8/INT8 formats are then hidden."""
+    """Whether model export can run here, with a torch-aware reason when it cannot.
+
+    On an accelerator this uses Unsloth's savers. A CPU-only host with a working torch is also
+    supported: core/export/cpu_export.py merges through transformers + PEFT, saving 16-bit merged,
+    the PEFT adapter and GGUF. Only the accelerator-only formats (4-bit bnb merges, compressed
+    tensors, torchao) stay unavailable there, which ``export_cpu_note`` says. Returns
+    {export_supported, export_unsupported_reason, export_unsupported_message,
+    torchao_export_supported, export_device, export_cpu_only, export_cpu_note}; the torchao flag is
+    False where the installed torchao is below 0.15 (transformers refuses it) or, on Windows ROCm,
+    not loadable, and the portable FP8/INT8 formats are then hidden.
+    """
     device = get_device()
     # get_device() ran detect_hardware(), so IS_ROCM (hip field OR "rocm" tag) is settled.
     _windows_rocm = sys.platform == "win32" and IS_ROCM
@@ -1918,8 +1928,36 @@ def export_capability() -> dict:
             "export_unsupported_reason": None,
             "export_unsupported_message": None,
             "torchao_export_supported": torchao_export_supported,
+            "export_device": "gpu",
+            "export_cpu_only": False,
         }
     verdict = current_chat_only_verdict()
+    # A CPU-only host can still merge a LoRA, save an adapter and convert GGUF: those are weight
+    # operations, run through transformers + PEFT by core/export/cpu_export.py instead of Unsloth's
+    # accelerator-only loaders. Refuse only the states where no runtime exists at all.
+    if (
+        device == DeviceType.CPU
+        and not is_apple_silicon()
+        and verdict[0] not in ("detection_failed", "no_torch")
+        and _has_torch()
+    ):
+        gpu_mismatch = _gpu_present_but_unusable_message("export", verdict)
+        return {
+            "export_supported": True,
+            "export_unsupported_reason": None,
+            "export_unsupported_message": None,
+            # torchao's portable formats quantize through accelerator kernels, so the CPU path
+            # never offers them; a frontend reading only this flag hides them too.
+            "torchao_export_supported": False,
+            "export_device": "cpu",
+            "export_cpu_only": True,
+            "export_cpu_note": (
+                "This host has no usable GPU, so exports run on the CPU: 16-bit merged, PEFT "
+                "adapter and GGUF are available, and take longer than on a GPU. FP8 and 4-bit "
+                "merged formats still need an accelerator."
+                + (f" {gpu_mismatch}" if gpu_mismatch else "")
+            ),
+        }
     # No accelerator: name the blocker. Detection failure first, since the branches below all describe a measured host, so a broken probe would tell a GPU box to install PyTorch.
     if verdict[0] == "detection_failed":
         reason = "detection_failed"

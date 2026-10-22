@@ -45,13 +45,23 @@ export function getTrainingMethodLabel(
 export function isTrainingMethodSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
+  cpuOnly = false,
 ): boolean {
-  return (
-    deviceType !== "mac" ||
-    (trainingMethod !== "cpt" &&
+  // No torch accelerator: CoRA and QLoRA are the two recipes the CPU path runs (both are LoRA
+  // adapters; QLoRA's 4-bit load is dropped there because bitsandbytes has no CPU training
+  // kernel). Full, CPT and RL need Unsloth's GPU loaders and would crash. deviceType stays here
+  // for callers passing the legacy "cpu" value; the real signal is cpuOnly.
+  if (cpuOnly || deviceType === "cpu") {
+    return trainingMethod === "cora" || trainingMethod === "qlora";
+  }
+  if (deviceType === "mac") {
+    return (
+      trainingMethod !== "cpt" &&
       trainingMethod !== "rl" &&
-      trainingMethod !== "cora")
-  );
+      trainingMethod !== "cora"
+    );
+  }
+  return true;
 }
 
 export function isTrainingModelTypeSupportedOnDevice(
@@ -68,9 +78,12 @@ export function isTrainingLoraVariantSupportedOnDevice(
   loraVariant: LoraVariant,
   trainingMethod: TrainingMethod,
   deviceType?: string,
+  cpuOnly = false,
 ): boolean {
   const usesAdapter = isAdapterMethod(trainingMethod);
-  return deviceType !== "mac" || !usesAdapter || loraVariant !== "loftq";
+  if (!usesAdapter || loraVariant !== "loftq") return true;
+  // LoftQ initialises through bitsandbytes, which needs Apple MLX or a CUDA-class accelerator.
+  return !cpuOnly && deviceType !== "mac" && deviceType !== "cpu";
 }
 
 export function parseBackendTrainingMethod(

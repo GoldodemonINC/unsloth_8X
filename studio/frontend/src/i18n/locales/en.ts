@@ -3382,6 +3382,8 @@ export const en = {
       hardware: "Hardware",
       vram: "VRAM",
       noGpu: "No GPU detected",
+      cpuWorkspace:
+        "CPU workspace: Chat, CoRA/QLoRA training, Export and Merge run here. Images and Video need a GPU.",
       hfToken: "HF token",
       saved: "Saved",
       notSet: "Not set",
@@ -3480,7 +3482,7 @@ export const en = {
     methods: {
       cora: {
         label: "CoRA (CPU)",
-        hint: "CPU-first LoRA: 4-bit base, LoftQ init, QAT and layer-wise LRs, 1k context.",
+        hint: "CPU-first LoRA: plain LoRA at 1k context (4-bit base with LoftQ on a GPU), QAT and layer-wise LRs.",
         note: "CPU",
       },
       qlora: {
@@ -3773,6 +3775,7 @@ export const en = {
       memoryEfficient: "Memory Efficient",
       weightDecomposed: "Weight-Decomposed",
       notSupportedAppleSilicon: "Not supported on Apple Silicon",
+      notSupportedCpu: "Not supported on CPU — choose CoRA or QLoRA",
       doraNeedsVisionLayersOff: "Turn off vision layer training to use DoRA",
       optimization: "Optimization",
       schedule: "Schedule",

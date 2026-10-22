@@ -25,8 +25,11 @@ export type StartValidationResult =
 function isTrainingConfigSupportedOnDevice(
   config: TrainingConfigState,
   deviceType?: string,
+  cpuOnly = false,
 ): boolean {
-  if (!isTrainingMethodSupportedOnDevice(config.trainingMethod, deviceType)) {
+  if (
+    !isTrainingMethodSupportedOnDevice(config.trainingMethod, deviceType, cpuOnly)
+  ) {
     return false;
   }
   if (!isTrainingModelTypeSupportedOnDevice(config.modelType, deviceType)) {
@@ -37,6 +40,7 @@ function isTrainingConfigSupportedOnDevice(
       config.loraVariant,
       config.trainingMethod,
       deviceType,
+      cpuOnly,
     )
   ) {
     return false;
@@ -172,6 +176,7 @@ export function validateTrainingConfig(
   config: TrainingConfigState,
   deviceType?: string,
   isOwner = true,
+  cpuOnly = false,
 ): StartValidationResult {
   if (!config.selectedModel) {
     return {
@@ -214,10 +219,13 @@ export function validateTrainingConfig(
     }
   }
 
-  if (!isTrainingConfigSupportedOnDevice(config, deviceType)) {
+  if (!isTrainingConfigSupportedOnDevice(config, deviceType, cpuOnly)) {
     return {
       ok: false,
-      errorKey: "studio.params.notSupportedAppleSilicon",
+      errorKey:
+        cpuOnly || deviceType === "cpu"
+          ? "studio.params.notSupportedCpu"
+          : "studio.params.notSupportedAppleSilicon",
     };
   }
   if (config.modelType === "decision" && !isOwner) {

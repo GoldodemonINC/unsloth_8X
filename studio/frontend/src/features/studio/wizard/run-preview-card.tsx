@@ -6,6 +6,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { usePlatformStore } from "@/config/env";
 import { hfApiToken, ownerOf, useHfTokenStore } from "@/features/hub";
 import {
   TRAINING_METHOD_META,
@@ -383,6 +384,7 @@ export function RunPreviewCard({
   );
 
   const gpu = useGpuInfo();
+  const cpuOnly = usePlatformStore((s) => s.isCpuTrainingHost());
   const hfToken = useHfTokenStore((s) => s.token);
   const hasToken = hfApiToken(hfToken) !== undefined;
   const { isReady, hasModel, hasDataset } = useTrainingReadiness();
@@ -536,6 +538,11 @@ export function RunPreviewCard({
             title={`${gpu.memoryTotalGb} GiB`}
             value={`${Math.round(gpu.memoryTotalGb)} GiB`}
           />
+        )}
+        {cpuOnly && (
+          <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/80">
+            {t("studio.preview.cpuWorkspace")}
+          </p>
         )}
         <MetaRow
           label={t("studio.preview.hfToken")}

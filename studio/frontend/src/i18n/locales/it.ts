@@ -3377,6 +3377,8 @@ export const it = {
       hardware: "Hardware",
       vram: "VRAM",
       noGpu: "Nessuna GPU rilevata",
+      cpuWorkspace:
+        "Spazio di lavoro CPU: Chat, training CoRA/QLoRA, Export e Merge girano qui. Immagini e Video richiedono una GPU.",
       hfToken: "Token HF",
       saved: "Salvato",
       notSet: "Non impostato",
@@ -3482,6 +3484,12 @@ export const it = {
       vramApprox: "~{est} GB di VRAM",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA per CPU: LoRA semplice con contesto da 1k (base a 4 bit con LoftQ su GPU), QAT e learning rate per layer.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "Quantizzazione a 4 bit. VRAM minima e avvio più rapido.",
@@ -3501,6 +3509,12 @@ export const it = {
         label: "Preaddestramento continuato",
         hint: "Preaddestramento continuato per nuovi domini o nuove lingue.",
         note: "continuato",
+      },
+      rl: {
+        label: "Allineamento della policy / RL",
+        hint:
+          "DPO o GRPO: modella il comportamento con preferenze o punteggi di ricompensa.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3716,6 +3730,7 @@ export const it = {
         ariaLabel: "Modalità dei parametri",
       },
       notSupportedAppleSilicon: "Non supportato su Apple Silicon",
+      notSupportedCpu: "Non supportato su CPU — scegli CoRA o QLoRA",
       doraNeedsVisionLayersOff: "Disattiva l'addestramento dei livelli visivi per usare DoRA",
       projectName: "Nome del progetto",
       optional: "Facoltativo",
@@ -3916,6 +3931,9 @@ export const it = {
       duplicateNoModel:
         "Questo run non ha una configurazione del modello salvata.",
       startTraining: "Avvia l'addestramento",
+      startSimulated: "Avvia esecuzione simulata",
+      simulatedNote:
+        "Un'esecuzione simulata: non vengono usati GPU, modello o dataset e le metriche sono generate.",
       starting: "Avvio...",
       loadingModel: "Caricamento del modello...",
       checkingDataset: "Verifica del dataset...",

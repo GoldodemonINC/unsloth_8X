@@ -8,6 +8,7 @@ import {
   LR_DEFAULT_LORA,
 } from "@/config/training";
 import { getHfToken } from "@/features/hub";
+import { usePlatformStore } from "@/config/env";
 import { translate } from "@/i18n";
 import { toast } from "@/lib/toast";
 import { isAdapterMethod } from "@/types/training";
@@ -1287,7 +1288,12 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
         setTrainingMethod: (trainingMethod) => {
           _trainingMethodEditGeneration += 1;
           const state = get();
-          const patch = buildTrainingMethodPatch(state, trainingMethod);
+          const patch = buildTrainingMethodPatch(
+            state,
+            trainingMethod,
+            usePlatformStore.getState().deviceType,
+            usePlatformStore.getState().isCpuTrainingHost(),
+          );
           if (
             state.trainingMethod !== "cpt" &&
             trainingMethod === "cpt" &&

@@ -80,6 +80,7 @@ import { CheckpointSplitterCard } from "@/features/advanced/components/checkpoin
 import { StudioModeNav } from "@/features/studio/studio-mode-nav";
 import { QuantPicker } from "./components/quant-picker";
 import {
+  CPU_UNSUPPORTED_GGUF_QUANTS,
   EXPORT_METHODS,
   type ExportMethod,
   GUIDE_STEPS,
@@ -265,12 +266,19 @@ export function ExportPage() {
         // compressed-tensors (llm-compressor) is the NVIDIA path; shown only on an NVIDIA GPU.
         if (f.backend === "compressed") return hasNvidia;
         // Portable torchao is the fallback for hosts without the NVIDIA compressed path. Hidden on
-        // NVIDIA (use compressed-tensors), macOS/MLX (rejected) and where torchao cannot load.
-        if (f.backend === "torchao") return !hasNvidia && !isMacHost && !torchaoUnavailable;
+        // NVIDIA (use compressed-tensors), macOS/MLX (rejected), CPU-only hosts (needs an
+        // accelerator to quantize) and where torchao cannot load.
+        if (f.backend === "torchao")
+          return (
+            !hasNvidia &&
+            !isMacHost &&
+            !torchaoUnavailable &&
+            !hardware.exportCpuOnly
+          );
         // Plain 16-bit is available everywhere.
         return true;
       }),
-    [hasNvidia, isMacHost, torchaoUnavailable],
+    [hasNvidia, isMacHost, torchaoUnavailable, hardware.exportCpuOnly],
   );
   const toggleFormat = useCallback((value: string) => {
     setSelectedFormats((prev) =>
@@ -286,6 +294,20 @@ export function ExportPage() {
       return next.length === prev.length ? prev : next;
     });
   }, [availableFormats, hardware.loaded]);
+  // The CPU converter produces every normal quant but not the IQ types (no imatrix fetch) or
+  // Unsloth's Q2_K_L rewrite, so those pills are not offered on a CPU-only host.
+  const quantOptions = useMemo(
+    () =>
+      hardware.exportCpuOnly
+        ? QUANT_OPTIONS.filter(
+            (option) =>
+              !CPU_UNSUPPORTED_GGUF_QUANTS.includes(
+                option.value as (typeof CPU_UNSUPPORTED_GGUF_QUANTS)[number],
+              ),
+          )
+        : QUANT_OPTIONS,
+    [hardware.exportCpuOnly],
+  );
   // IQ quants are imatrix-only: force imatrix on when one is selected, else llama.cpp rejects it.
   const requiresImatrix = quantLevels.some(
     (q) => QUANT_OPTIONS.find((o) => o.value === q)?.imatrix,
@@ -1561,6 +1583,14 @@ export function ExportPage() {
                   </AlertDescription>
                 </Alert>
               )}
+              {hardware.loaded &&
+                hardware.exportSupported !== false &&
+                hardware.exportCpuOnly &&
+                hardware.exportCpuNote && (
+                  <div className="rounded-md border border-amber-500/35 bg-amber-500/10 px-3 py-2 text-ui-12 text-amber-700 dark:text-amber-300">
+                    {hardware.exportCpuNote}
+                  </div>
+                )}
 
               <MethodPicker
                 value={exportMethod}
@@ -1943,6 +1973,7 @@ export function ExportPage() {
                         value={quantLevels}
                         onChange={setQuantLevels}
                         sizes={quantSizeLabels}
+                        options={quantOptions}
                       />
                       <div className="flex items-center justify-between gap-3 rounded-lg border p-3">
                         <div className="space-y-0.5">

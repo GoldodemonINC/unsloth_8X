@@ -29,12 +29,17 @@ export interface HardwareInfo {
     unsloth: string | null;
     llamaCpp: string | null;
     audioCpp: string | null;
-    // Whether export can run here (true only on a supported accelerator), with a torch-aware
-    // reason. `null` until the authoritative response lands, so callers don't briefly enable
-    // export; `loaded` flips true once a real (non-error) response arrives.
+    // Whether export can run here (on an accelerator, or on a CPU-only host through the
+    // transformers + PEFT path), with a torch-aware reason when it cannot. `null` until the
+    // authoritative response lands, so callers don't briefly enable export; `loaded` flips true
+    // once a real (non-error) response arrives.
     exportSupported: boolean | null;
     exportUnsupportedReason: string | null;
     exportUnsupportedMessage: string | null;
+    // True when export runs through the CPU path (no usable accelerator): merged 16-bit, PEFT
+    // adapter and GGUF only. `exportCpuNote` carries the backend's explanation to show in the UI.
+    exportCpuOnly: boolean;
+    exportCpuNote: string | null;
     // False only on Windows ROCm without a loadable torchao; absent from older backends = true.
     torchaoExportSupported: boolean;
     // Whether video generation can run here. Same tri-state as export: `null` until the
@@ -62,6 +67,8 @@ const DEFAULT: HardwareInfo = {
     exportSupported: null,
     exportUnsupportedReason: null,
     exportUnsupportedMessage: null,
+    exportCpuOnly: false,
+    exportCpuNote: null,
     torchaoExportSupported: true,
     videoSupported: null,
     videoUnsupportedReason: null,
@@ -124,6 +131,8 @@ async function fetchOnce(): Promise<HardwareInfo> {
                 exportSupported: data?.export_supported ?? null,
                 exportUnsupportedReason: data?.export_unsupported_reason ?? null,
                 exportUnsupportedMessage: data?.export_unsupported_message ?? null,
+                exportCpuOnly: data?.export_cpu_only === true,
+                exportCpuNote: data?.export_cpu_note ?? null,
                 torchaoExportSupported: data?.torchao_export_supported ?? true,
                 videoSupported: data?.video_supported ?? null,
                 videoUnsupportedReason: data?.video_unsupported_reason ?? null,

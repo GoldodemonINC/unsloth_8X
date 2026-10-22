@@ -19,6 +19,7 @@ const { buildTrainingMethodPatch } = await import(
 );
 const {
   getTrainingMethodLabel,
+  isTrainingLoraVariantSupportedOnDevice,
   isTrainingMethodSupportedOnDevice,
   toBackendTrainingType,
 } = await import("../src/features/training/lib/training-methods.ts");
@@ -116,10 +117,75 @@ test("CoRA records as LoRA/QLoRA and labels itself", () => {
   assert.equal(getTrainingMethodLabel("cora"), "CoRA");
 });
 
-test("CoRA is offered on CPU hosts but not on Apple MLX", () => {
+test("CoRA and QLoRA are the only methods a CPU host offers", () => {
   assert.equal(isTrainingMethodSupportedOnDevice("cora", "cuda"), true);
   assert.equal(isTrainingMethodSupportedOnDevice("cora", "cpu"), true);
   assert.equal(isTrainingMethodSupportedOnDevice("cora", "mac"), false);
+  // Both are LoRA adapters. The rest need Unsloth's GPU loaders and would crash on CPU.
+  assert.equal(isTrainingMethodSupportedOnDevice("qlora", "cpu"), true);
+  assert.equal(isTrainingMethodSupportedOnDevice("lora", "cpu"), false);
+  assert.equal(isTrainingMethodSupportedOnDevice("full", "cpu"), false);
+  assert.equal(isTrainingMethodSupportedOnDevice("cpt", "cpu"), false);
+  assert.equal(isTrainingMethodSupportedOnDevice("qlora", "cuda"), true);
+});
+
+test("a measured CPU backend decides, whatever the OS is called", () => {
+  // deviceType is the OS ("windows", "linux"), so the compute backend is the third argument.
+  assert.equal(isTrainingMethodSupportedOnDevice("cora", "windows", true), true);
+  assert.equal(isTrainingMethodSupportedOnDevice("qlora", "windows", true), true);
+  assert.equal(isTrainingMethodSupportedOnDevice("lora", "windows", true), false);
+  assert.equal(isTrainingMethodSupportedOnDevice("qlora", "windows", false), true);
+  assert.equal(
+    isTrainingLoraVariantSupportedOnDevice("loftq", "cora", "linux", true),
+    false,
+  );
+  assert.equal(
+    isTrainingLoraVariantSupportedOnDevice("loftq", "cora", "linux", false),
+    true,
+  );
+});
+
+test("CoRA's CPU recipe drops the bitsandbytes pieces", () => {
+  const patch = buildTrainingMethodPatch(state("qlora") as never, "cora", "cpu");
+
+  assert.equal(patch.trainingMethod, "cora");
+  assert.equal(patch.optimizerType, "adamw_torch");
+  assert.equal(patch.loraVariant, "lora");
+  assert.equal(patch.loraRank, CORA_HYPERPARAMS.loraRank);
+  assert.equal(patch.loraAlpha, CORA_HYPERPARAMS.loraAlpha);
+  assert.equal(patch.batchSize, 1);
+  assert.equal(patch.gradientAccumulation, 3);
+  assert.equal(patch.contextLength, 1024);
+  assert.equal(patch.learningRate, CORA_HYPERPARAMS.learningRate);
+  assert.equal(patch.advanced?.qatEnabled, true);
+  assert.equal(patch.advanced?.layerLrEnabled, true);
+
+  // A GPU host keeps the recipe's own optimizer and LoftQ initialisation.
+  const gpu = buildTrainingMethodPatch(state("qlora") as never, "cora", "cuda");
+  assert.equal(gpu.optimizerType, CORA_HYPERPARAMS.optimizerType);
+  assert.equal(gpu.loraVariant, CORA_HYPERPARAMS.loraVariant);
+});
+
+test("leaving a CPU CoRA run restores the knobs its recipe set", () => {
+  const cpuRecipe = buildTrainingMethodPatch(
+    state("qlora") as never,
+    "cora",
+    "cpu",
+  );
+  const coraState = {
+    ...state("cora"),
+    ...cpuRecipe,
+    advanced: {
+      ...DEFAULT_ADVANCED_TRAINING,
+      qatEnabled: true,
+      layerLrEnabled: true,
+    },
+  };
+  const patch = buildTrainingMethodPatch(coraState as never, "qlora", "cpu");
+
+  assert.equal(patch.optimizerType, "adamw_8bit");
+  assert.equal(patch.loraVariant, "lora");
+  assert.equal(patch.batchSize, 4);
 });
 
 test("the CoRA dataset window is 10 MB to 0.8 GB", () => {

@@ -3262,6 +3262,8 @@ export const zhCN = {
       hardware: "硬件",
       vram: "VRAM",
       noGpu: "未检测到 GPU",
+      cpuWorkspace:
+        "CPU 工作区：聊天、CoRA/QLoRA 训练、导出和合并可在此运行。图像和视频需要 GPU。",
       hfToken: "HF token",
       saved: "已保存",
       notSet: "未设置",
@@ -3355,6 +3357,12 @@ export const zhCN = {
       vramTightBadge: "显存吃紧",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "面向 CPU 的 LoRA：1k 上下文的普通 LoRA（在 GPU 上使用 4 位基座与 LoftQ）、QAT 和分层学习率。",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4 位量化。VRAM 占用最低，启动最快。",
@@ -3374,6 +3382,12 @@ export const zhCN = {
         label: "持续预训练",
         hint: "针对新领域或新语言继续进行预训练。",
         note: "持续",
+      },
+      rl: {
+        label: "策略对齐 / RL",
+        hint:
+          "DPO 或 GRPO：通过偏好或奖励分数调整行为。",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3628,6 +3642,7 @@ export const zhCN = {
       memoryEfficient: "节省内存",
       weightDecomposed: "权重分解",
       notSupportedAppleSilicon: "Apple 芯片暂不支持",
+      notSupportedCpu: "CPU 暂不支持 — 请选择 CoRA 或 QLoRA",
       doraNeedsVisionLayersOff: "关闭视觉层训练以使用 DoRA",
       optimization: "优化",
       schedule: "计划",
@@ -3709,6 +3724,9 @@ export const zhCN = {
       duplicateDraftChanged: "加载期间训练设置已发生变化，请重新创建副本。",
       duplicateNoModel: "此运行没有已保存的模型配置。",
       startTraining: "开始训练",
+      startSimulated: "启动模拟运行",
+      simulatedNote:
+        "模拟运行：不使用 GPU、模型或数据集，指标为生成结果。",
       starting: "启动中...",
       loadingModel: "正在加载模型...",
       checkingDataset: "正在检查数据集...",

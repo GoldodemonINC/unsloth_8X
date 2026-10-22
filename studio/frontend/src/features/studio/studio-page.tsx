@@ -75,6 +75,9 @@ export function StudioPage(): ReactElement {
   // Unknown until /api/health reports; see the showTrainingHydrating note below.
   const capabilitiesUnknown = usePlatformStore((s) => s.capabilitiesUnknown());
   const chatOnly = usePlatformStore((s) => s.isChatOnly());
+  // CPU-only hosts stay: CoRA is the method that runs there (transformers + PEFT). The compute
+  // backend, not deviceType (the OS), says whether this host has an accelerator.
+  const cpuCoraHost = usePlatformStore((s) => s.isCpuTrainingHost());
   const navigate = useNavigate();
   // Settings -> Debugging: a simulated run needs no accelerator, so the page
   // this host would otherwise be turned away from stays open for it.
@@ -82,9 +85,10 @@ export function StudioPage(): ReactElement {
   // Once the verdict lands and it really is chat-only, leave: the guard let this load on the
   // guess, so without this a chat-only host would sit on a Train page it cannot use.
   useEffect(() => {
-    if (capabilitiesUnknown || !chatOnly || simulatedTraining) return;
+    if (capabilitiesUnknown || !chatOnly || simulatedTraining || cpuCoraHost)
+      return;
     void navigate({ to: "/chat", replace: true });
-  }, [capabilitiesUnknown, chatOnly, simulatedTraining, navigate]);
+  }, [capabilitiesUnknown, chatOnly, simulatedTraining, cpuCoraHost, navigate]);
   const hfToken = useHfTokenStore((s) => s.token);
   const selectedModel = useTrainingConfigStore((s) => s.selectedModel);
   const ensureModelDefaultsLoaded = useTrainingConfigStore(

@@ -32,6 +32,10 @@ export type FileManager = "finder" | "explorer" | "files" | null;
 
 interface PlatformState {
   deviceType: DeviceType;
+  // What compute training and export run on ("cpu" | "cuda" | "xpu" | "mlx"), from /api/health.
+  // deviceType is the OS, so the two differ on every Windows/Linux box: a CPU-only host and a
+  // CUDA host both report "windows". null until a measured, authed verdict lands.
+  deviceBackend: string | null;
   // Unified memory: GPU and system draw on one pool, so an over-committed load has
   // nowhere to spill and takes the machine down rather than failing. Narrower than
   // deviceType === "mac", which includes Intel Macs with a discrete GPU, where spilling
@@ -53,6 +57,11 @@ interface PlatformState {
   // torch-warm kill switch defers detection to first use; the sidebar polls.
   detectionDeferred: boolean;
   isChatOnly: () => boolean;
+  // No torch accelerator: only the CPU-capable paths exist (CoRA, CPU export, merging).
+  isCpuOnly: () => boolean;
+  // A measured CPU-only verdict (not an Intel Mac, not a broken GPU build): the one state where
+  // CoRA's transformers + PEFT path applies. Intel Macs report "intel_mac" and stay gated.
+  isCpuTrainingHost: () => boolean;
   // true until /api/health returns a verdict; guesses cannot gate features.
   capabilitiesUnknown: () => boolean;
 }
@@ -70,6 +79,7 @@ const localDeviceType = detectLocalPlatform();
 
 export const usePlatformStore = create<PlatformState>()((_, get) => ({
   deviceType: localDeviceType,
+  deviceBackend: null,
   appleSilicon: false,
   fileManager: undefined,
   // user-agent guess for redirects; capability gates await the server.
@@ -84,6 +94,9 @@ export const usePlatformStore = create<PlatformState>()((_, get) => ({
   fetched: false,
   detectionDeferred: false,
   isChatOnly: () => get().chatOnly,
+  isCpuOnly: () => get().deviceBackend === "cpu",
+  isCpuTrainingHost: () =>
+    get().deviceBackend === "cpu" && get().chatOnlyReason === "no_gpu",
   // deferred detection is settled because no verdict will arrive this session.
   capabilitiesUnknown: () => {
     const state = get();
@@ -159,6 +172,7 @@ export async function fetchDeviceType(options?: {
     if (res.ok) {
       const data = (await res.json()) as {
         device_type?: string;
+        device_backend?: string | null;
         apple_silicon?: boolean;
         file_manager?: FileManager;
         chat_only?: boolean;
@@ -210,6 +224,10 @@ export async function fetchDeviceType(options?: {
       // on an Intel Mac, and on a Mac browser pointed at a Linux host.
       const appleSilicon =
         data.apple_silicon ?? (keepPlatform ? previous.appleSilicon : false);
+      // Same terms as device_type: a provisional or unauthenticated reply carries neither, and a
+      // browser guess cannot know what torch found.
+      const deviceBackend =
+        data.device_backend ?? (keepPlatform ? previous.deviceBackend : null);
       const fileManager =
         data.device_type !== undefined
           ? data.file_manager
@@ -224,6 +242,7 @@ export async function fetchDeviceType(options?: {
       // SSH); keeping fetched=false retries once a token exists.
       usePlatformStore.setState({
         deviceType,
+        deviceBackend,
         appleSilicon,
         fileManager,
         chatOnly,

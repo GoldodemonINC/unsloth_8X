@@ -465,7 +465,7 @@ _FEATURES = (
         "label": "Training",
         "cpu": False,
         "gpu": True,
-        "note": "CPU is orchestration only: no CPU training path exists.",
+        "note": "Recipes here need a GPU. The studio's CoRA method is the one recipe with a CPU path.",
     },
     {
         "key": "moe",

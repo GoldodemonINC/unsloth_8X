@@ -4820,6 +4820,8 @@ def run_training_process(*, event_queue: Any, stop_queue: Any, config: dict) -> 
         return
 
     trainer = UnslothTrainer()
+    # The named recipe behind training_type; a CPU host accepts only "cora".
+    trainer.training_preset = config.get("training_preset")
 
     trainer.add_progress_callback(_create_trainer_progress_callback(event_queue))
 

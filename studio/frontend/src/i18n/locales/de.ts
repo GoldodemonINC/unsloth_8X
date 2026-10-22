@@ -3375,6 +3375,8 @@ export const de = {
       hardware: "Hardware",
       vram: "VRAM",
       noGpu: "Keine GPU erkannt",
+      cpuWorkspace:
+        "CPU-Arbeitsbereich: Chat, CoRA/QLoRA-Training, Export und Merge laufen hier. Bilder und Video brauchen eine GPU.",
       hfToken: "HF-Token",
       saved: "Gespeichert",
       notSet: "Nicht festgelegt",
@@ -3478,6 +3480,12 @@ export const de = {
       vramTightBadge: "Knapp",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA für die CPU: einfaches LoRA mit 1k-Kontext (4-Bit-Basis mit LoftQ auf einer GPU), QAT und schichtweise Lernraten.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-Bit-Quantisierung. Niedrigster VRAM-Bedarf, schnellster Start.",
@@ -3497,6 +3505,12 @@ export const de = {
         label: "Continued Pretraining",
         hint: "Fortgesetztes Vortraining für neue Domänen oder Sprachen.",
         note: "fortgesetzt",
+      },
+      rl: {
+        label: "Policy Alignment / RL",
+        hint:
+          "DPO oder GRPO: Verhalten über Präferenzen oder Belohnungswerte formen.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3770,6 +3784,7 @@ export const de = {
       memoryEfficient: "Speichereffizient",
       weightDecomposed: "Gewichtszerlegt",
       notSupportedAppleSilicon: "Auf Apple Silicon nicht unterstützt",
+      notSupportedCpu: "Auf der CPU nicht unterstützt — wähle CoRA oder QLoRA",
       doraNeedsVisionLayersOff: "Training der Vision-Schichten deaktivieren, um DoRA zu nutzen",
       optimization: "Optimierung",
       schedule: "Zeitplan",
@@ -3859,6 +3874,9 @@ export const de = {
       duplicateNoModel:
         "Für diesen Lauf ist keine Modellkonfiguration gespeichert.",
       startTraining: "Training starten",
+      startSimulated: "Simulierten Lauf starten",
+      simulatedNote:
+        "Ein simulierter Lauf: Es werden weder GPU, Modell noch Datensatz verwendet, die Metriken werden erzeugt.",
       starting: "Wird gestartet...",
       loadingModel: "Modell wird geladen...",
       checkingDataset: "Datensatz wird geprüft...",

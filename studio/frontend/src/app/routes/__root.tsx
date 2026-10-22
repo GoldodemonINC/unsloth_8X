@@ -326,8 +326,22 @@ export const Route = createRootRoute({
     // Fetch platform info before the chat-only guard. fetchDeviceType caches,
     // so later navigations are instant.
     await fetchDeviceType();
-    const { isChatOnly, capabilitiesUnknown } = usePlatformStore.getState();
+    const { isChatOnly, capabilitiesUnknown, isCpuTrainingHost } =
+      usePlatformStore.getState();
+    // Images is diffusion work: a CPU generates one picture in minutes, so the page is closed
+    // there rather than mounted and abandoned. Checked after detection, so an unknown backend
+    // never bounces a GPU host.
+    const onImages =
+      location.pathname === "/images" ||
+      location.pathname.startsWith("/images/");
+    if (onImages && usePlatformStore.getState().isCpuOnly()) {
+      throw redirect({ to: "/chat" });
+    }
     const unmeasured = capabilitiesUnknown();
+    // A CPU-only host runs CoRA through the transformers + PEFT path, so Train stays reachable
+    // there; the method picker offers CoRA alone and the backend refuses the other presets.
+    // deviceType is the OS, so this asks the compute backend /api/health reports instead.
+    const cpuCoraHost = isCpuTrainingHost();
     // Settings -> Debugging: simulated runs need no GPU, so a chat-only host
     // can still open Training. Read it before the guard, not in a component,
     // because this redirect runs first. A failed read keeps the host gated.
@@ -346,6 +360,7 @@ export const Route = createRootRoute({
     if (
       isChatOnly() &&
       !isChatOnlyAllowed(location.pathname) &&
+      !cpuCoraHost &&
       !simulatedTraining &&
       !(unmeasured && waitsOutUnknownVerdict(location.pathname))
     ) {
@@ -383,8 +398,10 @@ function RootLayout() {
   );
   // Settings -> Debugging keeps Train reachable: a simulated run needs no GPU.
   const simulatedTraining = useDebugTrainingSimulation();
-  const trainBlocked = chatOnlyMeasured && !simulatedTraining;
   const chatOnlyReason = usePlatformStore((s) => s.chatOnlyReason);
+  const cpuCoraHost = usePlatformStore((s) => s.isCpuTrainingHost());
+  const trainBlocked =
+    chatOnlyMeasured && !simulatedTraining && !cpuCoraHost;
   // Video is the other row the sidebar grays out, on the two verdicts its pipelines cannot run on
   // at all. Same hint the row reads, so the two cannot disagree about which hosts they are.
   const videoDisabled =

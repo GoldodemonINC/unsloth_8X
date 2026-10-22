@@ -3290,6 +3290,8 @@ export const ja = {
       hardware: "ハードウェア",
       vram: "VRAM",
       noGpu: "GPU が検出されませんでした",
+      cpuWorkspace:
+        "CPU ワークスペース: チャット、CoRA/QLoRA 学習、エクスポート、マージはここで動作します。画像と動画には GPU が必要です。",
       hfToken: "HF トークン",
       saved: "保存済み",
       notSet: "未設定",
@@ -3393,6 +3395,12 @@ export const ja = {
       vramTightBadge: "ギリギリ",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "CPU 向け LoRA：1k コンテキストの通常の LoRA（GPU では 4-bit ベースと LoftQ）、QAT、レイヤーごとの学習率。",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-bit 量子化。VRAM 使用量が最も少なく、起動も最速です。",
@@ -3413,6 +3421,12 @@ export const ja = {
         label: "継続事前学習",
         hint: "新しいドメインや言語向けに事前学習を継続します。",
         note: "継続",
+      },
+      rl: {
+        label: "ポリシーアラインメント / RL",
+        hint:
+          "DPO または GRPO：選好や報酬スコアで挙動を調整します。",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3670,6 +3684,7 @@ export const ja = {
       memoryEfficient: "メモリ効率化",
       weightDecomposed: "重み分解",
       notSupportedAppleSilicon: "Apple Silicon ではサポートされていません",
+      notSupportedCpu: "CPU では非対応 — CoRA または QLoRA を選択してください",
       doraNeedsVisionLayersOff: "DoRA を使うにはビジョンレイヤーの学習をオフにしてください",
       optimization: "最適化",
       schedule: "スケジュール",
@@ -3747,6 +3762,9 @@ export const ja = {
       duplicateDraftChanged: "読み込み中にトレーニング設定が変更されました。もう一度複製してください。",
       duplicateNoModel: "この実行には保存されたモデル構成がありません。",
       startTraining: "トレーニング開始",
+      startSimulated: "シミュレーション実行を開始",
+      simulatedNote:
+        "シミュレーション実行：GPU・モデル・データセットは使用せず、指標は生成されます。",
       starting: "開始中...",
       loadingModel: "モデルを読み込み中...",
       checkingDataset: "データセットを確認中...",

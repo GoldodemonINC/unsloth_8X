@@ -3554,6 +3554,8 @@ export const sv = {
       hardware: "Maskinvara",
       vram: "VRAM",
       noGpu: "Ingen GPU upptäcktes",
+      cpuWorkspace:
+        "CPU-arbetsyta: chatt, CoRA/QLoRA-träning, export och merge körs här. Bilder och video kräver ett GPU.",
       hfToken: "HF-token",
       saved: "Sparad",
       notSet: "Inte angiven",
@@ -3655,6 +3657,12 @@ export const sv = {
       vramApprox: "~{est} GB VRAM",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA för CPU: vanlig LoRA med 1k-kontext (4-bitars bas med LoftQ på GPU), QAT och lagervisa inlärningsfrekvenser.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-bitarskvantisering. Lägst VRAM-behov och snabbast att starta.",
@@ -3674,6 +3682,12 @@ export const sv = {
         label: "Fortsatt förträning",
         hint: "Fortsatt förträning för nya domäner eller språk.",
         note: "fortsatt",
+      },
+      rl: {
+        label: "Policyjustering / RL",
+        hint:
+          "DPO eller GRPO: forma beteendet med preferenser eller belöningspoäng.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3945,6 +3959,7 @@ export const sv = {
       memoryEfficient: "Minneseffektiv",
       weightDecomposed: "Viktdekomponerad",
       notSupportedAppleSilicon: "Stöds inte på Apple Silicon",
+      notSupportedCpu: "Stöds inte på CPU — välj CoRA eller QLoRA",
       doraNeedsVisionLayersOff:
         "Stäng av träning av visionslager för att använda DoRA",
       optimization: "Optimering",
@@ -4032,6 +4047,9 @@ export const sv = {
       duplicateNoModel:
         "Den här körningen har ingen sparad modellkonfiguration.",
       startTraining: "Starta träning",
+      startSimulated: "Starta simulerad körning",
+      simulatedNote:
+        "En simulerad körning: ingen GPU, modell eller dataset används och mätvärdena genereras.",
       starting: "Startar ...",
       loadingModel: "Läser in modell ...",
       checkingDataset: "Kontrollerar datauppsättning ...",

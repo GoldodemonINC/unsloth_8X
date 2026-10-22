@@ -39,7 +39,7 @@ import {
   Settings05Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
-import type { CSSProperties, ReactNode } from "react";
+import { type CSSProperties, type ReactNode, useEffect } from "react";
 import { DatasetPanel } from "../sections/dataset-section";
 import { DatasetSourceToggleAction } from "../sections/dataset-source-toggle";
 import { FieldHint } from "../sections/field-hint";
@@ -174,6 +174,17 @@ function TrainingMethodSelect() {
       (s.decisionLayout === "clef" || s.decisionLayout === "llm"),
   );
   const deviceType = usePlatformStore((state) => state.deviceType);
+  const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
+  // A method persisted from another host (or the default) would sit selected while its row is
+  // disabled, and Start would refuse it. On CPU, CoRA is the only choice, so make it the choice.
+  useEffect(() => {
+    if (
+      cpuOnly &&
+      !isTrainingMethodSupportedOnDevice(trainingMethod, deviceType, cpuOnly)
+    ) {
+      setTrainingMethod("cora");
+    }
+  }, [cpuOnly, deviceType, trainingMethod, setTrainingMethod]);
   const activeMeta = TRAINING_METHOD_META[trainingMethod];
   const activeLabel = activeMeta ? t(activeMeta.labelKey) : trainingMethod;
   return (
@@ -217,14 +228,20 @@ function TrainingMethodSelect() {
             (decisionTakesQlora && method === "qlora"),
         ).map((method) => {
           const meta = TRAINING_METHOD_META[method];
-          const unsupportedOnMlx = !isTrainingMethodSupportedOnDevice(
+          const unsupported = !isTrainingMethodSupportedOnDevice(
             method,
             deviceType,
+            cpuOnly,
+          );
+          const unsupportedLabel = t(
+            cpuOnly
+              ? "studio.params.notSupportedCpu"
+              : "studio.params.notSupportedAppleSilicon",
           );
           return (
             <Tooltip key={method} delayDuration={300}>
               <TooltipTrigger asChild={true} disableClickToggle={true}>
-                <SelectItem value={method} disabled={unsupportedOnMlx}>
+                <SelectItem value={method} disabled={unsupported}>
                   <span className="flex items-center gap-2">
                     <span
                       aria-hidden="true"
@@ -234,9 +251,9 @@ function TrainingMethodSelect() {
                       )}
                     />
                     {t(meta.labelKey)}
-                    {unsupportedOnMlx && (
+                    {unsupported && (
                       <span className="text-ui-10 text-muted-foreground">
-                        · {t("studio.params.notSupportedAppleSilicon")}
+                        · {unsupportedLabel}
                       </span>
                     )}
                   </span>
@@ -247,9 +264,7 @@ function TrainingMethodSelect() {
                 sideOffset={10}
                 className="max-w-[calc(220px*var(--ui-space-scale,1))] text-ui-11p5 leading-snug"
               >
-                {unsupportedOnMlx
-                  ? t("studio.params.notSupportedAppleSilicon")
-                  : t(meta.hintKey)}
+                {unsupported ? unsupportedLabel : t(meta.hintKey)}
               </TooltipContent>
             </Tooltip>
           );
@@ -410,14 +425,28 @@ function ModelPanel() {
 }
 
 function CoraRecipeCard() {
+  // The GPU recipe quantizes through bitsandbytes; a CPU host has neither that kernel nor LoftQ,
+  // so the card names what actually runs there instead of a recipe this host cannot apply.
+  const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
   const rows: Array<[string, string]> = [
-    ["Adapter", "r=8, alpha=24, LoftQ init"],
-    ["Base precision", "4-bit (Q4_1), exported later to the quant you pick"],
-    ["Optimizer", "Paged AdamW 8-bit"],
+    [
+      "Adapter",
+      cpuOnly ? "r=8, alpha=24, plain LoRA" : "r=8, alpha=24, LoftQ init",
+    ],
+    [
+      "Base precision",
+      cpuOnly
+        ? "fp32 (a CPU has no 4-bit training kernel)"
+        : "4-bit (Q4_1), exported later to the quant you pick",
+    ],
+    ["Optimizer", cpuOnly ? "AdamW (torch)" : "Paged AdamW 8-bit"],
     ["Schedule", "Cosine"],
     ["Batch", "1 x 3 gradient accumulation"],
     ["Context", "1024 tokens"],
-    ["Quantization-aware", "Int4 QAT on"],
+    [
+      "Quantization-aware",
+      cpuOnly ? "Int4 QAT, best-effort on CPU" : "Int4 QAT on",
+    ],
     ["Layer LRs", "Embedding 0.25x to head 1.0x"],
     ["Dataset", "0.01 GB to 0.8 GB of text"],
   ];
@@ -437,8 +466,9 @@ function CoraRecipeCard() {
         ))}
       </dl>
       <p className="mt-3 text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-        Advanced training stays off for CoRA: QAT and layer-wise learning rates
-        are the only extras it uses, and both are already on.
+        {cpuOnly
+          ? "QAT and layer-wise learning rates are on by default for CoRA; adjust them in Advanced training below. The 4-bit pieces are dropped on a CPU host."
+          : "QAT and layer-wise learning rates are on by default for CoRA; adjust them in Advanced training below."}
       </p>
     </SectionBox>
   );
@@ -488,7 +518,8 @@ export function TrainingWizard({
         <ParamsSection mode={paramMode} />
       </SectionBox>
 
-      {trainingMethod === "cora" ? <CoraRecipeCard /> : <AdvancedTrainingSection />}
+      {trainingMethod === "cora" ? <CoraRecipeCard /> : null}
+      <AdvancedTrainingSection />
 
       <SectionBox
         title={t("studio.wizard.configTitle")}

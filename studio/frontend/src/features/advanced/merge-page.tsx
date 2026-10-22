@@ -17,7 +17,6 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { usePlatformStore } from "@/config/env";
 import { hfApiToken, useHfTokenStore } from "@/features/hub";
-import { StudioModeNav } from "@/features/studio/studio-mode-nav";
 import { cn } from "@/lib/utils";
 import {
   Layers01Icon,
@@ -557,7 +556,6 @@ export function MergePage(): ReactElement {
                 architectures — by weights or by a trained MMoE router.
               </p>
             </div>
-            <StudioModeNav />
           </div>
         </header>
 

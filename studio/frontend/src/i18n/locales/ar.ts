@@ -3325,6 +3325,8 @@ export const ar = {
       hardware: "الأجهزة",
       vram: "VRAM",
       noGpu: "لم يتم اكتشاف GPU",
+      cpuWorkspace:
+        "مساحة عمل CPU: الدردشة وتدريب CoRA/QLoRA والتصدير والدمج تعمل هنا. الصور والفيديو تحتاج إلى GPU.",
       hfToken: "توكن HF",
       saved: "محفوظ",
       notSet: "غير معيّن",
@@ -3425,6 +3427,12 @@ export const ar = {
       vramTightBadge: "محدود",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA للمعالج: LoRA بسيط بسياق 1k (أساس 4 بت مع LoftQ على GPU)، وQAT ومعدلات تعلّم لكل طبقة.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "تكميم 4 بت. أقل استهلاكًا لـ VRAM وأسرع بدءًا.",
@@ -3444,6 +3452,12 @@ export const ar = {
         label: "التدريب المسبق المستمر",
         hint: "تدريب مسبق مستمر لمجالات أو لغات جديدة.",
         note: "مستمر",
+      },
+      rl: {
+        label: "مواءمة السياسة / RL",
+        hint:
+          "DPO أو GRPO: تشكيل السلوك عبر التفضيلات أو درجات المكافأة.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3712,6 +3726,7 @@ export const ar = {
       memoryEfficient: "موفّر للذاكرة",
       weightDecomposed: "أوزان مُفكَّكة",
       notSupportedAppleSilicon: "غير مدعوم على Apple Silicon",
+      notSupportedCpu: "غير مدعوم على المعالج — اختر CoRA أو QLoRA",
       doraNeedsVisionLayersOff: "أوقف تدريب طبقات الرؤية لاستخدام DoRA",
       optimization: "التحسين",
       schedule: "الجدولة",
@@ -3798,6 +3813,9 @@ export const ar = {
         "تغيّرت إعدادات التدريب أثناء التحميل. حاول التكرار مرة أخرى.",
       duplicateNoModel: "لا تحتوي هذه العملية على إعدادات نموذج محفوظة.",
       startTraining: "بدء التدريب",
+      startSimulated: "بدء تشغيل محاكى",
+      simulatedNote:
+        "تشغيل محاكى: لا يُستخدم GPU أو نموذج أو مجموعة بيانات، وتُولَّد المقاييس.",
       starting: "جارٍ البدء...",
       loadingModel: "جارٍ تحميل النموذج...",
       checkingDataset: "جارٍ التحقق من مجموعة البيانات...",

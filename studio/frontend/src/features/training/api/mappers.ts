@@ -188,6 +188,9 @@ export function buildTrainingStartPayload(
       : config.trainingMethod;
   const isCpt = trainingMethod === "cpt";
   const isCora = trainingMethod === "cora";
+  // No torch accelerator on this host: the backend runs CoRA through transformers + PEFT on the
+  // CPU, so the payload drops 4-bit loading and LoftQ with it.
+  const cpuHost = system?.device_backend === "cpu";
   const adapterMethod = trainingMethod !== "full";
   const loraVariants = adapterMethod && !isDecision;
   const _selectedModelLower = (config.selectedModel ?? "").toLowerCase();
@@ -237,11 +240,15 @@ export function buildTrainingStartPayload(
     model_name: config.selectedModel ?? "",
     project_name: (config.projectName || "").trim() || null,
     training_type: toBackendTrainingType(trainingMethod),
+    // Names the recipe for the backend: a CPU-only host runs CoRA or QLoRA and refuses the rest.
+    training_preset: isCora ? "cora" : trainingMethod === "qlora" ? "qlora" : null,
     hf_token: hfToken,
     model_known_cached: config.modelKnownCached,
     model_local_path: config.modelKnownCached ? config.modelLocalPath : null,
     model_format: config.modelFormat,
-    load_in_4bit: trainingLoadsIn4Bit({ ...config, trainingMethod }),
+    load_in_4bit: cpuHost
+      ? false
+      : trainingLoadsIn4Bit({ ...config, trainingMethod }),
     // Hidden for decision runs: Laya always trains at 1024 tokens, Clef and LLMs at the recipe's length.
     max_seq_length:
       isCora || (isDecision && !hasLlmBackbone) ? 1024 : config.contextLength,
@@ -310,8 +317,9 @@ export function buildTrainingStartPayload(
     random_seed: config.randomSeed,
     packing: isEmbedding || isDecision ? false : config.packing,
     // Laya's recipe needs torch AdamW; Clef keeps its recipe's (8-bit) optimizer.
+    // CoRA reads its (device-dependent) optimizer from the applied recipe in the store.
     optim: isCora
-      ? CORA_HYPERPARAMS.optimizerType
+      ? config.optimizerType
       : isDecision && config.decisionLayout !== "clef"
         ? "adamw_torch"
         : config.optimizerType,
@@ -326,7 +334,10 @@ export function buildTrainingStartPayload(
     gradient_checkpointing: config.gradientCheckpointing,
     ...offloadPayload(config, trainingGpuIndices(system?.gpu), system),
     use_rslora: !isCora && loraVariants && config.loraVariant === "rslora",
-    use_loftq: isCora || (loraVariants && config.loraVariant === "loftq"),
+    // LoftQ quantizes through bitsandbytes, so CoRA only asks for it where that can run.
+    use_loftq: isCora
+      ? config.loraVariant === "loftq"
+      : loraVariants && config.loraVariant === "loftq",
     use_dora: !isCora && loraVariants && config.loraVariant === "dora",
     // CPT always trains on full sequences (no chat format masking)
     train_on_completions:

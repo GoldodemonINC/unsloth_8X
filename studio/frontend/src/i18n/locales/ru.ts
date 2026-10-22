@@ -3345,6 +3345,8 @@ export const ru = {
       hardware: "Оборудование",
       vram: "VRAM",
       noGpu: "GPU не обнаружен",
+      cpuWorkspace:
+        "Рабочее пространство CPU: чат, обучение CoRA/QLoRA, экспорт и слияние работают здесь. Изображениям и видео нужен GPU.",
       hfToken: "Токен HF",
       saved: "Сохранён",
       notSet: "Не задан",
@@ -3448,6 +3450,12 @@ export const ru = {
       vramTightBadge: "Впритык",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA для CPU: обычный LoRA с контекстом 1k (4-битная база с LoftQ на GPU), QAT и послойные скорости обучения.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-битная квантизация. Минимум VRAM и самый быстрый запуск.",
@@ -3468,6 +3476,12 @@ export const ru = {
         hint:
           "Продолженное предобучение для новых предметных областей или языков.",
         note: "продолженное",
+      },
+      rl: {
+        label: "Выравнивание политики / RL",
+        hint:
+          "DPO или GRPO: настройка поведения по предпочтениям или оценкам награды.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3740,6 +3754,7 @@ export const ru = {
       memoryEfficient: "Экономия памяти",
       weightDecomposed: "Декомпозиция весов",
       notSupportedAppleSilicon: "Не поддерживается на Apple Silicon",
+      notSupportedCpu: "Не поддерживается на CPU — выберите CoRA или QLoRA",
       doraNeedsVisionLayersOff: "Отключите обучение слоёв зрения, чтобы использовать DoRA",
       optimization: "Оптимизация",
       schedule: "Расписание",
@@ -3825,6 +3840,9 @@ export const ru = {
         "Настройки обучения изменились во время загрузки. Попробуйте дублировать ещё раз.",
       duplicateNoModel: "У этого запуска нет сохранённой конфигурации модели.",
       startTraining: "Начать обучение",
+      startSimulated: "Запустить симулированный прогон",
+      simulatedNote:
+        "Симулированный прогон: GPU, модель и датасет не используются, метрики генерируются.",
       starting: "Запуск...",
       loadingModel: "Загрузка модели...",
       checkingDataset: "Проверка датасета...",

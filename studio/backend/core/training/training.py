@@ -92,6 +92,16 @@ ADAMW_BITSANDBYTES_TRAINING_OPTIMIZER = "adamw_bnb_8bit"
 PAGED_32BIT_BITSANDBYTES_TRAINING_OPTIMIZER = "paged_adamw_32bit"
 # Not a bit-width question: XPU routes optimizer_update_32bit to Triton too
 # (bitsandbytes backends/xpu/ops.py), which asserts on a SYCL toolchain we do not ship.
+# bitsandbytes optimizers need a CUDA/MPS kernel; a CPU run uses torch's AdamW instead.
+CPU_SAFE_TRAINING_OPTIMIZER = "adamw_torch"
+CPU_UNSUPPORTED_BITSANDBYTES_OPTIMIZERS = frozenset(
+    (
+        DEFAULT_TRAINING_OPTIMIZER,
+        PAGED_BITSANDBYTES_TRAINING_OPTIMIZER,
+        ADAMW_BITSANDBYTES_TRAINING_OPTIMIZER,
+        "paged_adamw_32bit",
+    )
+)
 XPU_UNSUPPORTED_BITSANDBYTES_OPTIMIZERS = frozenset(
     (
         DEFAULT_TRAINING_OPTIMIZER,
@@ -252,11 +262,33 @@ def normalize_training_optimizer_for_device(optimizer: Any, *, device_backend: s
         return optimizer
     optimizer_key = optimizer.strip().lower().replace("-", "_")
     if (
+        device_backend == "cpu"
+        and optimizer_key in CPU_UNSUPPORTED_BITSANDBYTES_OPTIMIZERS
+    ):
+        return CPU_SAFE_TRAINING_OPTIMIZER
+    if (
         device_backend == XPU_DEVICE_BACKEND
         and optimizer_key in XPU_UNSUPPORTED_BITSANDBYTES_OPTIMIZERS
     ):
         return XPU_SAFE_TRAINING_OPTIMIZER
     return optimizer
+
+
+# fp32 CPU weights are only part of the footprint. The rest of this covers the interpreter, the
+# activations and the adapter, so a host is not told fp32 fits when it would then OOM on step 1.
+CPU_FP32_LOAD_HEADROOM_BYTES = 2 * 1024**3
+
+
+def cpu_fp32_weights_fit(
+    fp32_bytes: Optional[int], available_bytes: Optional[int]
+) -> bool:
+    """Whether an fp32 CPU load fits: the weights plus headroom inside the RAM available now.
+
+    Unknown sizes count as fitting, so a host without a size estimate keeps the fp32 path.
+    """
+    if not fp32_bytes or not available_bytes:
+        return True
+    return fp32_bytes + CPU_FP32_LOAD_HEADROOM_BYTES <= available_bytes
 
 
 def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
@@ -270,6 +302,7 @@ def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
         "model_name": values["model_name"],
         "project_name": values.get("project_name"),
         "training_type": values.get("training_type", "LoRA/QLoRA"),
+        "training_preset": values.get("training_preset"),
         "hf_token": values.get("hf_token", ""),
         "load_in_4bit": values.get("load_in_4bit", True),
         "max_seq_length": values.get("max_seq_length", 2048),
@@ -370,6 +403,9 @@ def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
         "gpu_ids": values.get("gpu_ids"),
         "s3_config": values.get("s3_config"),
         "disable_xet": values.get("disable_xet", False),
+        # Advanced Studio settings (QAT, layer-wise LR, curriculum, blends, auto-eval, RL).
+        # Dropping this made the switches cosmetic: the trainer never saw them.
+        "advanced": values.get("advanced"),
     }
     for key in ("output_dir", "allow_external_output_dir"):
         if key in values:

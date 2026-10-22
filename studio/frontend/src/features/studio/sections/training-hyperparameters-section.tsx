@@ -85,6 +85,9 @@ export function TrainingHyperparametersSection({
     useShallow((state) => ({
       epochs: state.epochs,
       isDecision: state.modelType === "decision",
+      // CoRA's recipe owns the optimizer, scheduler, batch and accumulation, so those rows are
+      // hidden for it rather than shown and ignored.
+      isCora: state.trainingMethod === "cora",
       isEmbedding: state.isEmbeddingModel || state.modelType === "embeddings",
       optimizerType: state.optimizerType,
       lrSchedulerType: state.lrSchedulerType,
@@ -153,7 +156,7 @@ export function TrainingHyperparametersSection({
             value="optimization"
             className="mt-3 flex flex-col gap-3"
           >
-            {!store.isDecision && (
+            {!store.isDecision && !store.isCora && (
               <ParamsRow
                 label={t("studio.params.optimizer")}
                 tooltip={
@@ -191,6 +194,7 @@ export function TrainingHyperparametersSection({
                 </Select>
               </ParamsRow>
             )}
+            {!store.isCora && (
             <ParamsRow
               label={t("studio.params.lrScheduler")}
               tooltip={
@@ -223,6 +227,8 @@ export function TrainingHyperparametersSection({
                 </SelectContent>
               </Select>
             </ParamsRow>
+            )}
+            {!store.isCora && (
             <ParamsSliderRow
               label={t("studio.params.batchSize")}
               tooltip={
@@ -244,6 +250,8 @@ export function TrainingHyperparametersSection({
               max={32}
               step={1}
             />
+            )}
+            {!store.isCora && (
             <ParamsSliderRow
               label={t("studio.params.gradAccum")}
               tooltip={
@@ -265,6 +273,7 @@ export function TrainingHyperparametersSection({
               max={64}
               step={1}
             />
+            )}
             <ParamsRow
               label={t("studio.params.weightDecay")}
               tooltip={

@@ -105,6 +105,41 @@ def test_align_tensor_crop_pad_and_svd():
     assert projected.shape == (2, 2)
 
 
+def test_aligned_shape_keeps_the_ffn_intermediate_axis():
+    """down_proj is [hidden, intermediate]: cropping its columns to hidden wrote an unloadable checkpoint."""
+    plan = merge.plan_alignment(
+        _spec("llama", 16, 2, 4, 64, 32000),
+        _spec("llama", 16, 2, 4, 64, 32000),
+    )
+    assert plan.target_hidden == 16 and plan.target_intermediate == 64
+    assert merge._aligned_shape((16, 64), "model.layers.0.mlp.down_proj.weight", plan) == (16, 64)
+    assert merge._aligned_shape((64, 16), "model.layers.0.mlp.up_proj.weight", plan) == (64, 16)
+    assert merge._aligned_shape((16, 16), "model.layers.0.self_attn.q_proj.weight", plan) == (16, 16)
+
+
+def test_aligned_shape_keeps_non_square_attention_rows():
+    """Qwen3's q_proj is [heads * head_dim, hidden] with rows > hidden.
+
+    The old shape heuristic saw the hidden-sized column and treated the tensor as
+    an FFN up_proj, padding q/k/v to the intermediate width and writing a
+    checkpoint no loader accepts.
+    """
+    plan = merge.plan_alignment(
+        _spec("qwen3", 1024, 24, 16, 3072, 151000),
+        _spec("qwen3", 1024, 24, 16, 3072, 151000),
+    )
+    assert plan.target_hidden == 1024 and plan.target_intermediate == 3072
+    assert merge._aligned_shape(
+        (2048, 1024), "model.layers.0.self_attn.q_proj.weight", plan
+    ) == (2048, 1024)
+    assert merge._aligned_shape(
+        (1024, 2048), "model.layers.0.self_attn.o_proj.weight", plan
+    ) == (1024, 2048)
+    assert merge._aligned_shape(
+        (1024, 3072), "model.layers.0.mlp.down_proj.weight", plan
+    ) == (1024, 3072)
+
+
 def test_slerp_endpoints_and_midpoint():
     a = np.array([1.0, 0.0], dtype=np.float32)
     b = np.array([0.0, 1.0], dtype=np.float32)
@@ -282,6 +317,148 @@ def _write_bf16_checkpoint(directory: Path, tensors: dict, *, vocab: int = 16) -
     return directory
 
 
+def _write_tiny_qwen3_checkpoint(
+    directory: Path,
+    *,
+    hidden: int,
+    heads: int,
+    kv_heads: int,
+    head_dim: int,
+    layers: int,
+    ffn: int,
+    vocab: int,
+    value: float,
+) -> Path:
+    """A complete, internally consistent Qwen3 checkpoint whose q_proj is not square."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("safetensors")
+    from safetensors.torch import save_file
+
+    directory.mkdir(parents = True, exist_ok = True)
+    (directory / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "qwen3",
+                "architectures": ["Qwen3ForCausalLM"],
+                "hidden_size": hidden,
+                "num_hidden_layers": layers,
+                "num_attention_heads": heads,
+                "num_key_value_heads": kv_heads,
+                "head_dim": head_dim,
+                "intermediate_size": ffn,
+                "vocab_size": vocab,
+                "tie_word_embeddings": False,
+                "attention_bias": False,
+                "hidden_act": "silu",
+            }
+        ),
+        encoding = "utf-8",
+    )
+
+    def tensor(*shape):
+        return torch.full(shape, float(value), dtype = torch.float32)
+
+    q_rows, kv_rows = heads * head_dim, kv_heads * head_dim
+    tensors = {
+        "model.embed_tokens.weight": tensor(vocab, hidden),
+        "model.norm.weight": tensor(hidden),
+        "lm_head.weight": tensor(vocab, hidden),
+    }
+    for layer in range(layers):
+        prefix = f"model.layers.{layer}"
+        tensors.update(
+            {
+                f"{prefix}.self_attn.q_proj.weight": tensor(q_rows, hidden),
+                f"{prefix}.self_attn.k_proj.weight": tensor(kv_rows, hidden),
+                f"{prefix}.self_attn.v_proj.weight": tensor(kv_rows, hidden),
+                "%s.self_attn.o_proj.weight" % prefix: tensor(hidden, q_rows),
+                f"{prefix}.self_attn.q_norm.weight": tensor(head_dim),
+                f"{prefix}.self_attn.k_norm.weight": tensor(head_dim),
+                f"{prefix}.mlp.gate_proj.weight": tensor(ffn, hidden),
+                f"{prefix}.mlp.up_proj.weight": tensor(ffn, hidden),
+                f"{prefix}.mlp.down_proj.weight": tensor(hidden, ffn),
+                f"{prefix}.input_layernorm.weight": tensor(hidden),
+                f"{prefix}.post_attention_layernorm.weight": tensor(hidden),
+            }
+        )
+    save_file(
+        {key: value.contiguous() for key, value in tensors.items()},
+        str(directory / "model.safetensors"),
+    )
+    return directory
+
+
+def test_cross_scale_merge_writes_a_loadable_template_checkpoint(tmp_path: Path):
+    """The 50/50 case: a wider, deeper parent merged into a non-square attention template.
+
+    The result must keep the template's config, tokenizer and every tensor shape,
+    drop the layers the config does not declare, and load through transformers.
+    """
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("safetensors")
+
+    small = _write_tiny_qwen3_checkpoint(
+        tmp_path / "small",
+        hidden = 8,
+        heads = 2,
+        kv_heads = 1,
+        head_dim = 6,
+        layers = 1,
+        ffn = 24,
+        vocab = 16,
+        value = 1.0,
+    )
+    large = _write_tiny_qwen3_checkpoint(
+        tmp_path / "large",
+        hidden = 16,
+        heads = 2,
+        kv_heads = 2,
+        head_dim = 8,
+        layers = 2,
+        ffn = 32,
+        vocab = 32,
+        value = 2.0,
+    )
+    out = tmp_path / "merged"
+
+    report = merge.merge_checkpoints(
+        str(small), str(large), str(out), method = "linear", weight = 0.5
+    )
+
+    assert report["template"]["index"] == 0
+    assert report["metrics"]["dropped_tensors"] > 0
+    assert any(key.startswith("model.layers.1.") for key in report["dropped_keys"])
+    assert json.loads((out / "config.json").read_text(encoding = "utf-8")) == json.loads(
+        (small / "config.json").read_text(encoding = "utf-8")
+    )
+
+    from safetensors import safe_open
+
+    weight_map = json.loads(
+        (out / "model.safetensors.index.json").read_text(encoding = "utf-8")
+    )["weight_map"]
+    expected_shapes = {
+        "model.layers.0.self_attn.q_proj.weight": (12, 8),
+        "model.layers.0.self_attn.k_proj.weight": (6, 8),
+        "model.layers.0.self_attn.o_proj.weight": (8, 12),
+        "model.layers.0.mlp.down_proj.weight": (8, 24),
+        "model.embed_tokens.weight": (16, 8),
+    }
+    for key, shape in expected_shapes.items():
+        with safe_open(str(out / weight_map[key]), framework = "pt") as handle:
+            merged = handle.get_tensor(key).to(torch.float32)
+        assert tuple(merged.shape) == shape
+        # Both parents hold a constant, so every cropped region averages to 1.5.
+        assert torch.allclose(merged, torch.full(shape, 1.5), atol = 1e-2)
+
+    loaded = transformers.AutoModelForCausalLM.from_pretrained(str(out))
+    assert loaded.config.num_hidden_layers == 1
+    assert loaded.config.hidden_size == 8
+    assert loaded.model.layers[0].self_attn.q_proj.weight.shape == (12, 8)
+    assert loaded.model.layers[0].mlp.down_proj.weight.shape == (8, 24)
+
+
 def test_merge_bfloat16_checkpoints_keeps_dtype(tmp_path: Path):
     """A bf16 pair used to die on read: numpy has no bfloat16 dtype."""
     torch = pytest.importorskip("torch")
@@ -384,8 +561,13 @@ def test_slerp_keeps_the_tensor_shape():
     assert np.allclose(merge.blend_tensors([a, b], method = "slerp", weights = [1, 0]), a)
 
 
-def test_merge_bfloat16_aligns_mismatched_rows(tmp_path: Path):
-    """Padding a bf16 tensor goes through float32 and must come back shaped."""
+def test_cross_vocab_merge_keeps_the_template_shape(tmp_path: Path):
+    """The smaller parent is the template: its config and vocab win.
+
+    Padding the small model up to the larger one wrote a config the small model's
+    tokenizer could not index (or, with the config from the larger parent, rows the
+    weights did not have). The template's own shape is the one a loader accepts.
+    """
     torch = pytest.importorskip("torch")
     pytest.importorskip("safetensors")
     from safetensors import safe_open
@@ -393,21 +575,23 @@ def test_merge_bfloat16_aligns_mismatched_rows(tmp_path: Path):
     generator = torch.Generator().manual_seed(7)
     small = {"model.embed_tokens.weight": torch.randn(12, 8, generator = generator)}
     full = {"model.embed_tokens.weight": torch.randn(16, 8, generator = generator)}
-    model_a = _write_bf16_checkpoint(tmp_path / "a", small, vocab = 16)
+    model_a = _write_bf16_checkpoint(tmp_path / "a", small, vocab = 12)
     model_b = _write_bf16_checkpoint(tmp_path / "b", full, vocab = 16)
 
     out = tmp_path / "merged"
     report = merge.merge_checkpoints(str(model_a), str(model_b), str(out), method = "linear", weight = 0.5)
     assert report["metrics"]["blended_tensors"] == 1
+    assert report["template"]["index"] == 0
 
     weight_map = json.loads((out / "model.safetensors.index.json").read_text(encoding = "utf-8"))["weight_map"]
     with safe_open(str(out / weight_map["model.embed_tokens.weight"]), framework = "pt") as handle:
         merged = handle.get_tensor("model.embed_tokens.weight")
     assert merged.dtype == torch.bfloat16
-    assert merged.shape == (16, 8)
-    # Rows the small model never had stay at half the full model's value.
-    expected_tail = full["model.embed_tokens.weight"][12:].to(torch.float32) * 0.5
-    assert torch.allclose(merged[12:].to(torch.float32), expected_tail, atol = 1e-2)
+    assert merged.shape == (12, 8)
+    assert json.loads((out / "config.json").read_text(encoding = "utf-8"))["vocab_size"] == 12
+    # Rows are cropped from the centre, matching align_tensor's crop.
+    expected = (small["model.embed_tokens.weight"] + full["model.embed_tokens.weight"][2:14]) * 0.5
+    assert torch.allclose(merged.to(torch.float32), expected, atol = 1e-2)
 
 
 # ---------------------------------------------------------------------------
@@ -461,10 +645,11 @@ def test_three_way_merge_uses_normalized_weights(tmp_path: Path):
 
 def test_a_key_missing_from_one_parent_is_reweighted_not_zeroed(tmp_path: Path):
     torch = pytest.importorskip("torch")
-    a = _values_checkpoint(tmp_path, "a", 1.0, with_probe = False)
-    b = _values_checkpoint(tmp_path, "b", 3.0, with_probe = False)
+    a = _values_checkpoint(tmp_path, "a", 1.0)
+    b = _values_checkpoint(tmp_path, "b", 3.0)
     # The third parent owns only the norm tensor, so it contributes nothing to
-    # the embed blend: [1, 1, 2] becomes [0.5, 0.5] there.
+    # the embed blend: [1, 1, 2] becomes [0.5, 0.5] there. The norm exists in all
+    # three, so its blend uses the full [1, 1, 2] normalization.
     c = _write_bf16_checkpoint(
         tmp_path / "c", {"model.norm.weight": torch.full((8,), 9.0)}
     )
@@ -475,9 +660,9 @@ def test_a_key_missing_from_one_parent_is_reweighted_not_zeroed(tmp_path: Path):
     )
 
     assert _merged_float(out).mean().item() == pytest.approx(2.0, abs = 2e-2)
-    # The norm tensor exists only in the third parent, so it is copied through.
+    # 0.25*1 + 0.25*3 + 0.5*9 = 5.5
     assert _merged_float(out, "model.norm.weight").mean().item() == pytest.approx(
-        9.0, abs = 2e-2
+        5.5, abs = 2e-2
     )
 
 

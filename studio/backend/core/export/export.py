@@ -732,6 +732,8 @@ def _publish_unsloth_model_card(hf_api, repo_id, model, hf_token):
 class ExportBackend:
     # {"layout", "adapter_only"} for a decision checkpoint (GGUF only), else None.
     decision: Optional[dict] = None
+    # Set in __init__ on a CPU-only host; class-level None keeps __new__-built test backends working.
+    _cpu_backend = None
 
     def __init__(self):
         self.inference_backend = get_inference_backend()
@@ -744,6 +746,28 @@ class ExportBackend:
         self._audio_type = None
         self.decision = None
         self.diffusion_lm_profile = None
+        # Unsloth needs an accelerator; without one, merging / adapter copy / GGUF still run through
+        # transformers + PEFT on the CPU. MLX keeps its own path.
+        self._cpu_backend = None
+        if not _IS_MLX:
+            from core.export.cpu_export import CpuExportBackend, cpu_export_host
+
+            self._cpu_backend = CpuExportBackend() if cpu_export_host() else None
+
+    def _delegate_cpu(self) -> Optional["object"]:
+        """The CPU backend when this host has no accelerator, else None."""
+        return self._cpu_backend
+
+    def _sync_cpu_state(self) -> None:
+        """Publish what the CPU backend loaded, so the worker/status callers see the same fields."""
+        if self._cpu_backend is None:
+            return
+        self.current_checkpoint = self._cpu_backend.current_checkpoint
+        self.current_model = self._cpu_backend.current_model
+        self.current_tokenizer = self._cpu_backend.current_tokenizer
+        self.is_peft = self._cpu_backend.is_peft
+        self.is_vision = self._cpu_backend.is_vision
+        self.decision = self._cpu_backend.decision
 
     def _diffusion_refusal(self, method: str) -> Optional[str]:
         profile = getattr(self, "diffusion_lm_profile", None)
@@ -757,6 +781,8 @@ class ExportBackend:
         """Offload and delete all models from memory"""
         try:
             logger.info("Starting memory cleanup...")
+            if self._cpu_backend is not None:
+                self._cpu_backend.release()
 
             model_names = list(self.inference_backend.models.keys())
             for model_name in model_names:
@@ -819,6 +845,17 @@ class ExportBackend:
         ``get_token()`` reads the operator's stored login off disk.
         """
         token = normalize_token(hf_token)
+        if self._cpu_backend is not None:
+            success, message = self._cpu_backend.load_checkpoint(
+                checkpoint_path,
+                max_seq_length = max_seq_length,
+                load_in_4bit = load_in_4bit,
+                trust_remote_code = trust_remote_code,
+                hf_token = hf_token,
+                base_model = base_model,
+            )
+            self._sync_cpu_state()
+            return success, message
         # Loaders only: the probes' cache guards refuse an anonymous read, which offline
         # misreads a cached VLM as a text model.
         probe_token = token or None
@@ -1244,6 +1281,16 @@ class ExportBackend:
         w4a16, mxfp4, mxfp8, nvfp4); it overrides ``format_type`` and is resolved against
         unsloth.save COMPRESSED_EXPORT_SCHEMES.
         """
+        if self._cpu_backend is not None:
+            return self._cpu_backend.export_merged_model(
+                save_directory,
+                format_type = format_type,
+                push_to_hub = push_to_hub,
+                repo_id = repo_id,
+                hf_token = hf_token,
+                private = private,
+                compressed_method = compressed_method,
+            )
         if self.decision is not None:
             return self._decision_only_gguf()
         if not _export_runtime_available():
@@ -1564,6 +1611,15 @@ class ExportBackend:
         private: bool = False,
         base_model_id: Optional[str] = None,
     ) -> Tuple[bool, str, Optional[str]]:
+        if self._cpu_backend is not None:
+            return self._cpu_backend.export_base_model(
+                save_directory,
+                push_to_hub = push_to_hub,
+                repo_id = repo_id,
+                hf_token = hf_token,
+                private = private,
+                base_model_id = base_model_id,
+            )
         if self.decision is not None:
             return self._decision_only_gguf()
         if not _export_runtime_available():
@@ -1703,6 +1759,17 @@ class ExportBackend:
         internally. ``imatrix_file`` is an importance matrix path or boolean. ``npu_q4nx`` also
         converts one Q4_0 / Q4_1 / Q4_K_M GGUF to FastFlowLM's Q4NX for the AMD Ryzen AI NPU.
         """
+        if self._cpu_backend is not None:
+            return self._cpu_backend.export_gguf(
+                save_directory,
+                quantization_method = quantization_method,
+                push_to_hub = push_to_hub,
+                repo_id = repo_id,
+                hf_token = hf_token,
+                imatrix_file = imatrix_file,
+                private = private,
+                npu_q4nx = npu_q4nx,
+            )
         if not _export_runtime_available():
             return False, _export_runtime_message(), None
         if self.decision is not None:
@@ -2362,6 +2429,17 @@ class ExportBackend:
         q8_0/f16/bf16/f32. ``adapter_format`` is 'mlx' or 'peft' (MLX servers only offer both);
         omitted resolves to the platform's native format.
         """
+        if self._cpu_backend is not None:
+            return self._cpu_backend.export_lora_adapter(
+                save_directory,
+                push_to_hub = push_to_hub,
+                repo_id = repo_id,
+                hf_token = hf_token,
+                private = private,
+                gguf = gguf,
+                gguf_outtype = gguf_outtype,
+                adapter_format = adapter_format,
+            )
         if self.decision is not None:
             return self._decision_only_gguf()
         if not _export_runtime_available():

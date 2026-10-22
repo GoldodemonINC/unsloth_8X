@@ -3347,6 +3347,8 @@ export const ptBR = {
       hardware: "Hardware",
       vram: "VRAM",
       noGpu: "Nenhuma GPU detectada",
+      cpuWorkspace:
+        "Espaço de trabalho CPU: Chat, treinamento CoRA/QLoRA, Exportação e Merge rodam aqui. Imagens e Vídeo precisam de uma GPU.",
       hfToken: "Token do HF",
       saved: "Salvo",
       notSet: "Não definido",
@@ -3450,6 +3452,12 @@ export const ptBR = {
       vramTightBadge: "No limite",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint:
+          "LoRA para CPU: LoRA simples com contexto de 1k (base de 4 bits com LoftQ em uma GPU), QAT e taxas de aprendizado por camada.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "Quantização de 4 bits. Menor uso de VRAM e inicialização mais rápida.",
@@ -3469,6 +3477,12 @@ export const ptBR = {
         label: "Pré-treinamento contínuo",
         hint: "Pré-treinamento contínuo para novos domínios ou idiomas.",
         note: "contínuo",
+      },
+      rl: {
+        label: "Alinhamento de política / RL",
+        hint:
+          "DPO ou GRPO: molda o comportamento com preferências ou pontuações de recompensa.",
+        note: "RL",
       },
     },
     subtitles: {
@@ -3739,6 +3753,7 @@ export const ptBR = {
       memoryEfficient: "Eficiente em Memória",
       weightDecomposed: "Pesos Decompostos",
       notSupportedAppleSilicon: "Não compatível com Apple Silicon",
+      notSupportedCpu: "Não compatível com CPU — escolha CoRA ou QLoRA",
       doraNeedsVisionLayersOff: "Desative o treinamento das camadas de visão para usar DoRA",
       optimization: "Otimização",
       schedule: "Cronograma",
@@ -3825,6 +3840,9 @@ export const ptBR = {
       duplicateNoModel:
         "Esta execução não tem uma configuração de modelo salva.",
       startTraining: "Iniciar Treinamento",
+      startSimulated: "Iniciar execução simulada",
+      simulatedNote:
+        "Uma execução simulada: nenhuma GPU, modelo ou dataset é usado; as métricas são geradas.",
       starting: "Iniciando...",
       loadingModel: "Carregando modelo...",
       checkingDataset: "Verificando dataset...",

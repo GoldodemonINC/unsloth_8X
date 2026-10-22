@@ -223,6 +223,16 @@ export function mergedFormatPayload(value: string): {
   return { formatType: "16-bit (FP16)", compressedMethod: opt.value };
 }
 
+/** GGUF quants the CPU export path cannot produce: the IQ types need an importance matrix that the
+ * CPU converter does not fetch, and Q2_K_L is Unsloth's post-quantize rewrite of Q2_K. */
+export const CPU_UNSUPPORTED_GGUF_QUANTS = [
+  "iq2_xxs",
+  "iq2_m",
+  "iq3_xxs",
+  "iq4_xs",
+  "q2_k_l",
+] as const;
+
 /** GGUF quants FastFlowLM's Q4NX converter packs directly for the AMD Ryzen AI NPU. */
 export const Q4NX_SOURCE_QUANTS = ["q4_0", "q4_1", "q4_k_m"];
 

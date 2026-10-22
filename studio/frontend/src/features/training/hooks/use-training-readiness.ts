@@ -29,8 +29,14 @@ export function deriveTrainingReadiness(
   state: TrainingConfigState,
   deviceType: string,
   isOwner: boolean,
+  cpuOnly = false,
 ): TrainingReadiness {
-  const configValidation = validateTrainingConfig(state, deviceType, isOwner);
+  const configValidation = validateTrainingConfig(
+    state,
+    deviceType,
+    isOwner,
+    cpuOnly,
+  );
   const hasModel = !!state.selectedModel;
   const hasDataset =
     state.datasetSource === "upload"
@@ -93,7 +99,11 @@ function readinessEqual(
   );
 }
 
-function createTrainingReadinessSelector(deviceType: string, isOwner: boolean) {
+function createTrainingReadinessSelector(
+  deviceType: string,
+  isOwner: boolean,
+  cpuOnly: boolean,
+) {
   let cachedReadiness: Readonly<TrainingReadiness> | null = null;
   let cachedState: TrainingConfigState | null = null;
 
@@ -101,7 +111,7 @@ function createTrainingReadinessSelector(deviceType: string, isOwner: boolean) {
     if (state === cachedState && cachedReadiness) {
       return cachedReadiness;
     }
-    const next = deriveTrainingReadiness(state, deviceType, isOwner);
+    const next = deriveTrainingReadiness(state, deviceType, isOwner, cpuOnly);
     if (!(cachedReadiness && readinessEqual(cachedReadiness, next))) {
       cachedReadiness = Object.freeze(next);
     }
@@ -112,10 +122,11 @@ function createTrainingReadinessSelector(deviceType: string, isOwner: boolean) {
 
 export function useTrainingReadiness(): Readonly<TrainingReadiness> {
   const deviceType = usePlatformStore((state) => state.deviceType);
+  const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
   const isOwner = useIsAccountOwner();
   const selector = useMemo(
-    () => createTrainingReadinessSelector(deviceType, isOwner),
-    [deviceType, isOwner],
+    () => createTrainingReadinessSelector(deviceType, isOwner, cpuOnly),
+    [deviceType, isOwner, cpuOnly],
   );
   return useTrainingConfigStore(selector);
 }

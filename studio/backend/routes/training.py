@@ -2418,6 +2418,7 @@ async def start_training(
             "model_name": model_preflight.model_name,
             "project_name": request.project_name,
             "training_type": request.training_type,
+            "training_preset": request.training_preset,
             "hf_token": (request.hf_token or "").strip(),
             "allow_ambient": allow_ambient,
             "load_in_4bit": request.load_in_4bit,
