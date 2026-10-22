@@ -1726,7 +1726,10 @@ class TrainingBackend:
     ) -> bool:
         # Reserve before lifecycle locking and validation: routes call start_training from worker threads,
         # so this compare-and-set stops two requests reaching the spawn.
-        validate_job_paths(kwargs, cached_resources = True)
+        debug_simulated = bool(kwargs.pop("debug_simulated", False))
+        # A simulated run names no model, dataset or output path, so there is nothing to validate.
+        if not debug_simulated:
+            validate_job_paths(kwargs, cached_resources = True)
         with self._new_job_spawn_reservation(job_id) as spawn_reserved:
             if not spawn_reserved:
                 logger.warning("Training subprocess already running")
@@ -1750,6 +1753,7 @@ class TrainingBackend:
                     resume_source_run_id = resume_source_run_id,
                     start_request_id = start_request_id,
                     spawn_already_reserved = True,
+                    debug_simulated = debug_simulated,
                     **kwargs,
                 )
 
@@ -1761,6 +1765,7 @@ class TrainingBackend:
         resume_source_run_id: Optional[str] = None,
         start_request_id: Optional[str] = None,
         spawn_already_reserved: bool = False,
+        debug_simulated: bool = False,
         **kwargs,
     ) -> bool:
         """Spawn a subprocess to run the full training pipeline. All kwargs are serialized into a
@@ -1795,15 +1800,21 @@ class TrainingBackend:
         # Clear a stale crash flag so the watchdog can't treat this fresh setup as a death.
         self._pump_running = False
 
-        config = _build_training_worker_config(kwargs)
-        hf_token = hf_token_arg(
-            config["hf_token"], allow_ambient_token = config.get("allow_ambient", True)
-        )
+        if debug_simulated:
+            from .debug_simulation import simulated_worker_config
 
-        _apply_cache_pins(config)
-        from .provenance import initialize_resource_provenance
+            config = simulated_worker_config(job_id)
+            hf_token = None
+        else:
+            config = _build_training_worker_config(kwargs)
+            hf_token = hf_token_arg(
+                config["hf_token"], allow_ambient_token = config.get("allow_ambient", True)
+            )
 
-        initialize_resource_provenance(config)
+            _apply_cache_pins(config)
+            from .provenance import initialize_resource_provenance
+
+            initialize_resource_provenance(config)
 
         # Explicit gpu_ids are validated here, so the route 400s before any teardown and their placement
         # survives the VRAM hook; auto-selection ranks GPUs by FREE VRAM, so it is deferred until after
@@ -1811,7 +1822,9 @@ class TrainingBackend:
         from utils.hardware import hardware as _hw
 
         gpu_ids = kwargs.get("gpu_ids")
-        gpu_selection_kwargs = dict(
+        # A simulated run has no weights to size against a GPU, and its config is not
+        # the worker's, so there is nothing to rank.
+        gpu_selection_kwargs: dict = {} if debug_simulated else dict(
             model_name = config["model_name"],
             hf_token = hf_token,
             training_type = config["training_type"],
@@ -1825,7 +1838,11 @@ class TrainingBackend:
         )
 
         defer_auto_selection = False
-        if should_use_mlx_training_backend(device = _hw.DEVICE):
+        if debug_simulated:
+            # Nothing is loaded, so there is no GPU to place the run on.
+            config["resolved_gpu_ids"] = None
+            config["gpu_selection"] = None
+        elif should_use_mlx_training_backend(device = _hw.DEVICE):
             config["resolved_gpu_ids"] = None
             config["gpu_selection"] = None
         elif gpu_ids:
@@ -1871,7 +1888,7 @@ class TrainingBackend:
                     )
                     return False
             # Free VRAM after the handshake, so a lost race cannot tear down chat for a run that never spawns.
-            if before_spawn is not None:
+            if before_spawn is not None and not debug_simulated:
                 try:
                     before_spawn()
                 except Exception as exc:
@@ -1898,26 +1915,39 @@ class TrainingBackend:
                 ):
                     event_queue = _CTX.Queue()
                     stop_queue = _CTX.Queue()
-                    self._open_worker_stderr_capture()
+                    if debug_simulated:
+                        # Same two queues, same event vocabulary, a thread instead of a
+                        # subprocess: the pump, watchdog and DB finalize cannot tell them apart.
+                        from .debug_simulation import SimulatedTrainingProcess
 
-                    process_args, process_kwargs = account_process_spec(
-                        "core.training.worker",
-                        "run_training_process",
-                        cache_env,
-                        self._with_stderr_mirror(
-                            {
-                                "event_queue": event_queue,
-                                "stop_queue": stop_queue,
-                                "config": config,
-                            }
-                        ),
-                    )
-                    proc = _CTX.Process(
-                        target = run_without_native_path_secret,
-                        args = process_args,
-                        kwargs = process_kwargs,
-                        daemon = True,
-                    )
+                        proc = SimulatedTrainingProcess(
+                            event_queue,
+                            stop_queue,
+                            job_id = job_id,
+                            total_steps = int(config.get("max_steps") or 60),
+                            output_dir = config.get("output_dir"),
+                        )
+                    else:
+                        self._open_worker_stderr_capture()
+
+                        process_args, process_kwargs = account_process_spec(
+                            "core.training.worker",
+                            "run_training_process",
+                            cache_env,
+                            self._with_stderr_mirror(
+                                {
+                                    "event_queue": event_queue,
+                                    "stop_queue": stop_queue,
+                                    "config": config,
+                                }
+                            ),
+                        )
+                        proc = _CTX.Process(
+                            target = run_without_native_path_secret,
+                            args = process_args,
+                            kwargs = process_kwargs,
+                            daemon = True,
+                        )
                     from utils.process_lifetime import adopt_pid, is_process_shutting_down
 
                     previous_job_id = None
@@ -1948,7 +1978,9 @@ class TrainingBackend:
                         self.current_job_id = job_id
                         self.current_start_request_id = start_request_id
                     try:
-                        adopt_pid(proc.pid)
+                        # A simulated trainer is a thread here, so there is no pid to adopt.
+                        if not debug_simulated:
+                            adopt_pid(proc.pid)
                         # Recheck once the pid is recorded, for the window between the
                         # gate above and this record. Raised rather than handled inline
                         # so it reuses the terminate ladder and the state rollback below;

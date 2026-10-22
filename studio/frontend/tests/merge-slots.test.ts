@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   MAX_MERGE_MODELS,
+  MAX_MERGE_MODELS_CPU,
   appendWeight,
   blendShares,
+  maxMergeModels,
   parentLabel,
   removeWeight,
 } from "../src/features/advanced/merge-slots.ts";
@@ -32,6 +34,29 @@ test("the sixth parent is allowed and a seventh is not a slot at all", () => {
     ),
     [17, 17, 17, 17, 17, 17],
   );
+});
+
+test("a CPU host merges two or three parents; a GPU host up to six", () => {
+  assert.equal(MAX_MERGE_MODELS_CPU, 3);
+  assert.equal(maxMergeModels(false), MAX_MERGE_MODELS_CPU);
+  assert.equal(maxMergeModels(true), MAX_MERGE_MODELS);
+  // Until capabilities answer, keep the wider window: a failed probe must not
+  // silently narrow what a GPU host can merge.
+  assert.equal(maxMergeModels(null), MAX_MERGE_MODELS);
+  assert.equal(maxMergeModels(undefined), MAX_MERGE_MODELS);
+});
+
+test("the plan's RAM-derived cap wins over the flat CPU tier", () => {
+  // The backend measures the actual checkpoints, so a CPU host with room for
+  // five small parents must be allowed five rather than trimmed back to three.
+  assert.equal(maxMergeModels(false, 2), 2);
+  assert.equal(maxMergeModels(false, 5), 5);
+  assert.equal(maxMergeModels(false, 9), MAX_MERGE_MODELS);
+  assert.equal(maxMergeModels(true, 4), 4);
+  // No usable plan yet: fall back to the capability tier.
+  assert.equal(maxMergeModels(false, null), MAX_MERGE_MODELS_CPU);
+  assert.equal(maxMergeModels(false, 1), MAX_MERGE_MODELS_CPU);
+  assert.equal(maxMergeModels(false, Number.NaN), MAX_MERGE_MODELS_CPU);
 });
 
 test("adding a parent to a weighted blend keeps the existing ratio", () => {

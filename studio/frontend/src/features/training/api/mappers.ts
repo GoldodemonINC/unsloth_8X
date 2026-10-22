@@ -9,6 +9,7 @@ import type { SystemInfoResponse } from "@/hooks/use-system";
 import { drafterEligible, drafterRequestFrom } from "../lib/drafter-config";
 import type { TrainingStartRequest } from "../types/api";
 import { buildAdvancedRequest } from "@/features/advanced/types";
+import { CORA_HYPERPARAMS } from "@/config/training";
 import type { TrainingConfigState } from "../types/config";
 
 function parseSliceValue(value: string | null): number | null {
@@ -53,7 +54,9 @@ export function trainingLoadsIn4Bit(
   const isCpt = config.trainingMethod === "cpt";
   const adapterMethod = config.trainingMethod !== "full";
   const isQloraMethod =
-    config.trainingMethod === "qlora" || config.trainingMethod === "rl";
+    config.trainingMethod === "qlora" ||
+    config.trainingMethod === "rl" ||
+    config.trainingMethod === "cora";
   const isFourBitModel = (config.selectedModel ?? "")
     .toLowerCase()
     .includes("4bit");
@@ -184,6 +187,7 @@ export function buildTrainingStartPayload(
       ? "lora"
       : config.trainingMethod;
   const isCpt = trainingMethod === "cpt";
+  const isCora = trainingMethod === "cora";
   const adapterMethod = trainingMethod !== "full";
   const loraVariants = adapterMethod && !isDecision;
   const _selectedModelLower = (config.selectedModel ?? "").toLowerCase();
@@ -219,10 +223,15 @@ export function buildTrainingStartPayload(
     }
   }
 
-  const advanced = buildAdvancedRequest(config.advanced, {
-    batchSize: config.batchSize,
-    isPolicyAlignment: trainingMethod === "rl",
-  });
+  const advanced = buildAdvancedRequest(
+    isCora
+      ? { ...config.advanced, qatEnabled: true, layerLrEnabled: true }
+      : config.advanced,
+    {
+      batchSize: config.batchSize,
+      isPolicyAlignment: trainingMethod === "rl",
+    },
+  );
 
   return {
     model_name: config.selectedModel ?? "",
@@ -234,7 +243,8 @@ export function buildTrainingStartPayload(
     model_format: config.modelFormat,
     load_in_4bit: trainingLoadsIn4Bit({ ...config, trainingMethod }),
     // Hidden for decision runs: Laya always trains at 1024 tokens, Clef and LLMs at the recipe's length.
-    max_seq_length: isDecision && !hasLlmBackbone ? 1024 : config.contextLength,
+    max_seq_length:
+      isCora || (isDecision && !hasLlmBackbone) ? 1024 : config.contextLength,
     vision_image_size:
       config.isVisionModel && config.isDatasetImage === true && !isDeepseekOcr
         ? config.visionImageSize
@@ -279,8 +289,10 @@ export function buildTrainingStartPayload(
       isCpt && config.embeddingLearningRate != null
         ? config.embeddingLearningRate
         : null,
-    batch_size: config.batchSize,
-    gradient_accumulation_steps: config.gradientAccumulation,
+    batch_size: isCora ? CORA_HYPERPARAMS.batchSize : config.batchSize,
+    gradient_accumulation_steps: isCora
+      ? CORA_HYPERPARAMS.gradientAccumulation
+      : config.gradientAccumulation,
     warmup_steps: isEmbedding ? null : config.warmupSteps,
     warmup_ratio: isEmbedding ? 0.03 : null,
     max_steps: config.maxSteps,
@@ -298,21 +310,24 @@ export function buildTrainingStartPayload(
     random_seed: config.randomSeed,
     packing: isEmbedding || isDecision ? false : config.packing,
     // Laya's recipe needs torch AdamW; Clef keeps its recipe's (8-bit) optimizer.
-    optim:
-      isDecision && config.decisionLayout !== "clef"
+    optim: isCora
+      ? CORA_HYPERPARAMS.optimizerType
+      : isDecision && config.decisionLayout !== "clef"
         ? "adamw_torch"
         : config.optimizerType,
-    lr_scheduler_type: config.lrSchedulerType,
+    lr_scheduler_type: isCora
+      ? CORA_HYPERPARAMS.lrSchedulerType
+      : config.lrSchedulerType,
     use_lora: adapterMethod,
-    lora_r: config.loraRank,
-    lora_alpha: config.loraAlpha,
+    lora_r: isCora ? CORA_HYPERPARAMS.loraRank : config.loraRank,
+    lora_alpha: isCora ? CORA_HYPERPARAMS.loraAlpha : config.loraAlpha,
     lora_dropout: config.loraDropout,
     target_modules: adapterMethod ? config.targetModules : [],
     gradient_checkpointing: config.gradientCheckpointing,
     ...offloadPayload(config, trainingGpuIndices(system?.gpu), system),
-    use_rslora: loraVariants && config.loraVariant === "rslora",
-    use_loftq: loraVariants && config.loraVariant === "loftq",
-    use_dora: loraVariants && config.loraVariant === "dora",
+    use_rslora: !isCora && loraVariants && config.loraVariant === "rslora",
+    use_loftq: isCora || (loraVariants && config.loraVariant === "loftq"),
+    use_dora: !isCora && loraVariants && config.loraVariant === "dora",
     // CPT always trains on full sequences (no chat format masking)
     train_on_completions:
       isEmbedding || isDecision || isCpt || isRawText

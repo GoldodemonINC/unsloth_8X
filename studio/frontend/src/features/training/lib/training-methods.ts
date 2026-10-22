@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import { isAdapterMethod } from "@/types/training";
 import type {
   DatasetFormat,
   ModelType,
@@ -9,6 +10,7 @@ import type {
 import type { LoraVariant } from "../types/config";
 
 const BACKEND_TRAINING_TYPE: Record<TrainingMethod, string> = {
+  cora: "LoRA/QLoRA",
   qlora: "LoRA/QLoRA",
   lora: "LoRA/QLoRA",
   full: "Full Finetuning",
@@ -17,6 +19,7 @@ const BACKEND_TRAINING_TYPE: Record<TrainingMethod, string> = {
 };
 
 const TRAINING_METHOD_LABELS: Record<TrainingMethod, string> = {
+  cora: "CoRA",
   qlora: "QLoRA",
   lora: "LoRA",
   full: "Full",
@@ -43,7 +46,12 @@ export function isTrainingMethodSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
 ): boolean {
-  return deviceType !== "mac" || (trainingMethod !== "cpt" && trainingMethod !== "rl");
+  return (
+    deviceType !== "mac" ||
+    (trainingMethod !== "cpt" &&
+      trainingMethod !== "rl" &&
+      trainingMethod !== "cora")
+  );
 }
 
 export function isTrainingModelTypeSupportedOnDevice(
@@ -61,10 +69,7 @@ export function isTrainingLoraVariantSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
 ): boolean {
-  const usesAdapter =
-    trainingMethod === "qlora" ||
-    trainingMethod === "lora" ||
-    trainingMethod === "cpt";
+  const usesAdapter = isAdapterMethod(trainingMethod);
   return deviceType !== "mac" || !usesAdapter || loraVariant !== "loftq";
 }
 

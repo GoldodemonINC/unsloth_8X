@@ -2006,6 +2006,47 @@ def _background_video_generation_active() -> bool:
         return False
 
 
+async def _start_simulated_training() -> TrainingJobResponse:
+    """Start the fake run that Settings -> Debugging turns on.
+
+    Skips the model, dataset and GPU work a real start needs, so the training
+    surfaces can be exercised on a host that cannot train. Everything downstream
+    of the spawn is the normal path: the same event queue, the same status,
+    metrics, SSE stream, stop and history row.
+    """
+    backend = get_training_backend()
+    if await asyncio.to_thread(backend.is_training_active):
+        return TrainingJobResponse(
+            job_id = getattr(backend, "current_job_id", "") or "",
+            status = "error",
+            message = (
+                "Training is already in progress. "
+                "Stop current training before starting a new one."
+            ),
+            error = "Training already active",
+        )
+    job_id = f"job_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{_uuid.uuid4().hex[:8]}"
+    success = await asyncio.to_thread(
+        backend.start_training, job_id = job_id, debug_simulated = True
+    )
+    if not success:
+        failure = backend.trainer.training_progress.error or (
+            "Could not start the simulated run."
+        )
+        return TrainingJobResponse(
+            job_id = "",
+            status = "error",
+            message = failure,
+            error = failure,
+        )
+    return TrainingJobResponse(
+        job_id = job_id,
+        status = "queued",
+        message = "Simulated training job queued (no GPU, no model, no dataset)",
+        error = None,
+    )
+
+
 @router.post("/start", responses = _TRAINING_START_ERROR_RESPONSES)
 async def start_training(
     request: TrainingStartRequest,
@@ -2018,6 +2059,11 @@ async def start_training(
     Initiates training in the background and returns immediately. Use /status
     to check progress.
     """
+    from core.training import debug_simulation
+
+    if debug_simulation.is_enabled():
+        return await _start_simulated_training()
+
     await asyncio.to_thread(_validate_decision_request, request, via_api_key)
     if request.drafter is not None and request.drafter.enabled:
         from core.training.training import should_use_mlx_training_backend

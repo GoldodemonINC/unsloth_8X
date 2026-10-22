@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { Button } from "@/components/ui/button";
+import { useDebugTrainingSimulation } from "@/features/settings/hooks/use-debug-training-simulation";
 import {
   type StartValidationResult,
   useTrainingActions,
@@ -96,8 +97,11 @@ export function StartTrainingCta() {
   } = useTrainingReadiness();
   const { startError, startBlocked, stopRequested, startTrainingRun } =
     useTrainingActions();
+  // Settings -> Debugging: a fake trainer runs instead, so no model, dataset
+  // or GPU is needed and none of the usual readiness gates apply.
+  const simulated = useDebugTrainingSimulation();
 
-  const disabled = startBlocked || !isReady;
+  const disabled = startBlocked || (!simulated && !isReady);
   const buttonLabel = t(
     resolveStartTrainingButtonLabelKey({
       stopRequested,
@@ -106,21 +110,24 @@ export function StartTrainingCta() {
       isCheckingDataset,
       hasModel,
       hasDataset,
+      simulated,
     }),
   );
-  const errorMessage = resolveStartTrainingError({
-    t,
-    startError,
-    modelError,
-    isIncompatible,
-    isAudioModel,
-    isDatasetAudio,
-    datasetUnverified,
-    hasModel,
-    hasDataset,
-    datasetSource,
-    configValidation,
-  });
+  const errorMessage = simulated
+    ? startError
+    : resolveStartTrainingError({
+        t,
+        startError,
+        modelError,
+        isIncompatible,
+        isAudioModel,
+        isDatasetAudio,
+        datasetUnverified,
+        hasModel,
+        hasDataset,
+        datasetSource,
+        configValidation,
+      });
   const isWarning =
     !(startError || isIncompatible || !configValidation.ok) &&
     !!(modelError || datasetUnverified);
@@ -155,6 +162,14 @@ export function StartTrainingCta() {
         />
         {buttonLabel}
       </Button>
+      {simulated && (
+        <output
+          data-testid="simulated-training-note"
+          className="block text-ui-11p5 leading-relaxed text-muted-foreground"
+        >
+          {t("studio.training.simulatedNote")}
+        </output>
+      )}
       {errorMessage && (
         <div
           className={cn(

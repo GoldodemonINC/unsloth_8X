@@ -409,6 +409,41 @@ function ModelPanel() {
   );
 }
 
+function CoraRecipeCard() {
+  const rows: Array<[string, string]> = [
+    ["Adapter", "r=8, alpha=24, LoftQ init"],
+    ["Base precision", "4-bit (Q4_1), exported later to the quant you pick"],
+    ["Optimizer", "Paged AdamW 8-bit"],
+    ["Schedule", "Cosine"],
+    ["Batch", "1 x 3 gradient accumulation"],
+    ["Context", "1024 tokens"],
+    ["Quantization-aware", "Int4 QAT on"],
+    ["Layer LRs", "Embedding 0.25x to head 1.0x"],
+    ["Dataset", "0.01 GB to 0.8 GB of text"],
+  ];
+  return (
+    <SectionBox
+      title="CoRA recipe"
+      description="The CPU-first adapter recipe, fixed for every CoRA run"
+      icon={Settings05Icon}
+      chipTint="var(--chart-2)"
+    >
+      <dl className="grid gap-x-6 gap-y-2 text-ui-11 sm:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-baseline justify-between gap-3 border-b border-border/40 pb-1.5">
+            <dt className="text-muted-foreground">{label}</dt>
+            <dd className="text-right font-medium text-foreground">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-3 text-ui-10p5 leading-ui-14 text-muted-foreground/70">
+        Advanced training stays off for CoRA: QAT and layer-wise learning rates
+        are the only extras it uses, and both are already on.
+      </p>
+    </SectionBox>
+  );
+}
+
 export function TrainingWizard({
   paramMode,
   onParamModeChange,
@@ -417,6 +452,7 @@ export function TrainingWizard({
   onParamModeChange: (next: ParamMode) => void;
 }) {
   const t = useT();
+  const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
   return (
     <div className="flex flex-col gap-6">
       <SectionBox
@@ -452,7 +488,7 @@ export function TrainingWizard({
         <ParamsSection mode={paramMode} />
       </SectionBox>
 
-      <AdvancedTrainingSection />
+      {trainingMethod === "cora" ? <CoraRecipeCard /> : <AdvancedTrainingSection />}
 
       <SectionBox
         title={t("studio.wizard.configTitle")}

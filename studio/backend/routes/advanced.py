@@ -506,10 +506,13 @@ PLATFORM_LINE = (
 
 @router.get("/capabilities")
 def capabilities() -> dict[str, Any]:
-    from core.advanced import splitter
+    from core.advanced import merge, splitter
 
     memory = splitter.probe_memory()
     has_gpu = bool(memory.gpus)
+    # Mirrors merge.max_merge_models(), from the probe this response already has:
+    # a three-parent CPU tier, the six-parent GPU tier.
+    max_merge_models = merge.MAX_MERGE_MODELS if has_gpu else merge.MAX_MERGE_MODELS_CPU
     features = [
         {**feature, "available_here": feature["gpu"] if has_gpu else feature["cpu"]}
         for feature in _FEATURES
@@ -531,9 +534,12 @@ def capabilities() -> dict[str, Any]:
         "safetensors_available": _module_available("safetensors"),
         "trl_available": _module_available("trl"),
         "merge_streams": True,
+        "merge_tier": "gpu" if has_gpu else "cpu",
+        "max_merge_models": max_merge_models,
         "merge_cpu_note": (
-            "CPU merge is streaming only: both parents are never resident, so 8 GB of "
-            "available RAM is a real tier. A full-load merge would not fit and is not offered."
+            "CPU merge is streaming only: parents are never resident at once (equal-shaped "
+            "tensors are blended a row chunk at a time), so 8 GB of available RAM is a real "
+            "tier. The basic tier blends two or three checkpoints; a GPU host takes up to six."
         ),
     }
 
@@ -887,6 +893,9 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
 
     sources = _merge_sources(request.model_a, request.model_b, request.models)
     try:
+        has_gpu = merge.host_has_gpu()
+        limit = merge.max_merge_models(has_gpu, sources = sources)
+        merge.check_model_count(len(sources), limit)
         specs = [
             merge.probe_model_spec(source, token = request.hf_token)
             for source in sources
@@ -930,6 +939,9 @@ def plan_merge(request: MergePlanRequest) -> dict[str, Any]:
             if any(alignment.mmoe_required for alignment in alignments[1:])
             else "standard"
         ),
+        "tier": "gpu" if has_gpu else "cpu",
+        "max_models": limit,
+        "parent_cap_reason": "gpu" if has_gpu else "ram",
         # Prefilled into the output field so a merge lands in the folder Studio scans.
         "suggested_output_dir": str(suggested),
         # Plan before compute: peak memory, the output folder, and the tokenizer verdict.
@@ -948,6 +960,11 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
     from core.advanced import merge
 
     sources = _merge_sources(request.model_a, request.model_b, request.models)
+    try:
+        limit = merge.max_merge_models(merge.host_has_gpu(), sources = sources)
+        merge.check_model_count(len(sources), limit)
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
     for label, source in zip(_merge_labels(len(sources)), sources):
         _require_checkpoint_source(source, label)
     weights = request.weights

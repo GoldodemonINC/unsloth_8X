@@ -31,9 +31,18 @@ function lift(pattern: RegExp, what: string): string {
 // them by hand keeps this a plain-node test; a changed signature fails loudly below, when the
 // evaluated source refuses to parse.
 const declarations = [
-  lift(/const CHAT_ONLY_ALLOWED = new Set\(\[[\s\S]*?\n\]\);/, "CHAT_ONLY_ALLOWED"),
-  lift(/const SELF_GATED_WHILE_UNKNOWN = \[[^\]]*\];/, "SELF_GATED_WHILE_UNKNOWN"),
-  lift(/function waitsOutUnknownVerdict\([\s\S]*?\n\}/, "waitsOutUnknownVerdict"),
+  lift(
+    /const CHAT_ONLY_ALLOWED = new Set\(\[[\s\S]*?\n\]\);/,
+    "CHAT_ONLY_ALLOWED",
+  ),
+  lift(
+    /const SELF_GATED_WHILE_UNKNOWN = \[[^\]]*\];/,
+    "SELF_GATED_WHILE_UNKNOWN",
+  ),
+  lift(
+    /function waitsOutUnknownVerdict\([\s\S]*?\n\}/,
+    "waitsOutUnknownVerdict",
+  ),
   lift(/function isChatOnlyAllowed\([\s\S]*?\n\}/, "isChatOnlyAllowed"),
 ]
   .join("\n")
@@ -41,24 +50,46 @@ const declarations = [
 
 // The guard itself, with its two inputs made into parameters: the store call becomes the
 // host verdict, the router's location becomes the path under test.
-const guard = /if \(\s*isChatOnly\(\) &&([\s\S]*?)\)\s*\{\s*throw redirect/.exec(src);
+const guard =
+  /if \(\s*isChatOnly\(\) &&([\s\S]*?)\)\s*\{\s*throw redirect/.exec(src);
 assert.ok(guard, "could not find the chat-only redirect in beforeLoad");
 const condition = `isChatOnly() &&${guard[1]}`
   .replaceAll("isChatOnly()", "chatOnly")
   .replaceAll("location.pathname", "pathname");
 // Both inputs have to have been substituted, or the evaluated guard is not the shipped one.
-assert.ok(!condition.includes("location."), "the guard reads a location this test cannot set");
-assert.ok(!condition.includes("isChatOnly()"), "the guard reads a verdict this test cannot set");
+assert.ok(
+  !condition.includes("location."),
+  "the guard reads a location this test cannot set",
+);
+assert.ok(
+  !condition.includes("isChatOnly()"),
+  "the guard reads a verdict this test cannot set",
+);
 
-const redirectsToChat = new Function(
+// Settings -> Debugging's simulated run lets /studio through, so the guard reads that flag too.
+// The helpers below drive the common "not simulating" case and one test flips it.
+const evaluateGuard = new Function(
   "pathname",
   "chatOnly",
   "unmeasured",
+  "simulatedTraining",
   `${declarations}\nreturn Boolean(${condition});`,
-) as (pathname: string, chatOnly: boolean, unmeasured: boolean) => boolean;
+) as (
+  pathname: string,
+  chatOnly: boolean,
+  unmeasured: boolean,
+  simulatedTraining: boolean,
+) => boolean;
+
+const redirectsToChat = (
+  pathname: string,
+  chatOnly: boolean,
+  unmeasured: boolean,
+) => evaluateGuard(pathname, chatOnly, unmeasured, false);
 
 // A host that has answered: chat_only true, nothing left to wait for.
-const measuredChatOnly = (pathname: string) => redirectsToChat(pathname, true, false);
+const measuredChatOnly = (pathname: string) =>
+  redirectsToChat(pathname, true, false);
 
 test("a measured chat-only host reaches /video and its own explanation", () => {
   assert.equal(
@@ -95,13 +126,39 @@ test("an unmeasured verdict still lets both pages wait it out", () => {
 
 test("the pages that self-gate are unaffected, and everything else still redirects", () => {
   // Allowed for the same reason /video now is: each explains itself instead of vanishing.
-  for (const path of ["/chat", "/export", "/images", "/api-monitor", "/data-recipes"]) {
-    assert.equal(measuredChatOnly(path), false, `${path} no longer survives the guard`);
+  for (const path of [
+    "/chat",
+    "/export",
+    // CPU merging: the page caps its own slots instead of disappearing.
+    "/merge",
+    "/images",
+    "/api-monitor",
+    "/data-recipes",
+  ]) {
+    assert.equal(
+      measuredChatOnly(path),
+      false,
+      `${path} no longer survives the guard`,
+    );
   }
   // Nothing was widened past the paths that opt in.
   for (const path of ["/settings", "/videos", "/videoish"]) {
-    assert.equal(measuredChatOnly(path), true, `${path} slipped through the chat-only guard`);
+    assert.equal(
+      measuredChatOnly(path),
+      true,
+      `${path} slipped through the chat-only guard`,
+    );
   }
+});
+
+test("simulated training opens /studio on a measured chat-only host", () => {
+  assert.equal(
+    evaluateGuard("/studio", true, false, true),
+    false,
+    "the Debugging simulator is why a GPU-less host can still run a fake training job",
+  );
+  // The flag is only loaded for /studio (beforeLoad reads it under opensStudio), so the
+  // lifted guard's global "don't redirect" is not a bypass for the other gated pages.
 });
 
 test("a host that is not chat-only is never redirected", () => {

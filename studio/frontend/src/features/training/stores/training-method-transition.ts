@@ -2,8 +2,10 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import {
+  CORA_HYPERPARAMS,
   CPT_LORA_HYPERPARAMS,
   DEFAULT_HYPERPARAMS,
+  LR_DEFAULT_CORA,
   LR_DEFAULT_CPT,
   LR_DEFAULT_DECISION_FULL,
   LR_DEFAULT_FULL,
@@ -11,6 +13,7 @@ import {
   TARGET_MODULES,
   resolveCptTargetModules,
 } from "@/config/training";
+import { DEFAULT_ADVANCED_TRAINING } from "@/features/advanced/types";
 import { isAdapterMethod } from "@/types/training";
 import type { TrainingMethod } from "@/types/training";
 import { isRawTextDatasetFormat } from "../lib/training-methods";
@@ -31,8 +34,47 @@ type TrainingMethodStatePatch = Partial<
     | "datasetFormat"
     | "trainOnCompletions"
     | "trainingMethodProvenance"
+    | "advanced"
+    | "optimizerType"
+    | "lrSchedulerType"
+    | "batchSize"
+    | "gradientAccumulation"
+    | "contextLength"
   >
 >;
+
+function getCoraTrainingPatch(): TrainingMethodStatePatch {
+  return {
+    ...CORA_HYPERPARAMS,
+    advanced: {
+      ...DEFAULT_ADVANCED_TRAINING,
+      qatEnabled: true,
+      layerLrEnabled: true,
+    },
+  };
+}
+
+function getRestoreFromCoraPatch(
+  state: Pick<TrainingConfigState, "advanced"> &
+    Partial<Pick<TrainingConfigState, keyof typeof CORA_HYPERPARAMS>>,
+): TrainingMethodStatePatch {
+  const patch: TrainingMethodStatePatch = {};
+  for (const key of Object.keys(CORA_HYPERPARAMS) as Array<
+    keyof typeof CORA_HYPERPARAMS
+  >) {
+    if (state[key] === CORA_HYPERPARAMS[key]) {
+      Object.assign(patch, { [key]: DEFAULT_HYPERPARAMS[key] });
+    }
+  }
+  if (state.advanced.qatEnabled && state.advanced.layerLrEnabled) {
+    patch.advanced = {
+      ...state.advanced,
+      qatEnabled: false,
+      layerLrEnabled: false,
+    };
+  }
+  return patch;
+}
 
 function getCptTrainingPatch(
   currentTargetModules: readonly string[],
@@ -81,6 +123,9 @@ function resolveTrainingMethodLearningRate(
   const wasAdapter = isAdapterMethod(prevMethod);
   const nowAdapter = isAdapterMethod(nextMethod);
 
+  if (nextMethod === "cora") {
+    return LR_DEFAULT_CORA;
+  }
   if (nextMethod === "cpt") {
     return LR_DEFAULT_CPT;
   }
@@ -136,12 +181,26 @@ export function buildTrainingMethodPatch(
     | "isAudioModel"
     | "isDatasetImage"
     | "isDatasetAudio"
+    | "learningRate"
+    | "optimizerType"
+    | "lrSchedulerType"
+    | "batchSize"
+    | "gradientAccumulation"
+    | "contextLength"
+    | "advanced"
   >,
   nextMethod: TrainingMethod,
 ): TrainingMethodStatePatch {
   const prevMethod = state.trainingMethod;
   const patch: TrainingMethodStatePatch = { trainingMethod: nextMethod };
   const provenance = { ...state.trainingMethodProvenance };
+
+  if (prevMethod === "cora" && nextMethod !== "cora") {
+    Object.assign(patch, getRestoreFromCoraPatch(state));
+  }
+  if (prevMethod !== "cora" && nextMethod === "cora") {
+    Object.assign(patch, getCoraTrainingPatch());
+  }
 
   if (prevMethod !== "cpt" && nextMethod === "cpt") {
     provenance.datasetFormatBeforeCpt = isRawTextDatasetFormat(

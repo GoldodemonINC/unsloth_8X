@@ -723,7 +723,13 @@ def test_merge_plan_reports_every_parent(client: TestClient, tmp_path: Path):
     assert body["alignment"]["mode"] == "identical"
 
 
-def test_merge_run_accepts_six_parents(client: TestClient, tmp_path: Path, started_jobs):
+def test_merge_run_accepts_six_parents(
+    client: TestClient, tmp_path: Path, started_jobs, monkeypatch
+):
+    """Six parents stay the GPU tier's ceiling."""
+    from core.advanced import merge as merge_module
+
+    monkeypatch.setattr(merge_module, "host_has_gpu", lambda: True)
     models = _n_checkpoints(tmp_path, 6)
     response = client.post(
         "/api/advanced/merge/run",
@@ -740,6 +746,43 @@ def test_merge_run_accepts_six_parents(client: TestClient, tmp_path: Path, start
     assert started_jobs[0]["sources"] == models
     # The page needs a progress stream for a run this long.
     assert started_jobs[0]["with_progress"] is True
+
+
+def test_merge_run_allows_four_small_parents_on_a_cpu_host(
+    client: TestClient, tmp_path: Path, monkeypatch, started_jobs
+):
+    """A CPU host is capped by RAM, not by the missing GPU."""
+    from core.advanced import merge as merge_module
+
+    monkeypatch.setattr(merge_module, "host_has_gpu", lambda: False)
+    monkeypatch.setattr(merge_module, "free_ram_bytes", lambda: 16 * 1024**3)
+    models = _n_checkpoints(tmp_path, 4)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={"models": models, "method": "linear", "density": 0.5, "max_shard_gb": 4},
+    )
+
+    assert response.status_code == 200
+    assert started_jobs[-1]["sources"] == models
+
+
+def test_merge_run_stops_at_two_when_ram_is_short(
+    client: TestClient, tmp_path: Path, monkeypatch, started_jobs
+):
+    """A host without room for a third row chunk says so before starting."""
+    from core.advanced import merge as merge_module
+
+    monkeypatch.setattr(merge_module, "host_has_gpu", lambda: False)
+    monkeypatch.setattr(merge_module, "free_ram_bytes", lambda: 40 * 1024**2)
+    models = _n_checkpoints(tmp_path, 3)
+    response = client.post(
+        "/api/advanced/merge/run",
+        json={"models": models, "method": "linear", "density": 0.5, "max_shard_gb": 4},
+    )
+
+    assert response.status_code == 400
+    assert "can merge at most 2" in response.json()["detail"]
+    assert started_jobs == []
 
 
 def test_merge_run_rejects_seven_parents(client: TestClient, tmp_path: Path):

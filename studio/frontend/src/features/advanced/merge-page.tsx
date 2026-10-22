@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { useNavigate } from "@tanstack/react-router";
+import { useAppShellReadySignal } from "@/components/app-readiness";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,9 +15,9 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
+import { usePlatformStore } from "@/config/env";
 import { hfApiToken, useHfTokenStore } from "@/features/hub";
 import { StudioModeNav } from "@/features/studio/studio-mode-nav";
-import { useAppShellReadySignal } from "@/components/app-readiness";
 import { cn } from "@/lib/utils";
 import {
   Layers01Icon,
@@ -26,8 +26,14 @@ import {
   Refresh01Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { useEffect, useState, type ReactElement } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { type ReactElement, useEffect, useState } from "react";
 import {
+  type AdvancedJob,
+  type MergeHistoryEntry,
+  type MergePlanResponse,
+  type MergeValidation,
+  type StructuralEval,
   evalMergedModel,
   fetchAdvancedCapabilities,
   fetchMergeHistory,
@@ -37,18 +43,21 @@ import {
   runMoeMerge,
   validateMerge,
   waitForJob,
-  type AdvancedJob,
-  type MergeHistoryEntry,
-  type MergePlanResponse,
-  type MergeValidation,
-  type StructuralEval,
 } from "./api/advanced-api";
+import { MergeModelSlot } from "./components/merge-model-slot";
+import {
+  type SavedMergePreset,
+  loadSavedPresets,
+  removeSavedPreset,
+  upsertSavedPreset,
+  writeSavedPresets,
+} from "./lib/merge-preset-store";
 import {
   BUILT_IN_MERGE_PRESETS,
   MERGE_METHOD_NOTES,
   type MergePreset,
-  WEIGHT_TOOL_LABELS,
   type MergeSetup,
+  WEIGHT_TOOL_LABELS,
   applyPreset,
   applyWeightTool,
   budgetVerdict,
@@ -65,18 +74,10 @@ import {
   throughputBytesPerSecond,
 } from "./lib/merge-tools";
 import {
-  type SavedMergePreset,
-  loadSavedPresets,
-  removeSavedPreset,
-  upsertSavedPreset,
-  writeSavedPresets,
-} from "./lib/merge-preset-store";
-import { MergeModelSlot } from "./components/merge-model-slot";
-import {
-  MAX_MERGE_MODELS,
   MIN_MERGE_MODELS,
   appendWeight,
   blendShares,
+  maxMergeModels,
   parentLabel,
   removeWeight,
 } from "./merge-slots";
@@ -188,8 +189,15 @@ export function MergePage(): ReactElement {
   const navigate = useNavigate();
   const hfToken = useHfTokenStore((s) => s.token);
   const accessToken = hfApiToken(hfToken) ?? null;
-  // Two slots is the common case; up to six parents can be blended at once.
+  // Two slots is the common case; up to six parents on a GPU, three on a CPU.
   const [models, setModels] = useState<string[]>(["", ""]);
+  // Capabilities name the GPU; the platform verdict is the fallback, so a failed
+  // /capabilities request on a CPU host still lands on the three-parent tier.
+  const platformChatOnly = usePlatformStore((s) => s.isChatOnly());
+  const platformUnknown = usePlatformStore((s) => s.capabilitiesUnknown());
+  const [hasGpu, setHasGpu] = useState<boolean | null>(
+    platformChatOnly && !platformUnknown ? false : null,
+  );
   // Relative weight per slot, normalized on the backend and in the share label.
   const [weights, setWeights] = useState<number[]>([0.5, 0.5]);
   const typedModels = models.map((entry) => entry.trim());
@@ -204,7 +212,7 @@ export function MergePage(): ReactElement {
   // nested setState runs twice under StrictMode and drifts out of step with the
   // slot list.
   const addModel = () => {
-    if (models.length >= MAX_MERGE_MODELS) return;
+    if (models.length >= maxModels) return;
     setModels((current) => [...current, ""]);
     setWeights(appendWeight);
   };
@@ -214,6 +222,7 @@ export function MergePage(): ReactElement {
     setWeights((current) => removeWeight(current, index));
   };
   const [plan, setPlan] = useState<MergePlanResponse | null>(null);
+  const maxModels = maxMergeModels(hasGpu, plan?.max_models);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
   const [mode, setMode] = useState<"standard" | "mmoe">("standard");
@@ -234,6 +243,7 @@ export function MergePage(): ReactElement {
   const [validation, setValidation] = useState<MergeValidation | null>(null);
   const [validating, setValidating] = useState(false);
   const [allowTokenConflict, setAllowTokenConflict] = useState(false);
+  const [allowPickle, setAllowPickle] = useState(false);
   const [structural, setStructural] = useState<StructuralEval | null>(null);
   // Recipes and recent runs: one is saved here, the other read from the manifests
   // the finished merges wrote.
@@ -374,6 +384,7 @@ export function MergePage(): ReactElement {
     fetchAdvancedCapabilities()
       .then((capabilities) => {
         const memory = capabilities.memory;
+        setHasGpu(capabilities.has_gpu ?? memory.gpus.length > 0);
         setMemoryBudget({
           ramBytes: memory.system_ram_total_bytes,
           diskBytes: memory.disk_free_bytes,
@@ -384,6 +395,19 @@ export function MergePage(): ReactElement {
       })
       .catch(() => undefined);
   }, []);
+
+  // A CPU host takes three parents and no MMoE router, so trim a slot list that a
+  // recipe or an earlier GPU-sized session left beyond the tier, and fall back to
+  // the weight-space blend. The backend enforces the same cap.
+  useEffect(() => {
+    if (models.length <= maxModels) return;
+    setModels((current) => current.slice(0, maxModels));
+    setWeights((current) => current.slice(0, maxModels));
+  }, [maxModels, models.length]);
+
+  useEffect(() => {
+    if (hasGpu === false && mode === "mmoe") setMode("standard");
+  }, [hasGpu, mode]);
 
   // Only used for the hint and the "outside the library" warning; a merge resolves its
   // own default server-side, so a failure here costs nothing.
@@ -446,6 +470,7 @@ export function MergePage(): ReactElement {
       setValidation(
         await validateMerge({
           models: typedModels,
+          allow_non_safetensors: allowPickle,
           hf_token: accessToken,
         }),
       );
@@ -479,6 +504,7 @@ export function MergePage(): ReactElement {
               density,
               max_shard_gb: 4,
               hf_token: accessToken,
+              allow_non_safetensors: allowPickle,
               allow_tokenizer_conflict: allowTokenConflict,
             });
       setJob(created);
@@ -527,7 +553,7 @@ export function MergePage(): ReactElement {
                 Merging Studio
               </h1>
               <p className="page-title-halo text-sm text-muted-foreground">
-                Fuse two to six checkpoints — same family or different
+                Fuse 2 to {maxModels} checkpoints — same family or different
                 architectures — by weights or by a trained MMoE router.
               </p>
             </div>
@@ -583,15 +609,25 @@ export function MergePage(): ReactElement {
               variant="outline"
               size="sm"
               onClick={addModel}
-              disabled={running || models.length >= MAX_MERGE_MODELS}
+              disabled={running || models.length >= maxModels}
             >
               <HugeiconsIcon icon={PlusSignIcon} className="size-3.5" />
               Add model
             </Button>
             <span className="text-ui-11 text-muted-foreground">
-              {models.length} of {MAX_MERGE_MODELS} parents
+              {models.length} of {maxModels} parents
             </span>
           </div>
+          {hasGpu === false ? (
+            <p
+              data-testid="cpu-merge-note"
+              className="text-ui-10p5 leading-ui-14 text-muted-foreground/70"
+            >
+              CPU merge, {maxModels} parents on this host. The cap follows free
+              RAM: every method streams tensors a row chunk at a time, so no
+              checkpoint is ever fully resident. The MMoE router needs a GPU.
+            </p>
+          ) : null}
           <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
             Inspect downloads only the small{" "}
             <span className="font-mono">config.json</span> and tokenizer JSONs
@@ -652,9 +688,9 @@ export function MergePage(): ReactElement {
           ) : null}
           {!plan && !planError ? (
             <p className="text-ui-11 leading-ui-16 text-muted-foreground/80">
-              Pick 2 to 6 checkpoints — Hub repos or local paths — then inspect.
-              The resolver reports each shape, plans every parent against the
-              first, and only then unlocks Run merge.
+              Pick 2 to {maxModels} checkpoints — Hub repos or local paths —
+              then inspect. The resolver reports each shape, plans every parent
+              against the first, and only then unlocks Run merge.
             </p>
           ) : null}
 
@@ -674,7 +710,7 @@ export function MergePage(): ReactElement {
                   Parents at a glance
                 </span>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[520px] text-ui-11">
+                  <table className="w-full min-w-[calc(520px*var(--ui-space-scale,1))] text-ui-11">
                     <thead className="text-muted-foreground/70">
                       <tr className="text-left">
                         <th className="py-1 pr-3 font-medium">Slot</th>
@@ -1032,6 +1068,18 @@ export function MergePage(): ReactElement {
                   loading), and checkpoints that need custom code are refused
                   unless you opt in.
                 </p>
+                <label className="mt-2 flex items-start gap-2 text-ui-11 leading-ui-15 text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={allowPickle}
+                    onChange={(event) => setAllowPickle(event.target.checked)}
+                    disabled={running}
+                  />
+                  Read <span className="font-mono">.bin</span> checkpoints
+                  lazily through a memory map. Only enable this for files you
+                  trust.
+                </label>
                 {validation?.sources
                   .filter((entry) => entry.blocked_reason)
                   .map((entry) => (
@@ -1132,11 +1180,18 @@ export function MergePage(): ReactElement {
                   key={option}
                   type="button"
                   onClick={() => setMode(option)}
+                  disabled={option === "mmoe" && hasGpu === false}
+                  title={
+                    option === "mmoe" && hasGpu === false
+                      ? "The MMoE router needs a GPU; standard blending runs on a CPU."
+                      : undefined
+                  }
                   className={cn(
                     "rounded-full px-3 py-1 text-ui-11 transition-colors",
                     mode === option
                       ? "bg-foreground text-background"
                       : "text-muted-foreground hover:text-foreground",
+                    "disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-muted-foreground",
                   )}
                 >
                   {option === "standard" ? "Standard blending" : "MMoE router"}
@@ -1380,11 +1435,11 @@ export function MergePage(): ReactElement {
             {runError && job?.status !== "failed" ? (
               <span className="text-ui-11 text-destructive">{runError}</span>
             ) : null}
-            {!weightsValid ? (
+            {weightsValid ? null : (
               <span className="text-ui-11 text-destructive">
                 Raise at least one blend weight above zero.
               </span>
-            ) : null}
+            )}
           </div>
 
           {job?.status === "running" ? (
@@ -1589,6 +1644,10 @@ export function MergePage(): ReactElement {
                         >
                           Quantize in Export
                         </Button>
+                        <span className="text-ui-10p5 text-muted-foreground/70">
+                          Pick a GGUF level there, then Chat with the file it
+                          writes.
+                        </span>
                       </div>
                     ) : null}
                   </>
@@ -1663,7 +1722,7 @@ export function MergePage(): ReactElement {
                       weights: fitWeights(
                         entry.weights ?? [],
                         entry.models.length,
-                      ),                      // An unknown method in an old manifest must not reach the run payload.
+                      ), // An unknown method in an old manifest must not reach the run payload.
                       method:
                         entry.method === "slerp" ||
                         entry.method === "ties" ||

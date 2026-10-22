@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-/**
- * Slot bookkeeping for a merge of 2 to 6 parents.
- *
- * The page keeps the parent list and the weight list as two pieces of state, so
- * every add and remove has to keep them the same length; getting that wrong is
- * invisible until the weights silently stop lining up with the slots. Keeping
- * the arithmetic here lets it be tested without mounting the page.
- */
-
 export const MIN_MERGE_MODELS = 2;
 export const MAX_MERGE_MODELS = 6;
+export const MAX_MERGE_MODELS_CPU = 3;
 
-/** Slot names: the familiar A/B pair for two parents, numbered slots beyond it. */
+export function maxMergeModels(
+  hasGpu: boolean | null | undefined,
+  planMax?: number | null,
+): number {
+  if (
+    typeof planMax === "number" &&
+    Number.isFinite(planMax) &&
+    planMax >= MIN_MERGE_MODELS
+  ) {
+    return Math.min(MAX_MERGE_MODELS, Math.round(planMax));
+  }
+  return hasGpu === false ? MAX_MERGE_MODELS_CPU : MAX_MERGE_MODELS;
+}
+
 export function parentLabel(index: number, total: number): string {
   if (total === 2) {
     return index === 0 ? "Model A" : "Model B";
@@ -21,13 +26,6 @@ export function parentLabel(index: number, total: number): string {
   return `Model ${index + 1}`;
 }
 
-/**
- * Each parent's share of the blend, in slot order.
- *
- * Shares are relative, so the backend normalizes the same way this does; a
- * weight list that has drifted out of step with the slots (or sums to zero)
- * still yields a usable even split instead of NaN.
- */
 export function blendShares(weights: number[], count: number): number[] {
   if (count <= 0) {
     return [];
@@ -44,13 +42,6 @@ export function blendShares(weights: number[], count: number): number[] {
   });
 }
 
-/**
- * The weight list after adding a parent.
- *
- * A new parent joins at the current average, so an even blend stays even. Giving
- * it a fixed weight instead would make the newcomer outvote everyone (1 against
- * two 0.5s is half the blend), which is not what "add a model" should mean.
- */
 export function appendWeight(weights: number[]): number[] {
   if (weights.length === 0) {
     return [1];
@@ -60,7 +51,6 @@ export function appendWeight(weights: number[]): number[] {
   return [...weights, average > 0 ? average : 1];
 }
 
-/** The weight list after removing the parent at *index*, in the same order. */
 export function removeWeight(weights: number[], index: number): number[] {
   return weights.filter((_, position) => position !== index);
 }

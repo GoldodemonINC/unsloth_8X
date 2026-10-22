@@ -17,13 +17,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useCopyFeedback } from "@/features/hub/hooks/use-copy-feedback";
 import { formatBytes } from "@/features/hub";
+import { useCopyFeedback } from "@/features/hub/hooks/use-copy-feedback";
 import { useT } from "@/i18n";
 import { isTauri } from "@/lib/api-base";
 import { ChevronDownDoubleStandardIcon } from "@/lib/chevron-icons";
@@ -60,6 +61,10 @@ import {
   openLogsFolder,
   revealSavedArchive,
 } from "../api/debug-logs";
+import {
+  loadDebugTrainingSimulation,
+  saveDebugTrainingSimulation,
+} from "../api/debug-training-simulation";
 import { SettingsRow } from "../components/settings-row";
 import { SettingsSection } from "../components/settings-section";
 import {
@@ -71,13 +76,14 @@ import {
   type RefreshMode,
   applyLogChunk,
   isPageStale,
+  isRequestTimeout,
   nextDroppedState,
   parseRefreshMode,
-  isRequestTimeout,
   pollDelayMs,
   withRequestTimeout,
 } from "../lib/debug-log-buffer";
 import { isAbort, isLogSourceGone } from "../lib/debug-log-error";
+import { setDebugTrainingSimulationEnabled } from "../stores/debug-training-simulation-store";
 import {
   NO_PENDING_LOG_REQUEST,
   pendingLogRequestKey,
@@ -176,6 +182,10 @@ export function DebuggingTab() {
   const [following, setFollowing] = useState(true);
   const { copied, copy } = useCopyFeedback();
   const { copied: pathCopied, copy: copyPath } = useCopyFeedback();
+  // Simulated training: a fake trainer behind the real backend, so the training
+  // screens can be exercised where no GPU can. Null until the server answers.
+  const [simulating, setSimulating] = useState<boolean | null>(null);
+  const [savingSimulation, setSavingSimulation] = useState(false);
 
   // In a ref as well as state: the poll loop must not restart per line arrived.
   const cursorRef = useRef<string | null>(null);
@@ -196,6 +206,52 @@ export function DebuggingTab() {
       // A blocked localStorage must not stop the viewer working.
     }
   }, [mode]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    loadDebugTrainingSimulation(controller.signal)
+      .then((state) => {
+        setSimulating(state.enabled);
+        // Prime the Start button's copy, so opening Settings is not required
+        // before Studio knows the setting is on.
+        setDebugTrainingSimulationEnabled(state.enabled);
+      })
+      .catch(() => {
+        // Leave the switch disabled rather than showing "off" for a value the
+        // server never sent: a wrong "off" reads as a real setting.
+        if (!controller.signal.aborted) {
+          setSimulating(null);
+        }
+      });
+    return () => controller.abort();
+  }, []);
+
+  const toggleSimulation = useCallback(
+    async (next: boolean) => {
+      setSimulating(next);
+      setSavingSimulation(true);
+      try {
+        const saved = await saveDebugTrainingSimulation(next);
+        setSimulating(saved.enabled);
+        setDebugTrainingSimulationEnabled(saved.enabled);
+        toast.success(
+          t(
+            saved.enabled
+              ? "settings.debugging.simulationOn"
+              : "settings.debugging.simulationOff",
+          ),
+        );
+      } catch (error) {
+        setSimulating(!next);
+        toast.error(t("settings.debugging.simulationSaveFailed"), {
+          description: (error as Error).message,
+        });
+      } finally {
+        setSavingSimulation(false);
+      }
+    },
+    [t],
+  );
 
   // Selection order: a response older than the last one that selected never overrides it.
   const sourceFetchSeqRef = useRef(0);
@@ -517,6 +573,24 @@ export function DebuggingTab() {
 
   return (
     <div className="settings-page">
+      <SettingsSection
+        title={t("settings.debugging.simulationSection")}
+        description={t("settings.debugging.simulationHint")}
+      >
+        <SettingsRow
+          label={t("settings.debugging.simulationLabel")}
+          description={t("settings.debugging.simulationDescription")}
+        >
+          <Switch
+            checked={simulating === true}
+            disabled={savingSimulation || simulating === null}
+            onCheckedChange={(next) => void toggleSimulation(next)}
+            data-testid="debug-training-simulation"
+            aria-label={t("settings.debugging.simulationLabel")}
+          />
+        </SettingsRow>
+      </SettingsSection>
+
       <SettingsSection
         title={t("settings.debugging.logSection")}
         description={t("settings.debugging.sourceHint")}

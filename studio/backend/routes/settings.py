@@ -4906,6 +4906,51 @@ class DebugLogResponse(BaseModel):
     size_bytes: int = 0
 
 
+class DebugTrainingSimulationPayload(BaseModel):
+    enabled: StrictBool
+
+
+class DebugTrainingSimulationResponse(BaseModel):
+    enabled: bool = False
+    # Simulated runs are off unless someone turns them on; said explicitly so the
+    # switch has a value to fall back to when the settings read fails.
+    default_enabled: bool = False
+
+
+@_shared_settings_router.get(
+    "/debug/training-simulation", response_model = DebugTrainingSimulationResponse
+)
+def get_debug_training_simulation(current_subject: str = Depends(get_current_subject)):
+    """Whether a run started from Training is a fake one (Settings -> Debugging)."""
+    from core.training import debug_simulation
+
+    return DebugTrainingSimulationResponse(enabled = debug_simulation.is_enabled())
+
+
+@_owner_settings_router.put(
+    "/debug/training-simulation", response_model = DebugTrainingSimulationResponse
+)
+def update_debug_training_simulation(
+    payload: DebugTrainingSimulationPayload,
+    current_subject: str = Depends(get_current_subject),
+    _ui_session: None = Depends(_require_ui_session),
+) -> DebugTrainingSimulationResponse:
+    """Turn simulated training on or off. Applies from the next run started."""
+    from core.training import debug_simulation
+
+    try:
+        enabled = debug_simulation.set_enabled(payload.enabled)
+    except Exception as exc:
+        raise log_and_http_error(
+            exc,
+            500,
+            "Could not save the simulated training setting.",
+            event = "settings.debug_training_simulation_failed",
+            log = logger,
+        ) from exc
+    return DebugTrainingSimulationResponse(enabled = enabled)
+
+
 @_owner_settings_router.get("/debug/logs/sources", response_model = DebugLogSourcesResponse)
 def get_debug_log_sources(
     diagnostic_path: Optional[str] = None,

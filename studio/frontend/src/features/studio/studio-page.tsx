@@ -2,11 +2,13 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { useAppShellReadySignal } from "@/components/app-readiness";
-import { usePlatformStore } from "@/config/env";
+import { MediaPageLink } from "@/components/media-page-link";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
+import { usePlatformStore } from "@/config/env";
 import { useHfTokenStore } from "@/features/hub";
+import { useDebugTrainingSimulation } from "@/features/settings/hooks/use-debug-training-simulation";
 import { GuidedTour, useGuidedTourController } from "@/features/tour";
 import {
   useDatasetPreviewDialogStore,
@@ -15,27 +17,18 @@ import {
   useTrainingRuntimeStore,
 } from "@/features/training";
 import { useT } from "@/i18n";
-import { MediaPageLink } from "@/components/media-page-link";
-import {
-  LibrariesIcon,
-} from "@hugeicons/core-free-icons";
-import {
-  ChevronLeftIcon,
-} from "lucide-react";
+import { LibrariesIcon } from "@hugeicons/core-free-icons";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  type ReactElement,
-  useEffect,
-  useRef,
-} from "react";
+import { ChevronLeftIcon } from "lucide-react";
+import { type ReactElement, useEffect, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { HistoricalTrainingView } from "./historical-training-view";
 import { HistoryCardGrid } from "./history-card-grid";
 import { useTrainingCacheReconciliation } from "./hooks/use-training-cache-reconciliation";
 import { LiveTrainingView } from "./live-training-view";
 import { DatasetPreviewDialog } from "./sections/dataset-preview-dialog";
-import { TrainSubNav } from "./studio-navigation";
 import { StudioModeNav } from "./studio-mode-nav";
+import { TrainSubNav } from "./studio-navigation";
 import {
   studioHistoryTourSteps,
   studioTourSteps,
@@ -83,12 +76,15 @@ export function StudioPage(): ReactElement {
   const capabilitiesUnknown = usePlatformStore((s) => s.capabilitiesUnknown());
   const chatOnly = usePlatformStore((s) => s.isChatOnly());
   const navigate = useNavigate();
+  // Settings -> Debugging: a simulated run needs no accelerator, so the page
+  // this host would otherwise be turned away from stays open for it.
+  const simulatedTraining = useDebugTrainingSimulation();
   // Once the verdict lands and it really is chat-only, leave: the guard let this load on the
   // guess, so without this a chat-only host would sit on a Train page it cannot use.
   useEffect(() => {
-    if (capabilitiesUnknown || !chatOnly) return;
+    if (capabilitiesUnknown || !chatOnly || simulatedTraining) return;
     void navigate({ to: "/chat", replace: true });
-  }, [capabilitiesUnknown, chatOnly, navigate]);
+  }, [capabilitiesUnknown, chatOnly, simulatedTraining, navigate]);
   const hfToken = useHfTokenStore((s) => s.token);
   const selectedModel = useTrainingConfigStore((s) => s.selectedModel);
   const ensureModelDefaultsLoaded = useTrainingConfigStore(
@@ -171,7 +167,12 @@ export function StudioPage(): ReactElement {
     }
     reloadReadySent.current = true;
     signalReady();
-  }, [capabilitiesUnknown, hasHydratedRuntime, isHydratingRuntime, signalReady]);
+  }, [
+    capabilitiesUnknown,
+    hasHydratedRuntime,
+    isHydratingRuntime,
+    signalReady,
+  ]);
   // Two waits share this panel. Hardware detection is a cold `import torch` that can run for
   // minutes and says so, the way the Video page does; a hydrating runtime is quick and keeps
   // the runtime wording, which on a machine still being measured just reads as a hang.

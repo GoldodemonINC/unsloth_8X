@@ -46,6 +46,10 @@ export interface AdvancedCapabilities {
   platform_line?: string;
   has_gpu?: boolean;
   merge_streams?: boolean;
+  /** cpu without a GPU, gpu with one: decides the merge parent cap. */
+  merge_tier?: "cpu" | "gpu";
+  /** 3 on a CPU host, 6 with a GPU. */
+  max_merge_models?: number;
   merge_cpu_note?: string;
 }
 
@@ -185,6 +189,9 @@ export interface MergePlanResponse {
     warnings: string[];
   };
   recommended_mode: "standard" | "mmoe";
+  tier?: "cpu" | "gpu";
+  max_models?: number;
+  parent_cap_reason?: "ram" | "gpu";
   /** Absolute folder the backend will use when the output field is left blank. */
   suggested_output_dir?: string | null;
   /** Plan before compute: peak RAM/disk (a CPU merge is streaming, not full-load). */

@@ -20,8 +20,6 @@ from typing import Any
 _TORCH: Any = None
 _TORCH_PROBED = False
 
-# Bytes per element for the dtype names safetensors can store. Used where size
-# is planned without materializing a tensor.
 _DTYPE_ITEMSIZES = {
     "BOOL": 1,
     "U8": 1,
@@ -40,7 +38,6 @@ _DTYPE_ITEMSIZES = {
     "F64": 8,
 }
 
-
 def torch_module():
     """The imported torch module, or None when it is not installed."""
     global _TORCH, _TORCH_PROBED
@@ -54,18 +51,15 @@ def torch_module():
             _TORCH = torch
     return _TORCH
 
-
 def read_framework() -> str:
     """The safetensors backend to read through: torch when available, else numpy."""
     return "pt" if torch_module() is not None else "np"
-
 
 def open_file(path: str | Any):
     """Open a safetensors file in the framework that can represent every dtype."""
     from safetensors import safe_open  # noqa: PLC0415 - lazy, mirrors the rest of this module
 
     return safe_open(str(path), framework=read_framework())
-
 
 def load_tensor(handle, key: str):
     """Read one tensor, naming the bf16 cause when only numpy is available."""
@@ -80,6 +74,44 @@ def load_tensor(handle, key: str):
             ) from error
         raise
 
+def dtype_name(handle, key: str) -> str:
+    """The stored dtype of one tensor, read from the header without loading it."""
+    try:
+        return str(handle.get_slice(key).get_dtype()).upper()
+    except Exception:  # noqa: BLE001 - unknown headers fall back below
+        return ""
+
+_FLOAT_DTYPES = frozenset({"F8_E4M3", "F8_E5M2", "F16", "BF16", "F32", "F64"})
+
+def is_float_dtype_name(name: str) -> bool:
+    """Whether a stored dtype name carries floating-point weights."""
+    return str(name).upper() in _FLOAT_DTYPES
+
+def is_float_dtype(handle, key: str) -> bool:
+    """Whether one stored tensor carries floating-point weights."""
+    return is_float_dtype_name(dtype_name(handle, key))
+
+def shape_of(handle, key: str) -> tuple[int, ...]:
+    """The stored shape of one tensor, from the header."""
+    return tuple(int(dim) for dim in handle.get_slice(key).get_shape())
+
+def empty_like_shape(shape, reference):
+    """An unwritten tensor of *shape* in the reference tensor's storage dtype.
+
+    Streaming blends fill this row by row, so the whole output tensor is the
+    only thing resident besides the current chunk -- not one float32 copy per
+    parent.
+    """
+    import numpy as np  # noqa: PLC0415
+
+    torch = torch_module()
+    if torch is not None and isinstance(reference, torch.Tensor):
+        dtype = reference.dtype
+
+        if getattr(dtype, "itemsize", 4) < 2:
+            dtype = torch.bfloat16
+        return torch.empty(tuple(int(dim) for dim in shape), dtype = dtype)
+    return np.empty(tuple(int(dim) for dim in shape), dtype = reference.dtype)
 
 def dtype_itemsize(handle, key: str) -> int:
     """Bytes per element of one tensor, read from the header without loading it."""
@@ -93,7 +125,6 @@ def dtype_itemsize(handle, key: str) -> int:
         except Exception:  # noqa: BLE001
             return 4
 
-
 def to_float32(value):
     """A float32 numpy view of a tensor, whatever framework it came from."""
     import numpy as np  # noqa: PLC0415
@@ -103,7 +134,6 @@ def to_float32(value):
         return value.detach().to("cpu", torch.float32).numpy()
     return np.asarray(value, dtype=np.float32)
 
-
 def is_floating(value) -> bool:
     """Whether a tensor carries floating-point weights."""
     import numpy as np  # noqa: PLC0415
@@ -112,7 +142,6 @@ def is_floating(value) -> bool:
     if torch is not None and isinstance(value, torch.Tensor):
         return bool(value.is_floating_point())
     return bool(np.issubdtype(np.asarray(value).dtype, np.floating))
-
 
 def cast_like(value, reference):
     """Cast a float32 blend back to the source dtype, the way the pair was stored.
@@ -130,14 +159,12 @@ def cast_like(value, reference):
         return torch.from_numpy(np.ascontiguousarray(value)).to(target)
     return np.asarray(value).astype(reference.dtype, copy=False)
 
-
 def nbytes(value) -> int:
     """Byte size of a tensor in either framework."""
     torch = torch_module()
     if torch is not None and isinstance(value, torch.Tensor):
         return int(value.numel() * value.element_size())
     return int(getattr(value, "nbytes", 0))
-
 
 def save_tensors(payload: dict[str, Any], path: str) -> None:
     """Write a shard with the backend that matches the tensors it holds."""

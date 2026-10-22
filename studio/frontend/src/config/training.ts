@@ -140,6 +140,35 @@ export const LR_DEFAULT_LORA = 2e-4;
 export const LR_DEFAULT_FULL = 2e-5;
 export const LR_DEFAULT_CPT = 5e-5;
 export const LR_DEFAULT_DECISION_FULL = 2.5e-5;
+export const LR_DEFAULT_CORA = 1e-4;
+
+export const CORA_HYPERPARAMS = {
+  learningRate: LR_DEFAULT_CORA,
+  loraRank: 8,
+  loraAlpha: 24,
+  loraVariant: "loftq" as const,
+  optimizerType: "paged_adamw_8bit",
+  lrSchedulerType: "cosine",
+  batchSize: 1,
+  gradientAccumulation: 3,
+  contextLength: 1024,
+} as const;
+
+export const CORA_DATASET_MIN_BYTES = 0.01 * 1024 ** 3;
+export const CORA_DATASET_MAX_BYTES = 0.8 * 1024 ** 3;
+
+export function coraDatasetSizeIssue(bytes: number | null | undefined): string | null {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes <= 0) {
+    return null;
+  }
+  if (bytes < CORA_DATASET_MIN_BYTES) {
+    return "CoRA expects at least 10 MB of training text.";
+  }
+  if (bytes > CORA_DATASET_MAX_BYTES) {
+    return "CoRA is tuned for at most 0.8 GB of training text; use QLoRA for larger sets.";
+  }
+  return null;
+}
 
 // Also the advanced-settings summary's "unchanged" reference while CPT is selected.
 export const CPT_LORA_HYPERPARAMS = {

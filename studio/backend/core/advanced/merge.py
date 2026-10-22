@@ -36,14 +36,12 @@ MERGE_METHODS = ("slerp", "ties", "dare", "linear")
 _CONFIG_FILES = ("config.json",)
 _WEIGHT_SUFFIXES = (".safetensors",)
 
-# Dimension keys across the architectures Studio can load.
 _HIDDEN_KEYS = ("hidden_size", "n_embd", "d_model", "model_dim", "hidden_dim")
 _LAYER_KEYS = ("num_hidden_layers", "n_layer", "num_layers", "n_layers", "depth")
 _HEAD_KEYS = ("num_attention_heads", "n_head", "num_heads", "attention_heads")
 _FFN_KEYS = ("intermediate_size", "n_inner", "ffn_dim", "intermediate_dim")
 _VOCAB_KEYS = ("vocab_size", "n_vocab", "vocabulary_size")
 _ARCH_KEYS = ("architectures", "model_type", "architectures_name")
-
 
 def _first_int(config: Mapping[str, Any], keys: Sequence[str]) -> int | None:
     for key in keys:
@@ -52,12 +50,11 @@ def _first_int(config: Mapping[str, Any], keys: Sequence[str]) -> int | None:
             continue
         if isinstance(value, (int, float)) and int(value) > 0:
             return int(value)
-    # Nested text_config (multimodal wrappers).
+
     nested = config.get("text_config")
     if isinstance(nested, Mapping):
         return _first_int(nested, keys)
     return None
-
 
 def _architecture_name(config: Mapping[str, Any]) -> str:
     for key in ("model_type", "architecture"):
@@ -69,7 +66,6 @@ def _architecture_name(config: Mapping[str, Any]) -> str:
         return str(architectures[0])
     return "unknown"
 
-
 @dataclass(frozen=True)
 class ModelSpec:
     source: str
@@ -79,7 +75,7 @@ class ModelSpec:
     num_heads: int | None
     intermediate_size: int | None
     vocab_size: int | None
-    # Rough parameter count, used only for UI labels.
+
     parameter_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -91,7 +87,6 @@ class ModelSpec:
             return max(1, self.hidden_size // self.num_heads)
         return None
 
-
 def _config_from_dir(directory: Path) -> dict[str, Any] | None:
     for name in _CONFIG_FILES:
         candidate = directory / name
@@ -101,7 +96,6 @@ def _config_from_dir(directory: Path) -> dict[str, Any] | None:
             except (OSError, ValueError):
                 return None
     return None
-
 
 def _snapshot_dirs(directory: Path) -> list[Path]:
     """A HF cache snapshot directory contains one revision folder."""
@@ -116,13 +110,9 @@ def _snapshot_dirs(directory: Path) -> list[Path]:
         return found
     return [directory]
 
-
-# Hub ids arrive as ``org/name`` or ``hf://org/name``; anything that resolves to
-# an existing filesystem entry is treated as local first, so a relative path such
-# as ``models/llama`` never gets mistaken for a repo.
 _HF_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _HF_PREFIXES = ("hf://", "https://huggingface.co/")
-# Everything a merge needs from a snapshot: weights, config, tokenizer metadata.
+
 _HF_SNAPSHOT_PATTERNS = (
     "*.json",
     "*.safetensors",
@@ -131,7 +121,6 @@ _HF_SNAPSHOT_PATTERNS = (
     "*.py",
     "*.tiktoken",
 )
-
 
 def hf_repo_id(source: str) -> str | None:
     """Return the Hub repo id a source names, or None when it is a filesystem path."""
@@ -145,7 +134,6 @@ def hf_repo_id(source: str) -> str | None:
     if Path(text).expanduser().exists():
         return None
     return text
-
 
 def _hf_config(repo_id: str, token: str | None = None) -> dict[str, Any]:
     """Fetch just config.json, so planning never downloads weights."""
@@ -163,8 +151,9 @@ def _hf_config(repo_id: str, token: str | None = None) -> dict[str, Any]:
             f"Could not read config.json for {repo_id!r} from the Hugging Face Hub: {error}"
         ) from error
 
-
-def resolve_checkpoint_source(source: str, *, token: str | None = None) -> str:
+def resolve_checkpoint_source(
+    source: str, *, token: str | None = None, allow_pickle: bool = False
+) -> str:
     """Return a local directory for a path or Hub repo, downloading a snapshot if needed.
 
     Planning only needs config.json (see :func:`probe_model_spec`); running a merge
@@ -190,15 +179,16 @@ def resolve_checkpoint_source(source: str, *, token: str | None = None) -> str:
             snapshot_download(
                 repo_id = repo,
                 token = token,
-                allow_patterns = list(_HF_SNAPSHOT_PATTERNS),
-                ignore_patterns = ["*.gguf", "*.pth", "*.bin"],
+                allow_patterns = list(_HF_SNAPSHOT_PATTERNS)
+                + (["*.bin"] if allow_pickle else []),
+                ignore_patterns = ["*.gguf", "*.pth"]
+                + ([] if allow_pickle else ["*.bin"]),
             )
         )
     except Exception as error:  # noqa: BLE001 - HTTP/auth errors are user-facing
         raise ValueError(
             f"Could not download {repo!r} from the Hugging Face Hub: {error}"
         ) from error
-
 
 def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
     """Read a checkpoint's config into a spec, from a local path or the Hub."""
@@ -232,7 +222,7 @@ def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
     vocab = _first_int(config, _VOCAB_KEYS)
     params = None
     if hidden and layers:
-        # Attention + MLP rough estimate, deterministic and only for display.
+
         mlp = ffn or (4 * hidden)
         params = layers * (12 * hidden * hidden + 2 * hidden * mlp)
     return ModelSpec(
@@ -246,7 +236,6 @@ def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
         parameter_count=params,
     )
 
-
 def _family(spec: ModelSpec) -> str:
     """Group derived model types (llama, qwen2, ...) into a coarse family."""
     name = spec.architecture.lower()
@@ -255,24 +244,22 @@ def _family(spec: ModelSpec) -> str:
             return family
     return name
 
-
 @dataclass(frozen=True)
 class AlignmentPlan:
-    mode: str  # identical | same_family | cross_scale | cross_architecture
+    mode: str
     target_hidden: int | None
     target_layers: int | None
     target_intermediate: int | None
     target_vocab: int | None
-    hidden_strategy: str  # keep | crop | pad | svd
-    layer_strategy: str  # keep | crop | pad
-    vocab_strategy: str  # keep | intersect | union_pad
+    hidden_strategy: str
+    layer_strategy: str
+    vocab_strategy: str
     notes: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     mmoe_required: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
 
 def plan_alignment(a: ModelSpec, b: ModelSpec) -> AlignmentPlan:
     """Decide how two checkpoints can be blended or routed.
@@ -313,8 +300,7 @@ def plan_alignment(a: ModelSpec, b: ModelSpec) -> AlignmentPlan:
             mode = "cross_scale"
         else:
             mode = "cross_architecture"
-        # Meet at the smaller dimension: cropping preserves real weights, while
-        # padding invents zeros that then dominate the average.
+
         target_hidden = _min_positive(a.hidden_size, b.hidden_size)
         target_layers = _min_positive(a.num_layers, b.num_layers)
         target_ffn = _min_positive(a.intermediate_size, b.intermediate_size)
@@ -354,11 +340,9 @@ def plan_alignment(a: ModelSpec, b: ModelSpec) -> AlignmentPlan:
         mmoe_required=mode == "cross_architecture",
     )
 
-
 def _min_positive(*values: int | None) -> int | None:
     present = [v for v in values if v]
     return min(present) if present else None
-
 
 def common_target_spec(specs: Sequence[ModelSpec]) -> ModelSpec:
     """The shape all parents meet at: the smallest dimension of any of them.
@@ -385,19 +369,12 @@ def common_target_spec(specs: Sequence[ModelSpec]) -> ModelSpec:
         parameter_count=None,
     )
 
-
 def plan_alignment_many(specs: Sequence[ModelSpec]) -> list[AlignmentPlan]:
     """One plan per parent, every one resolving to the same target shape."""
     if not specs:
         raise ValueError("A merge needs at least two checkpoints.")
     target = common_target_spec(specs)
     return [plan_alignment(target, spec) for spec in specs]
-
-
-# ---------------------------------------------------------------------------
-# Tensor alignment and blending
-# ---------------------------------------------------------------------------
-
 
 def _resize_axis(array, axis: int, target: int, *, pad_value: float = 0.0):
     """Crop or zero-pad one axis of a numpy array to `target` length."""
@@ -412,7 +389,6 @@ def _resize_axis(array, axis: int, target: int, *, pad_value: float = 0.0):
     pad_width = [(0, 0)] * array.ndim
     pad_width[axis] = (0, target - current)
     return np.pad(array, pad_width, constant_values=pad_value)
-
 
 def align_tensor(array, target_shape: Sequence[int], *, method: str = "crop"):
     """Crop/pad a numpy array to `target_shape`.
@@ -445,13 +421,9 @@ def align_tensor(array, target_shape: Sequence[int], *, method: str = "crop"):
         result = np.reshape(result, target)
     return result
 
-
 def _slerp_pair(a, b, t: float):
     import numpy as np
 
-    # SLERP is defined on the flattened vector, but the result has to come back in
-    # the input's shape: writing back a flattened [n] where the model expects [n, m]
-    # produced a checkpoint whose tensors no longer load.
     shape = np.shape(a)
     a = np.asarray(a, dtype=np.float32).reshape(-1)
     b = np.asarray(b, dtype=np.float32).reshape(-1)
@@ -464,14 +436,13 @@ def _slerp_pair(a, b, t: float):
     if abs(cosine) > 0.9995:
         return ((1 - t) * a + t * b).reshape(shape)
     if cosine < 0:
-        # Antipodal: the shortest arc is undefined; fall back to linear.
+
         return ((1 - t) * a + t * b).reshape(shape)
     theta = math.acos(max(-1.0, min(1.0, cosine)))
     sin_theta = math.sin(theta)
     wa = math.sin((1 - t) * theta) / sin_theta
     wb = math.sin(t * theta) / sin_theta
     return (wa * a + wb * b).reshape(shape)
-
 
 def blend_tensors(
     tensors: Sequence[Any],
@@ -495,9 +466,7 @@ def blend_tensors(
     if method == "slerp":
         if len(arrays) == 2:
             return _slerp_pair(arrays[0], arrays[1], _normalized_weight(weights, 2)[1])
-        # Beyond a pair, SLERP is applied as a running blend: each parent takes
-        # its share of the running result, so a 4-way merge with weights is the
-        # weighted average of the arcs rather than an even one.
+
         norm = _normalized_weight(weights, len(arrays))
         result = arrays[0]
         taken = norm[0]
@@ -512,7 +481,6 @@ def blend_tensors(
         return _dare_blend(arrays, weights, density, seed)
     raise ValueError(f"Unsupported merge method {method!r}; expected one of {MERGE_METHODS}.")
 
-
 def _normalized_weight(weights: Sequence[float] | None, count: int) -> list[float]:
     if weights is None:
         return [1.0 / count] * count
@@ -523,7 +491,6 @@ def _normalized_weight(weights: Sequence[float] | None, count: int) -> list[floa
         raise ValueError("Merge weights must sum to a positive number.")
     return [float(w) / total for w in weights]
 
-
 def _linear_blend(arrays, weights):
     import numpy as np
 
@@ -532,7 +499,6 @@ def _linear_blend(arrays, weights):
     for array, weight in zip(arrays, norm):
         result += weight * array
     return result
-
 
 def _ties_blend(arrays, weights, density: float):
     """TIES: trim small deltas, elect a sign, disjoint-mean the survivors."""
@@ -552,14 +518,33 @@ def _ties_blend(arrays, weights, density: float):
         trimmed = np.where(np.abs(flat) >= threshold, flat, 0.0)
         elected = np.sign(trimmed.sum(axis=0))
     signed = np.where(np.sign(flat) == elected[None, :], flat, 0.0)
-    # Weighted mean of the agreeing deltas; divide by the matching mass so a
-    # rarely-agreeing direction is not silently attenuated to zero.
+
     mass = np.zeros(count, dtype=np.float32)
     for row, weight in zip(signed, norm):
         mass += (row != 0).astype(np.float32) * weight
     merged = (signed * np.asarray(norm)[:, None]).sum(axis=0) / np.maximum(mass, 1e-8)
     return (reference + merged.reshape(reference.shape)).astype(np.float32)
 
+def dare_mask(flat_start: int, count: int, seed: int, density: float, salt: int = 0):
+    """A deterministic DARE drop mask addressed by flat element index.
+
+    The mask is a pure function of ``(seed, salt, index)`` rather than the next
+    draw from a stateful generator, which is what lets the streaming path build
+    the mask for the rows it is holding and get exactly the values the
+    whole-tensor path would have produced for those same elements. ``salt`` is
+    the parent index, so every parent still drops a different subset.
+    """
+    import numpy as np
+
+    index = np.arange(int(flat_start), int(flat_start) + int(count), dtype = np.uint64)
+    stream = np.uint64((int(seed) + int(salt) * 0x9E3779B1) & 0xFFFFFFFFFFFFFFFF)
+    with np.errstate(over = "ignore"):
+        state = index + stream * np.uint64(0x9E3779B97F4A7C15)
+        state = (state ^ (state >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+        state = (state ^ (state >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+        state = state ^ (state >> np.uint64(31))
+    uniform = (state >> np.uint64(11)).astype(np.float64) * (1.0 / 9007199254740992.0)
+    return (uniform < float(density)).astype(np.float32)
 
 def _dare_blend(arrays, weights, density: float, seed: int):
     """DARE: randomly drop deltas with probability 1-p, rescale by 1/p."""
@@ -568,14 +553,13 @@ def _dare_blend(arrays, weights, density: float, seed: int):
     norm = _normalized_weight(weights, len(arrays))
     reference = arrays[0]
     result = reference.astype(np.float32).copy()
-    rng = np.random.default_rng(seed)
     scale = 1.0 / max(float(density), 1e-3)
+    count = int(reference.size)
     for index in range(1, len(arrays)):
         delta = arrays[index] - reference
-        mask = (rng.random(delta.shape) < float(density)).astype(np.float32)
+        mask = dare_mask(0, count, seed, density, salt = index).reshape(delta.shape)
         result = result + norm[index] * delta * mask * scale
     return result
-
 
 def merge_state_dicts(
     states: Sequence[Mapping[str, Any]],
@@ -641,79 +625,517 @@ def merge_state_dicts(
     }
     return merged, report
 
-
 def _to_numpy(tensor):
     """Float32 numpy view of a tensor, torch or numpy."""
     return tensor_io.to_float32(tensor)
 
+def _aligned_shape(shape: Sequence[int], key: str, plan: AlignmentPlan) -> tuple[int, ...]:
+    """The shape `_align_for_key` would produce, without touching any data.
+
+    The streaming blend needs this as a predicate: a tensor can be read in row
+    chunks only when alignment leaves its shape alone, because cropping shifts
+    rows and padding invents them.
+    """
+    shape = tuple(int(dim) for dim in shape)
+    if len(shape) == 1:
+        target = plan.target_vocab if "embed" in key or "lm_head" in key else shape[0]
+        return (target or shape[0],)
+    if len(shape) == 2:
+        rows = plan.target_vocab if ("embed" in key or "lm_head" in key) else shape[0]
+
+        cols = plan.target_hidden or shape[1]
+        if shape[0] < shape[1] and plan.target_intermediate and "down" not in key:
+            rows = plan.target_intermediate
+        return (rows or shape[0], cols or shape[1])
+    return shape
 
 def _align_for_key(array, key: str, plan: AlignmentPlan):
     import numpy as np
 
     arr = np.asarray(array)
-    if arr.ndim == 1:
-        target = plan.target_vocab if "embed" in key or "lm_head" in key else arr.shape[0]
-        if target and arr.shape[0] != target:
-            return _resize_axis(arr, 0, target)
-        return arr
-    if arr.ndim == 2:
-        rows = plan.target_vocab if ("embed" in key or "lm_head" in key) else arr.shape[0]
-        # [vocab, hidden] and [intermediate, hidden] both put hidden on axis 1.
-        cols = plan.target_hidden or arr.shape[1]
-        if arr.shape[0] < arr.shape[1] and plan.target_intermediate and "down" not in key:
-            rows = plan.target_intermediate
-        if rows and cols and (arr.shape[0] != rows or arr.shape[1] != cols):
-            return align_tensor(arr, (rows, cols), method="crop")
+    target = _aligned_shape(arr.shape, key, plan)
+    if target != arr.shape:
+        return align_tensor(arr, target, method="crop")
     return arr
 
-
-# ---------------------------------------------------------------------------
-# Streaming safetensors I/O
-# ---------------------------------------------------------------------------
-
-
-def _weight_files(directory: Path) -> list[Path]:
-    index = directory / "model.safetensors.index.json"
+def _indexed_files(directory: Path, index_name: str, suffix: str) -> list[Path]:
+    index = directory / index_name
     if index.is_file():
         try:
             mapping = json.loads(index.read_text(encoding="utf-8")).get("weight_map", {})
             names = sorted({str(v) for v in mapping.values()})
             files = [directory / name for name in names]
-            if all(f.is_file() for f in files):
+            if files and all(f.is_file() for f in files):
                 return files
         except (OSError, ValueError):
             pass
-    return sorted(directory.glob("*.safetensors"))
+    return sorted(directory.glob(f"*{suffix}"))
 
+def _weight_files(directory: Path, *, include_pickle: bool = False) -> list[Path]:
+    files = _indexed_files(directory, "model.safetensors.index.json", ".safetensors")
+    if files or not include_pickle:
+        return files
+    return _indexed_files(directory, "pytorch_model.bin.index.json", ".bin")
 
-def _open_state(directory: str) -> tuple[dict[str, tuple[Path, str]], dict[str, Any] | None]:
+_Entry = tuple[Path, str, tuple[int, ...], str]
+
+_PICKLE_STATES: dict[str, dict[str, Any]] = {}
+
+_TORCH_DTYPE_NAMES = {
+    "float16": "F16",
+    "half": "F16",
+    "bfloat16": "BF16",
+    "float32": "F32",
+    "float": "F32",
+    "float64": "F64",
+    "double": "F64",
+    "float8_e4m3fn": "F8_E4M3",
+    "float8_e5m2": "F8_E5M2",
+}
+
+def _pickle_dtype_name(dtype: Any) -> str:
+    """A safetensors-style dtype name for a torch dtype, so one predicate covers both."""
+    name = str(dtype).rsplit(".", 1)[-1].lower()
+    return _TORCH_DTYPE_NAMES.get(name, name.upper())
+
+def _pickle_state(path: Path) -> dict[str, Any]:
+    """A checkpoint's tensors, memory-mapped so rows are paged in on demand.
+
+    ``mmap=True`` is what keeps a pickle on the same footing as safetensors: the
+    unpickled tensors point at the file instead of copying it into RAM. Entries
+    stay cached for the run because each row read would otherwise re-unpickle the
+    whole dictionary.
+    """
+    torch = tensor_io.torch_module()
+    if torch is None:
+        raise ValueError(
+            f"Cannot read {path.name}: pickle checkpoints need torch, and this "
+            "environment does not have it. Convert the checkpoint to safetensors."
+        )
+    resolved = str(Path(path).resolve())
+    state = _PICKLE_STATES.get(resolved)
+    if state is not None:
+        return state
+    try:
+        loaded = torch.load(resolved, map_location="cpu", mmap=True, weights_only=True)
+    except TypeError:
+        loaded = torch.load(resolved, map_location="cpu", weights_only=True)
+    except Exception as error:  # noqa: BLE001 - corrupt or unsafe pickles are user-facing
+        raise ValueError(f"Could not read {path}: {error}") from error
+    if not isinstance(loaded, Mapping):
+        raise ValueError(f"{path} does not hold a state dict.")
+    state = {str(key): value for key, value in loaded.items() if hasattr(value, "shape")}
+    _PICKLE_STATES[resolved] = state
+    return state
+
+def release_pickle_states() -> None:
+    """Drop the cached mmaps so a finished merge does not pin the files."""
+    _PICKLE_STATES.clear()
+
+def _open_state(
+    directory: str, *, allow_pickle: bool = False
+) -> tuple[dict[str, _Entry], dict[str, Any] | None]:
     root = Path(directory)
-    if root.is_file() and root.suffix == ".safetensors":
+    if root.is_file() and root.suffix in (".safetensors", ".bin"):
         root = root.parent
-    files = _weight_files(root)
+    files = _weight_files(root, include_pickle = allow_pickle)
     if not files:
+        if not allow_pickle and _weight_files(root, include_pickle = True):
+            raise ValueError(
+                f"{directory!r} only carries pickle weights; enable "
+                "allow_non_safetensors to read them."
+            )
         raise ValueError(f"No .safetensors weights found in {directory!r}.")
-    entries: dict[str, tuple[Path, str]] = {}
+    entries: dict[str, _Entry] = {}
     metadata: dict[str, Any] | None = None
     for file_path in files:
+        if file_path.suffix == ".bin":
+            for key, tensor in _pickle_state(file_path).items():
+                entries[key] = (
+                    file_path,
+                    key,
+                    tuple(int(dim) for dim in tensor.shape),
+                    _pickle_dtype_name(tensor.dtype),
+                )
+            continue
         with tensor_io.open_file(file_path) as handle:
             metadata = metadata or handle.metadata()
             for key in handle.keys():
-                entries[key] = (file_path, key)
+                entries[key] = (
+                    file_path,
+                    key,
+                    tensor_io.shape_of(handle, key),
+                    tensor_io.dtype_name(handle, key),
+                )
     return entries, metadata
 
-
 def _read_tensor(entries, key):
-    file_path, inner = entries[key]
+    file_path, inner, _, _ = entries[key]
+    if file_path.suffix == ".bin":
+        return _pickle_state(file_path)[inner]
     with tensor_io.open_file(file_path) as handle:
         return tensor_io.load_tensor(handle, inner)
 
+def _disk_shape(entries, key: str) -> tuple[int, ...]:
+    return entries[key][2]
+
+def _read_slice(entries, key: str, start: int, stop: int):
+    """Read rows ``start:stop`` of a tensor; safetensors and mmap both stay lazy."""
+    file_path, inner, _, _ = entries[key]
+    if file_path.suffix == ".bin":
+        return _pickle_state(file_path)[inner][start:stop]
+    with tensor_io.open_file(file_path) as handle:
+        return handle.get_slice(inner)[start:stop]
+
+CHUNK_BUDGET_BYTES = 32 * 1024 * 1024
+
+def chunk_rows(shape: Sequence[int], parents: int) -> int:
+    """Rows per streaming step so one chunk costs about CHUNK_BUDGET_BYTES."""
+    row_elements = 1
+    for dim in tuple(shape)[1:]:
+        row_elements *= max(int(dim), 1)
+    per_row = row_elements * 4 * max(int(parents), 1)
+    rows = max(1, CHUNK_BUDGET_BYTES // max(per_row, 1))
+    return min(rows, max(int(shape[0]), 1))
+
+def _can_stream(
+    entries,
+    key: str,
+    present: Sequence[int],
+    plans: Sequence[AlignmentPlan],
+    method: str = "linear",
+) -> bool:
+    """Whether this key can be blended a chunk of rows at a time.
+
+    Alignment must be the identity for every owner: cropping shifts rows and
+    padding invents them, so a chunk index would no longer mean the same rows in
+    every parent. Equal shapes on disk are exactly that case.
+
+    N-way SLERP is the one method that cannot stream, because its running result
+    is the tensor the next pair's angle is measured against: the whole result has
+    to exist before the fold can continue. Two-parent SLERP is elementwise once
+    the global norms are known, and streams like the rest.
+    """
+    shapes = {_disk_shape(entries[index], key) for index in present}
+    if len(shapes) != 1:
+        return False
+    shape = shapes.pop()
+    if not shape or shape[0] <= 0:
+        return False
+    if method == "slerp" and len(present) != 2:
+        return False
+    if any(_aligned_shape(shape, key, plans[index]) != shape for index in present):
+        return False
+    return all(
+        tensor_io.is_float_dtype_name(entries[index][key][3]) for index in present
+    )
+
+def _row_windows(shape: Sequence[int], rows: int):
+    """Every ``(start, stop)`` row window of a tensor, in order."""
+    total = int(shape[0])
+    for start in range(0, total, rows):
+        yield start, min(start + rows, total)
+
+def _stream_chunks(entries, key: str, present: Sequence[int], rows: int):
+    """``(start, stop, stored slices)`` -- one row window per parent."""
+    shape = _disk_shape(entries[present[0]], key)
+    for start, stop in _row_windows(shape, rows):
+        yield start, stop, [
+            _read_slice(entries[index], key, start, stop) for index in present
+        ]
+
+def _stream_linear(entries, key, present, weights, shape, rows):
+    """Linear blend of one tensor, one row chunk at a time.
+
+    Same arithmetic as :func:`_linear_blend`, but a parent's tensor is never
+    fully resident: each chunk is read, promoted, weighted and written into the
+    output slice before the next chunk is touched.
+    """
+    output = None
+    for start, stop, raw in _stream_chunks(entries, key, present, rows):
+
+        if output is None:
+            output = tensor_io.empty_like_shape(shape, raw[0])
+        chunks = [tensor_io.to_float32(slice_) for slice_ in raw]
+        output[start:stop] = tensor_io.cast_like(
+            _linear_blend(chunks, weights), output
+        )
+    if output is None:  # pragma: no cover - zero-row tensors are not real
+        raise ValueError(f"{key!r} has no rows to blend.")
+    return output
+
+def _slerp_coefficients(na: float, nb: float, dot: float, t: float):
+    """``(wa, wb)`` for one arc, or None when the pair falls back to linear.
+
+    The same decision tree as :func:`_slerp_pair`, with the norms handed in: the
+    streaming caller accumulates them over the rows it has already read.
+    """
+    if na == 0 or nb == 0:
+        return None
+    cosine = float(dot / (na * nb))
+    if abs(cosine) > 0.9995 or cosine < 0:
+        return None
+    theta = math.acos(max(-1.0, min(1.0, cosine)))
+    sin_theta = math.sin(theta)
+    if sin_theta == 0:
+        return None
+    return (math.sin((1 - t) * theta) / sin_theta, math.sin(t * theta) / sin_theta)
+
+def _stream_slerp(entries, key, present, weights, shape, rows):
+    """Two-parent SLERP, one row chunk at a time.
+
+    The arc between two tensors is described by ``|a|``, ``|b|`` and ``a.b``, all
+    of which accumulate over chunks. Once those three numbers exist the blend is
+    elementwise, so the second pass only ever holds one chunk per parent.
+    """
+    import numpy as np
+
+    dot = na = nb = 0.0
+    for _start, _stop, raw in _stream_chunks(entries, key, present, rows):
+        first = tensor_io.to_float32(raw[0]).reshape(-1)
+        second = tensor_io.to_float32(raw[1]).reshape(-1)
+        dot += float(np.dot(first, second))
+        na += float(np.dot(first, first))
+        nb += float(np.dot(second, second))
+    t = _normalized_weight(weights, 2)[1]
+    coefficients = _slerp_coefficients(math.sqrt(na), math.sqrt(nb), dot, t)
+    output = None
+    for start, stop, raw in _stream_chunks(entries, key, present, rows):
+        if output is None:
+            output = tensor_io.empty_like_shape(shape, raw[0])
+        first = tensor_io.to_float32(raw[0])
+        second = tensor_io.to_float32(raw[1])
+        if coefficients is None:
+            blended = (1 - t) * first + t * second
+        else:
+            blended = coefficients[0] * first + coefficients[1] * second
+        output[start:stop] = tensor_io.cast_like(blended, output)
+    return output
+
+_TIES_BUCKETS = 1 << 16
+
+def _magnitude_keys(values):
+    """Order-preserving uint32 keys for ``|values|``: float bits compare like ints."""
+    import numpy as np
+
+    return np.abs(np.asarray(values, dtype = np.float32)).reshape(-1).view(np.uint32)
+
+def _ties_trim_thresholds(entries, key, present, density, count: int, rows):
+    """The exact keep-th largest ``|delta|`` per parent, in two streaming passes.
+
+    :func:`_ties_blend` trims with ``np.partition(...)[:, count - keep]``, i.e. the
+    keep-th largest magnitude over the whole tensor. Sampling a threshold instead
+    would change which deltas survive and therefore the merged weights, so this
+    finds the exact same element: a non-negative IEEE-754 float orders exactly
+    like its integer bit pattern, so a two-level histogram over those 32 bits
+    selects it with 65536 counters per level instead of a copy per parent.
+    """
+    import numpy as np
+
+    keep = max(1, int(round(count * float(density))))
+    if keep >= count:
+        return None
+    parents = len(present)
+    high = np.zeros((parents, _TIES_BUCKETS), dtype = np.int64)
+    for _start, _stop, raw in _stream_chunks(entries, key, present, rows):
+        chunks = [tensor_io.to_float32(slice_) for slice_ in raw]
+        reference = np.stack(chunks, axis = 0).mean(axis = 0)
+        for index, chunk in enumerate(chunks):
+            keys = _magnitude_keys(chunk - reference)
+            high[index] += np.bincount(
+                (keys >> np.uint32(16)).astype(np.int64), minlength = _TIES_BUCKETS
+            )
+    buckets: list[int] = []
+    ranks: list[int] = []
+    for index in range(parents):
+        suffix = np.cumsum(high[index][::-1])[::-1]
+        bucket = int(np.max(np.nonzero(suffix >= keep)[0]))
+        above = int(suffix[bucket + 1]) if bucket + 1 < _TIES_BUCKETS else 0
+        buckets.append(bucket)
+        ranks.append(keep - above)
+
+    low = np.zeros((parents, _TIES_BUCKETS), dtype = np.int64)
+    for _start, _stop, raw in _stream_chunks(entries, key, present, rows):
+        chunks = [tensor_io.to_float32(slice_) for slice_ in raw]
+        reference = np.stack(chunks, axis = 0).mean(axis = 0)
+        for index, chunk in enumerate(chunks):
+            keys = _magnitude_keys(chunk - reference)
+            in_bucket = np.asarray(keys >> np.uint32(16)).astype(np.int64) == buckets[index]
+            if not bool(in_bucket.any()):
+                continue
+            low[index] += np.bincount(
+                (keys[in_bucket] & np.uint32(0xFFFF)).astype(np.int64),
+                minlength = _TIES_BUCKETS,
+            )
+    thresholds: list[float] = []
+    for index in range(parents):
+        suffix = np.cumsum(low[index][::-1])[::-1]
+        low_bucket = int(np.max(np.nonzero(suffix >= ranks[index])[0]))
+        bits = (buckets[index] << 16) | low_bucket
+        thresholds.append(float(np.array([bits], dtype = np.uint32).view(np.float32)[0]))
+    return thresholds
+
+def _stream_ties(entries, key, present, weights, density, shape, rows):
+    """TIES, one row chunk at a time, with the whole-tensor trim threshold.
+
+    Reference, deltas, sign election and the disjoint weighted mean are all
+    elementwise; only the trim threshold is global, and the first pass already
+    found it exactly.
+    """
+    import numpy as np
+
+    count = int(math.prod(int(dim) for dim in shape))
+    thresholds = _ties_trim_thresholds(entries, key, present, density, count, rows)
+    norm = np.asarray(_normalized_weight(weights, len(present)), dtype = np.float32)
+    output = None
+    for start, stop, raw in _stream_chunks(entries, key, present, rows):
+        if output is None:
+            output = tensor_io.empty_like_shape(shape, raw[0])
+        chunks = [tensor_io.to_float32(slice_) for slice_ in raw]
+        reference = np.stack(chunks, axis = 0).mean(axis = 0)
+        flat = np.stack([chunk - reference for chunk in chunks], axis = 0).reshape(
+            len(chunks), -1
+        )
+        if thresholds is None:
+            trimmed = flat
+        else:
+            trimmed = np.where(
+                np.stack(
+                    [
+                        np.abs(flat[index]) >= thresholds[index]
+                        for index in range(len(chunks))
+                    ],
+                    axis = 0,
+                ),
+                flat,
+                0.0,
+            )
+        elected = np.sign(trimmed.sum(axis = 0))
+        signed = np.where(np.sign(flat) == elected[None, :], flat, 0.0)
+        mass = np.zeros(flat.shape[1], dtype = np.float32)
+        for row, weight in zip(signed, norm):
+            mass += (row != 0).astype(np.float32) * weight
+        merged = (signed * norm[:, None]).sum(axis = 0) / np.maximum(mass, 1e-8)
+        blended = (reference + merged.reshape(reference.shape)).astype(np.float32)
+        output[start:stop] = tensor_io.cast_like(blended, output)
+    return output
+
+def _stream_dare(entries, key, present, weights, density, seed, shape, rows):
+    """DARE, one row chunk at a time, with a counter-addressed drop mask.
+
+    The mask is keyed by flat element index (see :func:`dare_mask`), so a chunk
+    gets exactly the mask the whole-tensor path would have drawn for it.
+    """
+    import numpy as np
+
+    norm = _normalized_weight(weights, len(present))
+    scale = 1.0 / max(float(density), 1e-3)
+    row_elements = max(1, int(math.prod(int(dim) for dim in tuple(shape)[1:])))
+    output = None
+    for start, stop, raw in _stream_chunks(entries, key, present, rows):
+        if output is None:
+            output = tensor_io.empty_like_shape(shape, raw[0])
+        reference = tensor_io.to_float32(raw[0])
+        result = reference.astype(np.float32).copy()
+        for offset in range(1, len(present)):
+            delta = tensor_io.to_float32(raw[offset]) - reference
+            mask = dare_mask(
+                start * row_elements, int(delta.size), seed, density, salt = offset
+            ).reshape(delta.shape)
+            result = result + norm[offset] * delta * mask * scale
+        output[start:stop] = tensor_io.cast_like(result, output)
+    return output
+
+def _stream_blend(entries, key, present, weights, *, method, density, seed):
+    """Blend one tensor a row chunk at a time, or None when that is not possible.
+
+    None is only N-way SLERP (see :func:`_can_stream`); the caller then takes the
+    whole-tensor path for that key.
+    """
+    shape = _disk_shape(entries[present[0]], key)
+    rows = chunk_rows(shape, len(present))
+    if method == "slerp":
+        if len(present) != 2:
+            return None
+        return _stream_slerp(entries, key, present, weights, shape, rows)
+    if method == "ties":
+        return _stream_ties(entries, key, present, weights, density, shape, rows)
+    if method == "dare":
+        return _stream_dare(entries, key, present, weights, density, seed, shape, rows)
+    return _stream_linear(entries, key, present, weights, shape, rows)
+
+def _merge_key(entries, key, present, plans, method, normalized, density, seed):
+    """One key's merged tensor, plus how it was produced.
+
+    ``streamed`` and ``blended`` are both "averaged"; the split exists so the
+    report can say how much of a merge stayed inside the RAM budget instead of
+    materialising a float32 copy per parent.
+    """
+    weights = [normalized[index] for index in present]
+    if len(present) > 1 and _can_stream(entries, key, present, plans, method):
+        streamed = _stream_blend(
+            entries,
+            key,
+            present,
+            weights,
+            method = method,
+            density = density,
+            seed = seed,
+        )
+        if streamed is not None:
+            return streamed, "streamed"
+    if len(present) > 1:
+        tensors = [_read_tensor(entries[index], key) for index in present]
+        arrays = [tensor_io.to_float32(tensor) for tensor in tensors]
+
+        aligned = [
+            _align_for_key(array, key, plans[index])
+            for array, index in zip(arrays, present)
+        ]
+
+        if all(array.shape == aligned[0].shape for array in aligned) and tensor_io.is_floating(
+            tensors[0]
+        ):
+            return (
+                tensor_io.cast_like(
+                    blend_tensors(
+                        aligned,
+                        method = method,
+                        weights = weights,
+                        density = density,
+                        seed = seed,
+                    ),
+                    tensors[0],
+                ),
+                "blended",
+            )
+
+        return tensors[0], "skipped"
+    return _read_tensor(entries[present[0]], key), "copied"
+
+def shard_budget_bytes(requested: int) -> int:
+    """How much merged output may sit in RAM before a shard is flushed.
+
+    The 4 GiB default is a disk-shard choice, not a memory one, and on an 8 GB
+    CPU host it would buffer a whole checkpoint before writing anything. Cap it
+    at a quarter of free RAM, with a floor so a flush loop never degenerates
+    into one write per tensor.
+    """
+    try:
+        from . import splitter  # noqa: PLC0415 - lazy, keeps this import cheap
+
+        free = int(splitter.probe_memory().system_ram_free_bytes or 0)
+    except Exception:  # noqa: BLE001 - a probe failure must not block a merge
+        return int(requested)
+    if free <= 0:
+        return int(requested)
+    return max(64 * 1024 * 1024, min(int(requested), int(free * 0.25)))
 
 def inspect_checkpoint(directory: str) -> dict[str, Any]:
     """Return the spec plus the tensor inventory of a local checkpoint."""
     spec = probe_model_spec(directory)
     try:
-        entries, metadata = _open_state(directory)
+        entries, metadata = _open_state(directory, allow_pickle = True)
     except (ValueError, OSError) as error:
         return {"spec": spec.to_dict(), "tensor_count": 0, "error": str(error)}
     return {
@@ -722,9 +1144,136 @@ def inspect_checkpoint(directory: str) -> dict[str, Any]:
         "metadata": metadata or {},
     }
 
-
 MAX_MERGE_MODELS = 6
 
+MAX_MERGE_MODELS_CPU = 3
+
+def host_has_gpu() -> bool:
+    """Whether a CUDA device is visible to this process.
+
+    Merge itself runs on the CPU either way; this only decides the parent cap and
+    the tier a job reports. Apple MPS reports False here, which is honest: an MPS
+    host merges on the CPU like any other.
+    """
+    torch = tensor_io.torch_module()
+    if torch is None:
+        return False
+    try:
+        return bool(torch.cuda.is_available())
+    except Exception:  # noqa: BLE001 - a broken driver must not look like a GPU
+        return False
+
+def free_ram_bytes() -> int:
+    """Free system RAM, or 0 when the probe cannot answer."""
+    try:
+        from . import splitter  # noqa: PLC0415 - lazy, keeps this import cheap
+
+        return int(splitter.probe_memory().system_ram_free_bytes or 0)
+    except Exception:  # noqa: BLE001 - a probe failure must not block planning
+        return 0
+
+def largest_tensor_bytes(directory: Path) -> int:
+    """Bytes of the largest single tensor, the floor a streaming merge needs."""
+    best = 0
+    for file_path in _weight_files(directory, include_pickle = True):
+        if file_path.suffix == ".bin":
+            try:
+                for tensor in _pickle_state(file_path).values():
+                    best = max(best, tensor_io.nbytes(tensor))
+            except (ValueError, OSError):
+                continue
+            continue
+        try:
+            with tensor_io.open_file(file_path) as handle:
+                for key in handle.keys():
+                    shape = tensor_io.shape_of(handle, key)
+                    best = max(
+                        best,
+                        int(math.prod(shape)) * tensor_io.dtype_itemsize(handle, key),
+                    )
+        except (ValueError, OSError):
+            continue
+    return best
+
+def checkpoint_weight_bytes(source: str) -> int:
+    """Bytes of weight files at a source, or 0 when it is not a local path."""
+    root = Path(source).expanduser()
+    if root.is_file():
+        try:
+            return int(root.stat().st_size)
+        except OSError:
+            return 0
+    if not root.is_dir():
+        return 0
+    total = 0
+    for file_path in _weight_files(root, include_pickle = True):
+        try:
+            total += int(file_path.stat().st_size)
+        except OSError:
+            pass
+    return total
+
+def merge_model_limit(
+    sources: Sequence[str] | None = None,
+    *,
+    has_gpu: bool | None = None,
+    free_bytes: int | None = None,
+) -> int:
+    """How many parents this host can stream at once.
+
+    A GPU host keeps the flat six. A CPU host is capped by RAM rather than by the
+    absence of a GPU: the peak is one output tensor, one row chunk of about
+    ``CHUNK_BUDGET_BYTES`` per parent, and the shard buffer, so a small checkpoint
+    can merge six parents on the same laptop that can only manage two of a large
+    one. With no sources to measure, three is the answer the page plans against.
+    """
+    if has_gpu is None:
+        has_gpu = host_has_gpu()
+    if has_gpu:
+        return MAX_MERGE_MODELS
+    if not sources:
+        return MAX_MERGE_MODELS_CPU
+    free = free_ram_bytes() if free_bytes is None else int(free_bytes)
+    if free <= 0:
+        return MAX_MERGE_MODELS_CPU
+    largest = 0
+    for source in sources:
+        root = Path(source).expanduser()
+        if root.is_file():
+            root = root.parent
+        if not root.is_dir():
+            continue
+        try:
+            largest = max(largest, largest_tensor_bytes(root))
+        except (ValueError, OSError):
+            continue
+
+    headroom = int(free * 0.6) - largest
+    if headroom <= 0:
+        return 2
+    allowance = int(headroom // (CHUNK_BUDGET_BYTES * 2))
+    return max(2, min(MAX_MERGE_MODELS, allowance))
+
+def max_merge_models(has_gpu: bool | None = None, sources: Sequence[str] | None = None) -> int:
+    """The parent cap for this host: six with a GPU, RAM-derived on a CPU host."""
+    return merge_model_limit(sources, has_gpu = has_gpu)
+
+def check_model_count(count: int, limit: int) -> None:
+    if count < 2:
+        raise ValueError("A merge needs at least two checkpoints.")
+    if count <= limit:
+        return
+    if limit >= MAX_MERGE_MODELS:
+        raise ValueError(
+            f"At most {MAX_MERGE_MODELS} checkpoints can be merged at once; got {count}."
+        )
+    raise ValueError(
+        f"This host can merge at most {limit} checkpoints per run (got {count}). "
+        "The cap follows free RAM: every streaming parent holds one row chunk "
+        "beside the output tensor. Merge them in two passes, free some memory, "
+        "or run this on a GPU host for up to "
+        f"{MAX_MERGE_MODELS}."
+    )
 
 def merge_checkpoints_many(
     sources: Sequence[str],
@@ -743,9 +1292,10 @@ def merge_checkpoints_many(
     """Stream 2 to 6 safetensors checkpoints into one aligned merged model.
 
     Every source is aligned against the first one, so a N-way merge never has to
-    agree on shapes pairwise. Only one tensor set is resident at a time, so the
-    peak is one tensor per parent rather than every checkpoint at once; shards
-    are written as they fill, each one atomically.
+    agree on shapes pairwise. Every method reads equal-shaped tensors in row
+    chunks and flushes shards against a RAM-derived budget, so a CPU host peaks at
+    one output tensor plus one chunk per parent rather than every checkpoint at
+    once. The parent cap follows the host's free RAM on a CPU and is six on a GPU.
 
     Weights are normalized over the sources that actually own a tensor, so a key
     missing from one parent reweights the survivors instead of being blended as
@@ -760,13 +1310,11 @@ def merge_checkpoints_many(
     from . import run_manifest, tokenizer_check  # noqa: PLC0415
 
     count = len(sources)
-    if count < 2:
-        raise ValueError("A merge needs at least two checkpoints.")
-    if count > MAX_MERGE_MODELS:
-        raise ValueError(
-            f"At most {MAX_MERGE_MODELS} checkpoints can be merged at once; got {count}."
-        )
+    has_gpu = host_has_gpu()
+    release_pickle_states()
     normalized = _normalized_weight(weights, count)
+
+    shard_buffer_bytes = shard_budget_bytes(max_shard_bytes)
 
     def report(stage: str, **extra: Any) -> None:
         if progress is None:
@@ -779,25 +1327,32 @@ def merge_checkpoints_many(
     active_policy = policy or policy_module.DEFAULT_POLICY
     report(stage = "resolving", done = 0, total = count,
            message = "Resolving checkpoints")
-    resolved = [resolve_checkpoint_source(source, token = token) for source in sources]
+    resolved = [
+        resolve_checkpoint_source(
+            source, token = token, allow_pickle = active_policy.allow_non_safetensors
+        )
+        for source in sources
+    ]
     policy_report = [
         policy_module.enforce_source_policy(resolved[i], active_policy, label = f"Model {i + 1}")
         for i in range(count)
     ]
+    model_limit = max_merge_models(has_gpu, sources = resolved)
+    check_model_count(count, model_limit)
     specs = [probe_model_spec(source) for source in resolved]
-    # One target for the whole group, with the first parent aligned to it as
-    # well: a per-pair target would leave parent 2 and parent 3 cropped to
-    # different widths, so no key could ever be blended across all of them.
+
     plans = plan_alignment_many(specs)
 
-    # The quiet failure: weights blend fine, the tokenizer does not.
     tokenizer_report = tokenizer_check.check_before_merge(
         resolved, allow_conflict = allow_tokenizer_conflict
     )
 
     report(stage = "scanning", done = 0, total = count,
            message = "Reading shard indexes")
-    entries = [_open_state(source)[0] for source in resolved]
+    entries = [
+        _open_state(source, allow_pickle = active_policy.allow_non_safetensors)[0]
+        for source in resolved
+    ]
 
     out = Path(output_dir)
     out.mkdir(parents = True, exist_ok = True)
@@ -808,7 +1363,7 @@ def merge_checkpoints_many(
     shard_bytes = 0
     shard_index = 1
     weight_map: dict[str, str] = {}
-    blended = copied = skipped = 0
+    blended = copied = skipped = streamed = 0
     total_bytes = 0
     report_every = max(1, total_keys // 100)
 
@@ -817,7 +1372,7 @@ def merge_checkpoints_many(
         if not shard:
             return
         name = f"model-{shard_index:05d}.safetensors"
-        # Atomic: a crash or a full disk never leaves a shard the index points at.
+
         policy_module.atomic_save_tensors(shard, out / name)
         for key in shard:
             weight_map[key] = name
@@ -827,42 +1382,20 @@ def merge_checkpoints_many(
 
     for position, key in enumerate(keys, start = 1):
         present = [index for index, entry in enumerate(entries) if key in entry]
-        if len(present) > 1:
-            tensors = [_read_tensor(entries[index], key) for index in present]
-            arrays = [tensor_io.to_float32(tensor) for tensor in tensors]
-            # Every owner, the first included, moves to the group's target, so
-            # the aligned shapes agree whenever the tensors can be blended.
-            aligned = [
-                _align_for_key(array, key, plans[index])
-                for array, index in zip(arrays, present)
-            ]
-            # Blend in float32, then hand the result back in the dtype the first
-            # owner stored it in, so a bf16 merge stays bf16 on disk.
-            if (
-                all(array.shape == aligned[0].shape for array in aligned)
-                and tensor_io.is_floating(tensors[0])
-            ):
-                merged = tensor_io.cast_like(
-                    blend_tensors(
-                        aligned,
-                        method = method,
-                        weights = [normalized[index] for index in present],
-                        density = density,
-                        seed = seed,
-                    ),
-                    tensors[0],
-                )
-                blended += 1
-            else:
-                # Integer bookkeeping tensors (positions, token ids) must not be averaged.
-                merged = tensors[0]
-                skipped += 1
-        else:
-            merged = _read_tensor(entries[present[0]], key)
+        merged, status = _merge_key(
+            entries, key, present, plans, method, normalized, density, seed
+        )
+        if status in ("streamed", "blended"):
+            blended += 1
+            if status == "streamed":
+                streamed += 1
+        elif status == "copied":
             copied += 1
+        else:
+            skipped += 1
 
         nbytes = tensor_io.nbytes(merged)
-        if shard and shard_bytes + nbytes > max_shard_bytes:
+        if shard and shard_bytes + nbytes > shard_buffer_bytes:
             flush()
         shard[key] = merged
         shard_bytes += nbytes
@@ -887,9 +1420,7 @@ def merge_checkpoints_many(
     (out / "model.safetensors.index.json").write_text(
         json.dumps(index, indent = 2), encoding = "utf-8"
     )
-    # Carry the base config and tokenizer files through so the result loads. The
-    # first parent that has each file wins, which is why the tokenizer check runs
-    # before any of this.
+
     for name in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"):
         for source in resolved:
             candidate = Path(source) / name
@@ -900,7 +1431,6 @@ def merge_checkpoints_many(
                     pass
                 break
 
-    # The output inherits one parent's tokenizer files; confirm it really did.
     output_tokenizer = tokenizer_check.verify_output(out, tokenizer_report.fingerprints[0])
 
     report_block = {
@@ -908,7 +1438,11 @@ def merge_checkpoints_many(
         "output_dir": str(out),
         "method": method,
         "model_count": count,
-        # Kept for the two-model report shape the UI and older manifests read.
+
+        "tier": "gpu" if has_gpu else "cpu",
+        "max_models": model_limit,
+        "parent_cap_reason": "gpu" if has_gpu else "ram",
+
         "weight": normalized[1] if count == 2 else None,
         "weights": list(normalized),
         "models": [spec.to_dict() for spec in specs],
@@ -932,13 +1466,16 @@ def merge_checkpoints_many(
                 if warning
             ],
         },
-        # What the merged result may be used for is a property of every parent.
+
         "licenses": licenses.to_report_block(resolved),
         "metrics": {
             "blended_tensors": blended,
+
+            "streamed_tensors": streamed,
             "copied_tensors": copied,
             "skipped_tensors": skipped,
             "shards": shard_index - 1,
+            "shard_buffer_bytes": shard_buffer_bytes,
             "total_bytes": total_bytes,
         },
     }
@@ -950,6 +1487,8 @@ def merge_checkpoints_many(
             "weights": list(normalized),
             "density": density,
             "max_shard_bytes": max_shard_bytes,
+            "shard_buffer_bytes": shard_buffer_bytes,
+            "max_models": model_limit,
             "alignment": plans[1].to_dict() if count > 1 else None,
         },
         seeds={"seed": seed},
@@ -987,9 +1526,9 @@ def merge_checkpoints_many(
     report_block["run_manifest"] = str(out / run_manifest.MANIFEST_NAME)
     report_block["manifest_id"] = manifest["run_id"]
     policy_module.atomic_write_json(out / "merge_report.json", report_block)
+    release_pickle_states()
     report(stage = "completed", done = total_keys, total = total_keys, message = "Merge complete")
     return report_block
-
 
 def merge_checkpoints(
     model_a: str,
@@ -1021,12 +1560,6 @@ def merge_checkpoints(
         progress = progress,
     )
 
-
-# ---------------------------------------------------------------------------
-# MMoE planning
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class MoePlan:
     experts: tuple[dict[str, Any], ...]
@@ -1039,7 +1572,6 @@ class MoePlan:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
 
 def plan_moe_merge(
     specs: Sequence[ModelSpec],

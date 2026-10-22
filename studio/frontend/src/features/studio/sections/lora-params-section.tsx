@@ -79,6 +79,14 @@ export function LoraParamsSection(): ReactElement | null {
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-3 data-[state=open]:overflow-visible">
         <div className="pt-1.5 flex flex-col gap-4">
+          {store.trainingMethod === "cora" ? (
+            <p
+              data-testid="cora-lora-note"
+              className="text-ui-10p5 leading-ui-14 text-muted-foreground/70"
+            >
+              CoRA runs r=8, alpha=24 with LoftQ initialisation.
+            </p>
+          ) : null}
           <ParamsSliderRow
             label={t("studio.params.rank")}
             tooltip={

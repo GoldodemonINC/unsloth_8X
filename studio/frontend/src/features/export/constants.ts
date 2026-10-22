@@ -337,6 +337,7 @@ export function getEstimatedSize(
 }
 
 export const METHOD_LABELS: Record<TrainingMethod, string> = {
+  cora: "CoRA",
   qlora: "QLoRA",
   lora: "LoRA",
   full: "Full Fine-tune",

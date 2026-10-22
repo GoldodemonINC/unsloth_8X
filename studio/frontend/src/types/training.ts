@@ -2,7 +2,13 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 export type ModelType = "vision" | "audio" | "embeddings" | "text" | "decision";
-export type TrainingMethod = "qlora" | "lora" | "full" | "cpt" | "rl";
+export type TrainingMethod =
+  | "qlora"
+  | "lora"
+  | "full"
+  | "cpt"
+  | "rl"
+  | "cora";
 
 export function isTrainingMethod(value: unknown): value is TrainingMethod {
   return (
@@ -10,12 +16,19 @@ export function isTrainingMethod(value: unknown): value is TrainingMethod {
     value === "lora" ||
     value === "full" ||
     value === "cpt" ||
-    value === "rl"
+    value === "rl" ||
+    value === "cora"
   );
 }
 
 export function isAdapterMethod(method: TrainingMethod): boolean {
-  return method === "lora" || method === "qlora" || method === "cpt" || method === "rl";
+  return (
+    method === "lora" ||
+    method === "qlora" ||
+    method === "cpt" ||
+    method === "rl" ||
+    method === "cora"
+  );
 }
 export type DatasetSource = "huggingface" | "upload" | "s3";
 

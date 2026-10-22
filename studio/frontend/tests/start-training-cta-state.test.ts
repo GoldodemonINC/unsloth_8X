@@ -49,3 +49,33 @@ test("start button labels cover pending work and incomplete selections", () => {
     assert.equal(resolveStartTrainingButtonLabelKey(state), expected);
   }
 });
+
+test("a simulated run needs no model or dataset to offer its own start label", () => {
+  assert.equal(
+    resolveStartTrainingButtonLabelKey({
+      ...readyState,
+      hasModel: false,
+      hasDataset: false,
+      isCheckingDataset: true,
+      simulated: true,
+    }),
+    "studio.training.startSimulated",
+  );
+  // Pending work still wins: the fake run is being started or stopped already.
+  assert.equal(
+    resolveStartTrainingButtonLabelKey({
+      ...readyState,
+      simulated: true,
+      startBlocked: true,
+    }),
+    "studio.training.starting",
+  );
+  assert.equal(
+    resolveStartTrainingButtonLabelKey({
+      ...readyState,
+      simulated: true,
+      stopRequested: true,
+    }),
+    "studio.training.stopping",
+  );
+});

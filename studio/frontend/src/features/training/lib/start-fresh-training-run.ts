@@ -6,11 +6,12 @@ import { isAccountOwner } from "@/features/auth";
 import { prepareHfTokenForUse } from "@/features/hf-auth";
 import { getHfToken, useHfTokenStore } from "@/features/hub";
 import { confirmRemoteCodeIfNeeded } from "@/features/security";
+import { loadDebugTrainingSimulation } from "@/features/settings/api/debug-training-simulation";
+import { getCachedSystemInfo } from "@/hooks/use-system";
 import { translate } from "@/i18n";
 import { primeNativeNotificationPermission } from "@/lib/native-notifications";
 import { toast } from "@/lib/toast";
 import { DatasetFormatError, checkDatasetFormat } from "../api/datasets-api";
-import { getCachedSystemInfo } from "@/hooks/use-system";
 import { buildTrainingStartPayload } from "../api/mappers";
 import {
   TrainingStartError,
@@ -255,10 +256,25 @@ class FreshTrainingStartAttempt {
   }
 }
 
+async function simulatedTrainingEnabled(): Promise<boolean> {
+  // A settings read failure must not change how a real Start behaves.
+  try {
+    return (await loadDebugTrainingSimulation()).enabled;
+  } catch {
+    return false;
+  }
+}
+
 export async function startFreshTrainingRun(): Promise<boolean> {
   const attempt = FreshTrainingStartAttempt.begin();
   if (!attempt) {
     return false;
+  }
+
+  // Settings -> Debugging: the backend runs a fake trainer and ignores the
+  // payload, so the model, dataset, token and consent steps below are skipped.
+  if (await simulatedTrainingEnabled()) {
+    return await submitFreshTrainingRun(attempt, "", true);
   }
 
   const validation = validateTrainingConfig(
@@ -539,17 +555,33 @@ async function confirmSelectedModelRemoteCode(
 async function submitFreshTrainingRun(
   attempt: FreshTrainingStartAttempt,
   hfToken: string | null,
+  simulated = false,
 ): Promise<boolean> {
-  const validation = validateTrainingConfig(
-    attempt.config,
-    usePlatformStore.getState().deviceType,
-    isAccountOwner(),
-  );
-  if (!validation.ok) {
-    return attempt.cancel(translate(validation.errorKey));
+  if (!simulated) {
+    const validation = validateTrainingConfig(
+      attempt.config,
+      usePlatformStore.getState().deviceType,
+      isAccountOwner(),
+    );
+    if (!validation.ok) {
+      return attempt.cancel(translate(validation.errorKey));
+    }
   }
 
-  const payload = buildTrainingStartPayload(attempt.config, hfToken, getCachedSystemInfo());
+  const base = buildTrainingStartPayload(
+    attempt.config,
+    hfToken,
+    getCachedSystemInfo(),
+  );
+  // The request schema is validated before the route sees the body, so a
+  // simulated start still has to name a model; the backend ignores it.
+  const payload = simulated
+    ? {
+        ...base,
+        model_name: "debug/simulated-model",
+        training_type: "LoRA/QLoRA",
+      }
+    : base;
   if (!attempt.enterTransport()) {
     return false;
   }

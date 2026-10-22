@@ -5,6 +5,7 @@ import type { TranslationKey } from "@/i18n";
 import type { TrainingMethod } from "@/types/training";
 
 export const TRAINING_METHOD_ORDER: readonly TrainingMethod[] = [
+  "cora",
   "qlora",
   "lora",
   "full",
@@ -21,6 +22,12 @@ interface TrainingMethodMeta {
 
 export const TRAINING_METHOD_META: Record<TrainingMethod, TrainingMethodMeta> =
   {
+    cora: {
+      labelKey: "studio.methods.cora.label",
+      hintKey: "studio.methods.cora.hint",
+      noteKey: "studio.methods.cora.note",
+      dotClass: "bg-teal-500/70",
+    },
     qlora: {
       labelKey: "studio.methods.qlora.label",
       hintKey: "studio.methods.qlora.hint",

@@ -1449,6 +1449,16 @@ export const en = {
       managedNote: "The owner of this Unsloth server sets up the OS sandbox.",
     },
     debugging: {
+      simulationSection: "Simulated training",
+      simulationLabel: "Simulate training runs",
+      simulationDescription:
+        "Start a run with no GPU, no model and no dataset. A stand-in trainer reports steps, loss and eval values so the training screens can be tried end to end; the metrics and the history row are invented.",
+      simulationHint:
+        "For exercising the training UI on a machine that cannot train. Nothing is downloaded and no weights are trained.",
+      simulationOn:
+        "Simulated training is on. The next run started from Training will be fake.",
+      simulationOff: "Simulated training is off. Runs train for real again.",
+      simulationSaveFailed: "Could not change the simulated training setting.",
       logSection: "Log file",
       source: "Log file",
       sourceHint: "The model runners write their own logs, so a failed load or generation is often explained there rather than in the server log.",
@@ -3468,6 +3478,11 @@ export const en = {
       vramApprox: "~{est}GB VRAM",
     },
     methods: {
+      cora: {
+        label: "CoRA (CPU)",
+        hint: "CPU-first LoRA: 4-bit base, LoftQ init, QAT and layer-wise LRs, 1k context.",
+        note: "CPU",
+      },
       qlora: {
         label: "QLoRA",
         hint: "4-bit quantization. Lowest VRAM, fastest to start.",
@@ -3843,6 +3858,9 @@ export const en = {
         "Training settings changed while loading. Try duplicating again.",
       duplicateNoModel: "This run has no saved model configuration.",
       startTraining: "Start Training",
+      startSimulated: "Start simulated run",
+      simulatedNote:
+        "A simulated run: no GPU, model or dataset is used, and the metrics are generated.",
       starting: "Starting...",
       loadingModel: "Loading model...",
       checkingDataset: "Checking dataset...",

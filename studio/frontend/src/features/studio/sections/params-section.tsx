@@ -75,6 +75,7 @@ export function ParamsSection({
   useMlxTrainingConfigPolicy();
 
   const isCpt = store.trainingMethod === "cpt";
+  const isCora = store.trainingMethod === "cora";
   const showAdvanced = mode === "advanced";
   const [contextDraft, setContextDraft] = useState(() => ({
     contextLength: store.contextLength,
@@ -145,6 +146,15 @@ export function ParamsSection({
   return (
     <div className="min-w-0">
       <div className="flex flex-col gap-5">
+        {isCora ? (
+          <p
+            data-testid="cora-params-note"
+            className="rounded-lg border border-teal-500/30 bg-teal-500/5 px-3 py-2 text-ui-11 leading-ui-15 text-muted-foreground"
+          >
+            CoRA fixes the optimizer, schedule, batch, context and adapter size.
+            Edits here are ignored for this method.
+          </p>
+        ) : null}
         <div className="grid grid-cols-1 items-start gap-4 @xl/train-section:grid-cols-2 @xl/train-section:gap-x-6 @xl/train-section:gap-y-5">
           <div className="flex flex-col gap-2">
             <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">

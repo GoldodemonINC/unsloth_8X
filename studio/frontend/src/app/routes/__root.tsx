@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
-import { ImageViewer } from "@/components/image-viewer";
 import { useAppShellReadySignal } from "@/components/app-readiness";
 import { AppSidebar } from "@/components/app-sidebar";
 import { CommandPalette } from "@/components/command-palette";
+import {
+  type HelpAction,
+  helpActionAvailable,
+  runHelpAction,
+} from "@/components/help-actions";
+import { ImageViewer } from "@/components/image-viewer";
 import { Navbar } from "@/components/navbar";
 import { SidebarEdgeTrigger } from "@/components/sidebar-edge-trigger";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { videoNavHint } from "@/config/hardware-verdict";
 import { ApiMonitorOverlay } from "@/features/api-monitor/api-monitor-overlay";
-import { DownloadApprovalDialog } from "@/features/browser";
 import {
   AUTH_SESSION_CLEARED_EVENT,
   AUTH_SESSION_STORED_EVENT,
@@ -19,28 +23,34 @@ import {
   hasSettledAuthSession,
   useIsAccountOwner,
 } from "@/features/auth";
+import { DownloadApprovalDialog } from "@/features/browser";
 import {
   ChatPage,
   type ChatSearch,
+  StopRunningChatsDialog,
   hydrateModelDisclaimerPreference,
   openFolderAsProject,
   startLlamaCppAutoReload,
-  StopRunningChatsDialog,
-  useOpeningFolder,
   useChatRuntimeStore,
+  useOpeningFolder,
 } from "@/features/chat";
+import { bootstrapPersistedCredentials } from "@/features/credentials/bootstrap";
 import { useExportRuntimeLifecycle } from "@/features/export";
+import { LlmCompressorConsentDialog } from "@/features/export/components/llm-compressor-consent-dialog";
 import { FIND_SCOPE_ATTRIBUTE, FindInPage } from "@/features/find-in-page";
 import { HfTokenWarningDialog } from "@/features/hf-auth";
-import { InterfaceZoom, zoomInterfaceFromMenu } from "@/features/interface-zoom";
-import { bootstrapPersistedCredentials } from "@/features/credentials/bootstrap";
+import {
+  InterfaceZoom,
+  zoomInterfaceFromMenu,
+} from "@/features/interface-zoom";
 import {
   ManagedEngineOfferDialog,
   SharedRunConfigLinkHandler,
 } from "@/features/model-picker";
 import { backfillModelOverrides } from "@/features/model-picker/api/migrate-model-overrides";
-import { hydratePins } from "@/lib/pins-mirror";
+import { useNativePathLeasesSupported } from "@/features/native-intents";
 import { usePersonalizationSync } from "@/features/profile";
+import { useRagAvailabilityStore } from "@/features/rag";
 import { RemoteCodeConsentDialog } from "@/features/security";
 import {
   SETTINGS_TABS,
@@ -52,17 +62,18 @@ import {
   useShortcut,
   useShortcutAvailable,
 } from "@/features/settings";
+import { loadDebugTrainingSimulation } from "@/features/settings/api/debug-training-simulation";
+import { useDebugTrainingSimulation } from "@/features/settings/hooks/use-debug-training-simulation";
 import { useLowDiskNotice } from "@/features/settings/hooks/use-low-disk-notice";
+import { setDebugTrainingSimulationEnabled } from "@/features/settings/stores/debug-training-simulation-store";
 import { useTrainingUnloadGuard } from "@/features/training";
 import { TransformersUpgradeDialog } from "@/features/transformers-upgrade";
-import { LlmCompressorConsentDialog } from "@/features/export/components/llm-compressor-consent-dialog";
-import { useNativePathLeasesSupported } from "@/features/native-intents";
-import { useRagAvailabilityStore } from "@/features/rag";
 import { useIsMobileShell } from "@/hooks/use-mobile";
 import { useSidebarPin } from "@/hooks/use-sidebar-pin";
 import { useTypeToActivate } from "@/hooks/use-type-to-activate";
 import { type TranslationKey, useT } from "@/i18n";
 import { createNavigationNonce } from "@/lib/navigation-nonce";
+import { hydratePins } from "@/lib/pins-mirror";
 import {
   Outlet,
   createRootRoute,
@@ -73,21 +84,18 @@ import {
 } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "motion/react";
 import {
-  lazy,
-
   type ReactNode,
   Suspense,
+  lazy,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
-
   useState,
 } from "react";
-import { AppProvider } from "../provider";
-import { useDesktopShellReady } from "../desktop-shell-ready";
-import { type HelpAction, helpActionAvailable, runHelpAction } from "@/components/help-actions";
 import type { SettingsMenuAction } from "../app-menu-chords";
+import { useDesktopShellReady } from "../desktop-shell-ready";
+import { AppProvider } from "../provider";
 import { hasAppMenus, useAppMenuActions } from "../use-app-menu-actions";
 
 declare module "@tanstack/react-router" {
@@ -138,9 +146,7 @@ function ReloadSnapshotPrivacy() {
       incognito,
     );
     return () => {
-      document.documentElement.removeAttribute(
-        "data-reload-snapshot-private",
-      );
+      document.documentElement.removeAttribute("data-reload-snapshot-private");
     };
   }, [incognito]);
 
@@ -214,7 +220,6 @@ function ChatSettingsHydrationMount() {
   return null;
 }
 
-
 function CredentialBootstrapGate({
   active,
   children,
@@ -240,11 +245,7 @@ function CredentialBootstrapGate({
       }
       setReady(false);
       void bootstrapPersistedCredentials().finally(() => {
-        if (
-          mounted &&
-          revision === runRevision.current &&
-          hasAuthToken()
-        ) {
+        if (mounted && revision === runRevision.current && hasAuthToken()) {
           setReady(true);
         }
       });
@@ -284,6 +285,9 @@ const CHAT_ONLY_ALLOWED = new Set([
   // Export stays reachable on chat-only hosts so the page can show its own grayed-out reason
   // instead of a silent redirect; it self-gates via export capability, so nothing runs.
   "/export",
+  // Merging is CPU work: it streams tensors and never needs an accelerator. A chat-only host
+  // gets the page at its smaller two-to-three-parent tier instead of bouncing to /chat.
+  "/merge",
   // Chat-only hosts serve the API like any other, so the monitor must be reachable there
   // or the overlay's "Expand" and the Settings API card redirect to /chat.
   "/api-monitor",
@@ -324,9 +328,25 @@ export const Route = createRootRoute({
     await fetchDeviceType();
     const { isChatOnly, capabilitiesUnknown } = usePlatformStore.getState();
     const unmeasured = capabilitiesUnknown();
+    // Settings -> Debugging: simulated runs need no GPU, so a chat-only host
+    // can still open Training. Read it before the guard, not in a component,
+    // because this redirect runs first. A failed read keeps the host gated.
+    let simulatedTraining = false;
+    const opensStudio =
+      location.pathname === "/studio" ||
+      location.pathname.startsWith("/studio/");
+    if (opensStudio) {
+      simulatedTraining = await loadDebugTrainingSimulation()
+        .then((state) => {
+          setDebugTrainingSimulationEnabled(state.enabled);
+          return state.enabled;
+        })
+        .catch(() => false);
+    }
     if (
       isChatOnly() &&
       !isChatOnlyAllowed(location.pathname) &&
+      !simulatedTraining &&
       !(unmeasured && waitsOutUnknownVerdict(location.pathname))
     ) {
       throw redirect({ to: "/chat" });
@@ -361,6 +381,9 @@ function RootLayout() {
   const chatOnlyMeasured = usePlatformStore(
     (s) => s.isChatOnly() && !s.capabilitiesUnknown(),
   );
+  // Settings -> Debugging keeps Train reachable: a simulated run needs no GPU.
+  const simulatedTraining = useDebugTrainingSimulation();
+  const trainBlocked = chatOnlyMeasured && !simulatedTraining;
   const chatOnlyReason = usePlatformStore((s) => s.chatOnlyReason);
   // Video is the other row the sidebar grays out, on the two verdicts its pipelines cannot run on
   // at all. Same hint the row reads, so the two cannot disagree about which hosts they are.
@@ -437,7 +460,8 @@ function RootLayout() {
   const shouldMountAudio = isAudioRoute || audioMounted;
   // Chat, Images, Video and Audio each render their own full-height shell, so all four want the chat-style layout: no outer pt-14 inset, no outer
   // scroll. Keying off isChatRoute alone pushed the picker down and clipped the gallery. Container padding/overflow only; keep-alive stays per route.
-  const isChatLike = isChatRoute || isImagesRoute || isVideoRoute || isAudioRoute;
+  const isChatLike =
+    isChatRoute || isImagesRoute || isVideoRoute || isAudioRoute;
   // Reserves the navbar the shell actually rendered. Read off the same hook
   // Navbar uses, not the `md` breakpoint: a narrowed desktop window keeps the
   // desktop navbar, and a CSS rule would reserve the mobile one's 56px and
@@ -498,8 +522,7 @@ function RootLayout() {
   );
   useShortcut(
     "openKeyboardShortcuts",
-    () =>
-      useSettingsDialogStore.getState().openDialog("keyboard-shortcuts"),
+    () => useSettingsDialogStore.getState().openDialog("keyboard-shortcuts"),
     { enabled: !isAuthFlowRoute },
   );
   /** Every "new chat" chord lands here. `incognito` skips history,
@@ -522,7 +545,9 @@ function RootLayout() {
     chatRuntime.setIncognito(Boolean(options?.incognito));
     void navigate({
       to: "/chat",
-      search: projectId ? { project: projectId } : { new: createNavigationNonce() },
+      search: projectId
+        ? { project: projectId }
+        : { new: createNavigationNonce() },
     });
   };
 
@@ -551,13 +576,17 @@ function RootLayout() {
   const findMounted = useShortcutAvailable("findInPage", hasAppMenus);
   const previousChatMounted = useShortcutAvailable("previousChat", hasAppMenus);
   const nextChatMounted = useShortcutAvailable("nextChat", hasAppMenus);
-  const viaShortcut = (id: Parameters<typeof triggerShortcut>[0], mounted: boolean) =>
-    mounted ? () => void triggerShortcut(id) : null;
+  const viaShortcut = (
+    id: Parameters<typeof triggerShortcut>[0],
+    mounted: boolean,
+  ) => (mounted ? () => void triggerShortcut(id) : null);
   // Help opens settings or a web page, so it works anywhere past sign-in.
   // Pages this account cannot open stay disabled, as in Go > Settings.
   const isOwner = useIsAccountOwner();
   const helpAction = (action: HelpAction) =>
-    isAuthFlowRoute || !helpActionAvailable(action, isOwner) ? null : () => runHelpAction(action);
+    isAuthFlowRoute || !helpActionAvailable(action, isOwner)
+      ? null
+      : () => runHelpAction(action);
   // Workspaces for the Go menu, gated like their chords below.
   const goTo = (to: string) => () => void navigate({ to });
   const goAction = (enabled: boolean, go: () => void) => (enabled ? go : null);
@@ -570,52 +599,64 @@ function RootLayout() {
         : null,
     ]),
   ) as Record<SettingsMenuAction, (() => void) | null>;
-  useAppMenuActions({
-    "new-chat": routeShortcutEnabled ? () => startNewChat() : null,
-    "new-temporary-chat": routeShortcutEnabled
-      ? () => startNewChat({ incognito: true, standalone: true })
-      : null,
-    "open-folder":
-      routeShortcutEnabled && pathLeasesSupported && !ragUnavailable && !openingFolder
-        ? () =>
-            void openFolderAsProject().then((project) => {
-              if (!project) return;
-              const chatRuntime = useChatRuntimeStore.getState();
-              chatRuntime.setActiveThreadId(null);
-              chatRuntime.setActiveProjectId(project.id);
-              void navigate({ to: "/chat", search: { project: project.id } });
-            })
+  useAppMenuActions(
+    {
+      "new-chat": routeShortcutEnabled ? () => startNewChat() : null,
+      "new-temporary-chat": routeShortcutEnabled
+        ? () => startNewChat({ incognito: true, standalone: true })
         : null,
-    "toggle-sidebar": viaShortcut("toggleSidebar", sidebarMounted),
-    "find": viaShortcut("findInPage", findMounted),
-    "previous-chat": viaShortcut("previousChat", previousChatMounted),
-    "next-chat": viaShortcut("nextChat", nextChatMounted),
-    "back": routeShortcutEnabled ? () => window.history.back() : null,
-    "forward": routeShortcutEnabled ? () => window.history.forward() : null,
-    "zoom-in": () => zoomInterfaceFromMenu(1),
-    "zoom-out": () => zoomInterfaceFromMenu(-1),
-    "actual-size": () => zoomInterfaceFromMenu(0),
-    "help-documentation": helpAction("help-documentation"),
-    "help-keyboard-shortcuts": helpAction("help-keyboard-shortcuts"),
-    "help-whats-new": helpAction("help-whats-new"),
-    "help-troubleshooting": helpAction("help-troubleshooting"),
-    "help-system-status": helpAction("help-system-status"),
-    "help-send-feedback": helpAction("help-send-feedback"),
-    "go-chat": goAction(
-      routeShortcutEnabled,
-      () => void navigate({ to: "/chat", search: chatSearch }),
-    ),
-    "go-projects": goAction(routeShortcutEnabled, goTo("/projects")),
-    "go-library": goAction(routeShortcutEnabled, goTo("/library")),
-    "go-hub": goAction(routeShortcutEnabled, goTo("/hub")),
-    "go-train": goAction(routeShortcutEnabled && !chatOnlyMeasured, goTo("/studio")),
-    "go-recipes": goAction(routeShortcutEnabled, goTo("/data-recipes")),
-    "go-images": goAction(routeShortcutEnabled, goTo("/images")),
-    "go-video": goAction(routeShortcutEnabled && !videoDisabled, goTo("/video")),
-    "go-audio": goAction(routeShortcutEnabled, goTo("/audio")),
-    "go-export": goAction(routeShortcutEnabled, goTo("/export")),
-    ...settingsActions,
-  }, desktopShellReady);
+      "open-folder":
+        routeShortcutEnabled &&
+        pathLeasesSupported &&
+        !ragUnavailable &&
+        !openingFolder
+          ? () =>
+              void openFolderAsProject().then((project) => {
+                if (!project) return;
+                const chatRuntime = useChatRuntimeStore.getState();
+                chatRuntime.setActiveThreadId(null);
+                chatRuntime.setActiveProjectId(project.id);
+                void navigate({ to: "/chat", search: { project: project.id } });
+              })
+          : null,
+      "toggle-sidebar": viaShortcut("toggleSidebar", sidebarMounted),
+      find: viaShortcut("findInPage", findMounted),
+      "previous-chat": viaShortcut("previousChat", previousChatMounted),
+      "next-chat": viaShortcut("nextChat", nextChatMounted),
+      back: routeShortcutEnabled ? () => window.history.back() : null,
+      forward: routeShortcutEnabled ? () => window.history.forward() : null,
+      "zoom-in": () => zoomInterfaceFromMenu(1),
+      "zoom-out": () => zoomInterfaceFromMenu(-1),
+      "actual-size": () => zoomInterfaceFromMenu(0),
+      "help-documentation": helpAction("help-documentation"),
+      "help-keyboard-shortcuts": helpAction("help-keyboard-shortcuts"),
+      "help-whats-new": helpAction("help-whats-new"),
+      "help-troubleshooting": helpAction("help-troubleshooting"),
+      "help-system-status": helpAction("help-system-status"),
+      "help-send-feedback": helpAction("help-send-feedback"),
+      "go-chat": goAction(
+        routeShortcutEnabled,
+        () => void navigate({ to: "/chat", search: chatSearch }),
+      ),
+      "go-projects": goAction(routeShortcutEnabled, goTo("/projects")),
+      "go-library": goAction(routeShortcutEnabled, goTo("/library")),
+      "go-hub": goAction(routeShortcutEnabled, goTo("/hub")),
+      "go-train": goAction(
+        routeShortcutEnabled && !trainBlocked,
+        goTo("/studio"),
+      ),
+      "go-recipes": goAction(routeShortcutEnabled, goTo("/data-recipes")),
+      "go-images": goAction(routeShortcutEnabled, goTo("/images")),
+      "go-video": goAction(
+        routeShortcutEnabled && !videoDisabled,
+        goTo("/video"),
+      ),
+      "go-audio": goAction(routeShortcutEnabled, goTo("/audio")),
+      "go-export": goAction(routeShortcutEnabled, goTo("/export")),
+      ...settingsActions,
+    },
+    desktopShellReady,
+  );
 
   // Workspaces. The shell is mounted on every route, so the chords live here.
   // Carry the frozen search back: a bare /chat is a fresh chat, so switching
@@ -636,7 +677,7 @@ function RootLayout() {
   // on /chat, away from whatever they had open. The sidebar disables the row on the same measured
   // check, and only once measured, since the guess is what the row waits out too.
   useShortcut("switchToTrain", goTo("/studio"), {
-    enabled: routeShortcutEnabled && !chatOnlyMeasured,
+    enabled: routeShortcutEnabled && !trainBlocked,
   });
   useShortcut("switchToRecipes", goTo("/data-recipes"), {
     enabled: routeShortcutEnabled,
@@ -754,7 +795,10 @@ function RootLayout() {
                   <Suspense fallback={<RouteFallback />}>
                     <InitialReadyPage>
                       {(signalReady) => (
-                        <ImagesPage active={isImagesRoute} onInitialReady={signalReady} />
+                        <ImagesPage
+                          active={isImagesRoute}
+                          onInitialReady={signalReady}
+                        />
                       )}
                     </InitialReadyPage>
                   </Suspense>
@@ -773,7 +817,10 @@ function RootLayout() {
                   <Suspense fallback={<RouteFallback />}>
                     <InitialReadyPage>
                       {(signalReady) => (
-                        <VideoPage active={isVideoRoute} onInitialReady={signalReady} />
+                        <VideoPage
+                          active={isVideoRoute}
+                          onInitialReady={signalReady}
+                        />
                       )}
                     </InitialReadyPage>
                   </Suspense>
@@ -792,7 +839,10 @@ function RootLayout() {
                   <Suspense fallback={<RouteFallback />}>
                     <InitialReadyPage>
                       {(signalReady) => (
-                        <AudioPage active={isAudioRoute} onInitialReady={signalReady} />
+                        <AudioPage
+                          active={isAudioRoute}
+                          onInitialReady={signalReady}
+                        />
                       )}
                     </InitialReadyPage>
                   </Suspense>
@@ -803,22 +853,27 @@ function RootLayout() {
                   "popLayout" allows the new route to mount immediately while the
                   old one animates out, avoiding blocking on expensive exit renders.
                   See issue #5850. */}
-              {!isChatRoute && !isImagesRoute && !isVideoRoute && !isAudioRoute && (
-                <AnimatePresence initial={false} mode="popLayout">
-                  <motion.div
-                    key={pathname}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    exit={{ opacity: 0 }}
-                    transition={{ duration: 0.06 }}
-                    className="flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-visible"
-                  >
-                    <RouteBoundary readyWhenCommitted={!routeOwnsReloadReadiness}>
-                      <Outlet />
-                    </RouteBoundary>
-                  </motion.div>
-                </AnimatePresence>
-              )}
+              {!isChatRoute &&
+                !isImagesRoute &&
+                !isVideoRoute &&
+                !isAudioRoute && (
+                  <AnimatePresence initial={false} mode="popLayout">
+                    <motion.div
+                      key={pathname}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      transition={{ duration: 0.06 }}
+                      className="flex min-h-0 min-w-0 flex-1 basis-0 flex-col overflow-visible"
+                    >
+                      <RouteBoundary
+                        readyWhenCommitted={!routeOwnsReloadReadiness}
+                      >
+                        <Outlet />
+                      </RouteBoundary>
+                    </motion.div>
+                  </AnimatePresence>
+                )}
             </div>
           </SidebarInset>
         </SidebarProvider>
