@@ -190,8 +190,12 @@ def resolve_checkpoint_source(
             f"Could not download {repo!r} from the Hugging Face Hub: {error}"
         ) from error
 
-def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
-    """Read a checkpoint's config into a spec, from a local path or the Hub."""
+def read_model_config(source: str, *, token: str | None = None) -> tuple[str, dict[str, Any]]:
+    """Read a checkpoint's config.json, from a local path or the Hub.
+
+    Planning only needs the config, so nothing here downloads weights. Returns the
+    label to show in the UI alongside the parsed config.
+    """
     path = Path(source).expanduser()
     label = str(path)
     config: dict[str, Any] | None = None
@@ -215,6 +219,11 @@ def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
             f"No config.json found for {source!r}. Give a local checkpoint directory "
             "or a Hugging Face repo id."
         )
+    return label, config
+
+def probe_model_spec(source: str, *, token: str | None = None) -> ModelSpec:
+    """Read a checkpoint's config into a spec, from a local path or the Hub."""
+    label, config = read_model_config(source, token = token)
     hidden = _first_int(config, _HIDDEN_KEYS)
     layers = _first_int(config, _LAYER_KEYS)
     heads = _first_int(config, _HEAD_KEYS)

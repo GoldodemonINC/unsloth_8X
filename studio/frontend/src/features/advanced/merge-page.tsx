@@ -44,6 +44,7 @@ import {
   waitForJob,
 } from "./api/advanced-api";
 import { MergeModelSlot } from "./components/merge-model-slot";
+import { ScalerPanel } from "./components/scaler-panel";
 import {
   type SavedMergePreset,
   loadSavedPresets,
@@ -1656,6 +1657,10 @@ export function MergePage(): ReactElement {
           {job?.status === "failed" ? (
             <p className="text-ui-11 text-destructive">{job.error}</p>
           ) : null}
+        </section>
+
+        <section className="elevated-card flex flex-col gap-4 p-5">
+          <ScalerPanel defaultSource={job?.output_dir ?? ""} />
         </section>
 
         <section className="elevated-card flex flex-col gap-3 p-5">

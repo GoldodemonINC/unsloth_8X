@@ -118,6 +118,10 @@ export interface AdvancedJob {
       | "resolving"
       | "scanning"
       | "merging"
+      | "loading"
+      | "expanding"
+      | "saving"
+      | "verifying"
       | "finalizing"
       | "completed"
       | "failed";
@@ -224,6 +228,80 @@ export interface SplitPlanResponse {
     warnings: string[];
   };
   fits_on_disk: boolean;
+}
+
+/** One reason a Scaler run would be refused, reported before anything loads. */
+export interface ScalerRefusal {
+  code: string;
+  message: string;
+  /** False only for the "slider is under the 2x floor" note on an otherwise valid plan. */
+  blocks: boolean;
+}
+
+export type ScalerMethod = "depth" | "mlp_width" | "depth+mlp_width";
+
+export interface ScalerPlan {
+  source: string;
+  spec: {
+    architecture: string;
+    hidden_size: number | null;
+    num_layers: number | null;
+    intermediate_size: number | null;
+    vocab_size: number | null;
+  };
+  /** Estimator count from config.json; the run reports the measured one. */
+  base_params: number;
+  /** Slider minimum: the checkpoint as it is. */
+  min_params: number;
+  /** Slider's amber line: 2x the base, below which growth is refused. */
+  floor_params: number;
+  /** Slider maximum: base + 3B. */
+  max_params: number;
+  cap_added_params: number;
+  growth_floor: number;
+  target_params: number;
+  default_target_params: number;
+  step_params: number;
+  method: ScalerMethod;
+  method_label: string;
+  methods: Array<{ id: ScalerMethod; label: string }>;
+  projection: {
+    projected_params: number;
+    added_params: number;
+    growth_factor: number;
+    new_num_layers: number;
+    new_intermediate_size: number;
+    current_num_layers: number;
+    current_intermediate_size: number;
+    params_per_layer: number;
+  } | null;
+  target_below_floor: boolean;
+  refusals: ScalerRefusal[];
+  /** A hard stop: the checkpoint itself cannot be expanded. */
+  blocked: boolean;
+  blocked_reason: string | null;
+  /** Nothing stands between this plan and a run. */
+  runnable: boolean;
+  engine: { available: boolean; error: string | null };
+  notes: string[];
+}
+
+export interface ScalerResult {
+  output_dir: string;
+  source: string;
+  method: ScalerMethod;
+  base_params: number;
+  final_params: number;
+  added_params: number;
+  growth_factor: number;
+  new_num_layers: number | null;
+  new_intermediate_size: number | null;
+  step0_max_logit_diff: number;
+  verified: boolean;
+  reload_max_logit_diff: number | null;
+  peak_mem_gb: number;
+  elapsed_seconds: number;
+  notes: string[];
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -407,6 +485,27 @@ export function runSplit(body: {
   prefer?: "ram" | "vram" | "auto";
 }): Promise<AdvancedJob> {
   return request("/split/run", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** The Slider's range, the growth floor, and every refusal reason. Reads config.json only. */
+export function planScaler(body: {
+  source: string;
+  target_params?: number | null;
+  method?: ScalerMethod;
+  hf_token?: string | null;
+}): Promise<ScalerPlan> {
+  return request("/scale/plan", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function runScaler(body: {
+  source: string;
+  target_params: number;
+  method: ScalerMethod;
+  output_dir?: string | null;
+  insert_strategy?: "even" | "middle" | "tail";
+  hf_token?: string | null;
+}): Promise<AdvancedJob> {
+  return request("/scale/run", { method: "POST", body: JSON.stringify(body) });
 }
 
 /** A past merge or MMoE run, read from the manifest beside its output. */

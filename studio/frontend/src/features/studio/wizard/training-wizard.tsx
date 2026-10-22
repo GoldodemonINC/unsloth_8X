@@ -34,6 +34,7 @@ import { cn } from "@/lib/utils";
 import type { TrainingMethod } from "@/types/training";
 import {
   AiBrain01Icon,
+  ArrowExpand02Icon,
   Database02Icon,
   FloppyDiskIcon,
   Settings05Icon,
@@ -46,6 +47,7 @@ import { FieldHint } from "../sections/field-hint";
 import { ParamsSection } from "../sections/params-section";
 import { ConfigActions } from "./config-actions";
 import { AdvancedTrainingSection } from "@/features/advanced/components/advanced-training-section";
+import { ScalerPanel } from "@/features/advanced/components/scaler-panel";
 import type { ParamMode } from "./training-param-mode";
 
 function SectionBox({
@@ -483,6 +485,7 @@ export function TrainingWizard({
 }) {
   const t = useT();
   const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
+  const selectedModel = useTrainingConfigStore((s) => s.selectedModel);
   return (
     <div className="flex flex-col gap-6">
       <SectionBox
@@ -492,6 +495,22 @@ export function TrainingWizard({
         chipTint="var(--chart-1)"
       >
         <ModelPanel />
+      </SectionBox>
+
+      <SectionBox
+        title="Model scaling"
+        description="Grow the model before training it, from its own parameter count up to base + 3B"
+        icon={ArrowExpand02Icon}
+        chipTint="var(--chart-2)"
+      >
+        <ScalerPanel
+          defaultSource={selectedModel ?? ""}
+          onUseCheckpoint={(path) =>
+            useTrainingConfigStore
+              .getState()
+              .selectTrainingModel(path, null, { localPath: path })
+          }
+        />
       </SectionBox>
 
       <SectionBox

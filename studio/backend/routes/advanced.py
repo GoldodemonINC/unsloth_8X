@@ -32,6 +32,7 @@ from core.advanced import (
     resources,
     rl,
     run_manifest,
+    scaling,
     tokenizer_check,
 )
 
@@ -158,14 +159,14 @@ class MoeRunRequest(BaseModel):
 
 
 class ResourceEstimateRequest(BaseModel):
-    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat"]
+    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat", "scale"]
     sources: Optional[list[str]] = None
     output_dir: Optional[str] = None
 
 
 class AcquireRequest(BaseModel):
     job_id: str
-    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat"]
+    kind: Literal["merge", "moe", "split", "merge_eval", "eval", "qat", "scale"]
     sources: Optional[list[str]] = None
     wait_seconds: float = Field(0.0, ge = 0.0, le = 3600.0)
 
@@ -184,6 +185,19 @@ class SplitPlanRequest(BaseModel):
 class SplitRunRequest(SplitPlanRequest):
     output_dir: Optional[str] = None
     copy_tokenizer: bool = True
+
+
+class ScalePlanRequest(BaseModel):
+    """A checkpoint to grow, and how far. Planning reads config.json only."""
+    source: str = Field(..., min_length = 1)
+    target_params: Optional[float] = Field(None, gt = 0, description = "Absolute parameter count")
+    method: Literal["depth", "mlp_width", "depth+mlp_width"] = "depth"
+    hf_token: Optional[str] = None
+
+
+class ScaleRunRequest(ScalePlanRequest):
+    output_dir: Optional[str] = None
+    insert_strategy: Literal["even", "middle", "tail"] = "even"
 
 
 class EvalPlanRequest(BaseModel):
@@ -440,6 +454,13 @@ _FEATURES = (
         "note": "Streams one tensor pair at a time, so it fits a CPU host with ~2x the largest tensor free.",
     },
     {
+        "key": "scale",
+        "label": "Scaler (model expansion)",
+        "cpu": True,
+        "gpu": True,
+        "note": "Loads the checkpoint twice while it verifies the save, so a 1B model needs ~4 GB of fp16 memory; a CPU host works, just slowly.",
+    },
+    {
         "key": "split",
         "label": "VRAM Fit (checkpoint sharding)",
         "cpu": True,
@@ -506,7 +527,7 @@ PLATFORM_LINE = (
 
 @router.get("/capabilities")
 def capabilities() -> dict[str, Any]:
-    from core.advanced import merge, splitter
+    from core.advanced import merge, scaling, splitter
 
     memory = splitter.probe_memory()
     has_gpu = bool(memory.gpus)
@@ -536,6 +557,14 @@ def capabilities() -> dict[str, Any]:
         "merge_streams": True,
         "merge_tier": "gpu" if has_gpu else "cpu",
         "max_merge_models": max_merge_models,
+        "scaler": {
+            "cap_added_params": scaling.CAP_ADDED_PARAMS,
+            "growth_floor": scaling.GROWTH_FLOOR,
+            "methods": [
+                {"id": key, "label": scaling.METHOD_LABELS[key]} for key in scaling.METHODS
+            ],
+            "engine_available": scaling.engine_available()[0],
+        },
         "merge_cpu_note": (
             "CPU merge is streaming only: parents are never resident at once (equal-shaped "
             "tensors are blended a row chunk at a time), so 8 GB of available RAM is a real "
@@ -1147,6 +1176,98 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
         return result
 
     return _start_job("split", work, output_dir = str(output), sources = [request.source])
+
+
+# ---------------------------------------------------------------------------
+# Scaler (model expansion)
+# ---------------------------------------------------------------------------
+
+
+def _scale_default_name(planned: dict[str, Any]) -> str:
+    """``SmolLM2-135M-x2.10``: the base name plus the growth the plan asked for."""
+    label = str(planned.get("source") or "").replace("hf://", "")
+    name = Path(label.rstrip("/\\")).name or "model"
+    growth = float((planned.get("projection") or {}).get("growth_factor") or 1.0)
+    return f"{name[:110]}-x{growth:.2f}"
+
+
+@router.post("/scale/plan")
+def scale_plan(request: ScalePlanRequest) -> dict[str, Any]:
+    """The slider's range, the growth floor, and every refusal reason.
+
+    Reads config.json only, so the page can call it on every slider move.
+    """
+    try:
+        return scaling.plan(
+            request.source,
+            target_params = request.target_params,
+            method = request.method,
+            token = request.hf_token,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+
+
+@router.post("/scale/run")
+def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
+    """Expand a checkpoint and save it where the training page can pick it up."""
+    _require_checkpoint_source(request.source, "Checkpoint", allow_hub = True)
+    try:
+        planned = scaling.plan(
+            request.source,
+            target_params = request.target_params,
+            method = request.method,
+            token = request.hf_token,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+    if not planned["runnable"]:
+        raise HTTPException(status_code = 400, detail = planned["blocked_reason"])
+
+    output = _output_dir(
+        request.output_dir,
+        kind = "scaled",
+        default_name = _scale_default_name(planned),
+    )
+    target = float(planned["target_params"])
+
+    def work(report) -> dict[str, Any]:
+        result = scaling.run(
+            request.source,
+            output_dir = str(output),
+            target_params = target,
+            method = request.method,
+            insert_strategy = request.insert_strategy,
+            token = request.hf_token,
+            progress = report,
+        )
+        result["run_manifest"] = _stage_manifest(
+            "scale",
+            str(output),
+            config = {
+                "method": request.method,
+                "insert_strategy": request.insert_strategy,
+                "target_params": target,
+                "base_params": planned["base_params"],
+                "growth_floor": planned["growth_floor"],
+            },
+            inputs = {"source": run_manifest.checkpoint_digest(request.source)},
+            artifacts = {
+                "output_dir": str(output),
+                "final_params": result.get("final_params"),
+                "growth_factor": result.get("growth_factor"),
+                "verified": result.get("verified"),
+            },
+        )
+        return result
+
+    return _start_job(
+        "scale",
+        work,
+        output_dir = str(output),
+        sources = [request.source],
+        with_progress = True,
+    )
 
 
 # ---------------------------------------------------------------------------

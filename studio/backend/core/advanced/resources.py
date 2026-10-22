@@ -46,6 +46,9 @@ _COST_MODEL: dict[str, dict[str, Any]] = {
     "moe": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.10, "gpu": False},
     # Splitting reads one tensor and writes one bucket at a time.
     "split": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False},
+    # Expansion holds the grown model and, while it verifies the save, a
+    # reloaded copy of it: peak is about two expanded checkpoints.
+    "scale": {"vram": 4.0, "ram": 1.0, "disk": 1.5, "gpu": True},
     # Structural merge-eval on CPU: both parents are memory-mapped, tiny working set.
     "merge_eval": {"vram": 0.0, "ram_stream": 3.0, "disk": 0.02, "gpu": False},
     # Benchmark harness loads one full model on the GPU.
