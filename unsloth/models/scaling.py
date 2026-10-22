@@ -435,6 +435,11 @@ def _expand_mlp_width(
                     )
                     target[:, :old_intermediate].copy_(weight)
                 module.weight = torch.nn.Parameter(target, requires_grad = weight.requires_grad)
+                # nn.Linear caches these and PEFT sizes its adapter from them, so a resized
+                # weight alone leaves an adapter built at the old width and every forward
+                # fails on the first backward-free pass.
+                module.in_features = int(target.shape[1])
+                module.out_features = int(target.shape[0])
                 if module.bias is not None:
                     bias = module.bias
                     if reads_hidden:
@@ -722,6 +727,14 @@ def save_expanded_model(
     reloaded from disk and its logits compared with the in-memory model, so a silent
     save bug fails here instead of after 2000 CPT steps.
     """
+    if getattr(model, "peft_config", None) is not None:
+        raise ValueError(
+            "save_expanded_model must save the plain expanded model, before any adapter is "
+            "injected: an injected model's state dict carries adapter keys that a plain "
+            "from_pretrained reload drops, so the checkpoint would not be what was verified. "
+            "Save the expanded base first, then train and save the adapter on its own."
+        )
+
     root = Path(out_dir).expanduser()
     root.mkdir(parents = True, exist_ok = True)
     model.save_pretrained(str(root), max_shard_size = max_shard_size)

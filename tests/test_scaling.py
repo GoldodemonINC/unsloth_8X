@@ -320,6 +320,18 @@ def test_captured_logits_let_one_model_serve_both_sides():
         scaling.assert_function_preserved(None, model, sample)
 
 
+def test_saving_after_an_adapter_is_injected_is_refused(tmp_path):
+    pytest.importorskip("peft")
+    from peft import LoraConfig, get_peft_model
+
+    model = get_peft_model(
+        _tiny(),
+        LoraConfig(r = 4, lora_alpha = 8, target_modules = "all-linear", task_type = "CAUSAL_LM"),
+    )
+    with pytest.raises(ValueError, match = "before any adapter"):
+        scaling.save_expanded_model(model, None, tmp_path / "out", verify = False)
+
+
 def test_a_non_preserving_change_fails_verification():
     base = _tiny()
     broken = _tiny()
@@ -332,6 +344,23 @@ def test_a_non_preserving_change_fails_verification():
 # ---------------------------------------------------------------------------
 # LoRA capacity
 # ---------------------------------------------------------------------------
+
+
+def test_a_widened_mlp_still_takes_a_lora_adapter():
+    """nn.Linear caches in/out features; PEFT sizes lora_A/lora_B from them."""
+    pytest.importorskip("peft")
+    from peft import LoraConfig, get_peft_model
+
+    model = _tiny()
+    scaling.expand_model(model, mlp_width_target = 256, method = "mlp_width", force_small_growth = True)
+    model = get_peft_model(
+        model,
+        LoraConfig(r = 4, lora_alpha = 8, target_modules = "all-linear", task_type = "CAUSAL_LM"),
+    )
+    model.train()
+    out = model(input_ids = _ids(), labels = _ids())
+    out.loss.backward()  # a stale out_features fails here, not at save time
+    assert model.num_parameters(only_trainable = True) > 0
 
 
 def test_lora_has_strictly_more_trainable_params_after_expansion():
