@@ -767,6 +767,16 @@ def save_expanded_model(
         reloaded = AutoModelForCausalLM.from_pretrained(
             str(root), dtype = "auto", low_cpu_mem_usage = True
         )
+    except TypeError:
+        # `dtype` is transformers 5's spelling; 4.x only knows `torch_dtype`.
+        try:
+            reloaded = AutoModelForCausalLM.from_pretrained(
+                str(root), torch_dtype = "auto", low_cpu_mem_usage = True
+            )
+        except Exception as error:  # noqa: BLE001 - surface the real loader error
+            raise RuntimeError(
+                f"The expanded checkpoint at {root} could not be reloaded: {error}"
+            ) from error
     except Exception as error:  # noqa: BLE001 - surface the real loader error
         raise RuntimeError(
             f"The expanded checkpoint at {root} could not be reloaded: {error}"
