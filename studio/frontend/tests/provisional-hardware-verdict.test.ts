@@ -333,12 +333,22 @@ test("the sidebar gates Train and Video on a measured verdict", async () => {
       `${pattern} still reads the unmeasured verdict`,
     );
   }
-  // Both rows opt into the pending state rather than rendering a guessed gray-out.
-  assert.equal(
-    APP_SIDEBAR.match(/pending: capabilitiesUnknown,/g)?.length,
-    2,
+  // Both rows opt into the pending state rather than rendering a guessed gray-out. Merge and
+  // Scale opted in later for the same reason, so this counts at least the two, then pins the
+  // two by name instead of by total.
+  assert.ok(
+    (APP_SIDEBAR.match(/pending: capabilitiesUnknown,/g)?.length ?? 0) >= 2,
     "Train and Video do not both mark themselves pending while the verdict is out",
   );
+  for (const label of ["shell.navigation.train", "shell.navigation.video"]) {
+    assert.match(
+      APP_SIDEBAR,
+      new RegExp(
+        `label: t\\("${label.replaceAll(".", "\\.")}"\\)[\\s\\S]{0,400}?pending: capabilitiesUnknown,`,
+      ),
+      `${label} no longer marks itself pending while the verdict is out`,
+    );
+  }
 });
 
 // beforeLoad redirects are one-way: bouncing a cold /studio or /video load to /chat on the

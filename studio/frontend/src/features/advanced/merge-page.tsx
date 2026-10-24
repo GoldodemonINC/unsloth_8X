@@ -670,7 +670,7 @@ export function MergePage(): ReactElement {
                     setWeights((current) => applyWeightTool(current, tool))
                   }
                   disabled={running}
-                  className="rounded-full border border-border/60 px-2.5 py-1 text-ui-10p5 text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground disabled:opacity-50"
+                  className="rounded-full border border-border/60 px-2.5 py-1 text-ui-10p5 text-muted-foreground transition-colors hover:border-border hover:text-foreground disabled:opacity-50"
                 >
                   {WEIGHT_TOOL_LABELS[tool].label}
                 </button>
@@ -863,7 +863,7 @@ export function MergePage(): ReactElement {
                     : usePreset(preset)
                 }
                 disabled={running}
-                className="rounded-full border border-border/60 px-2.5 py-1 text-ui-10p5 text-muted-foreground transition-colors hover:border-foreground/40 hover:text-foreground disabled:opacity-50"
+                className="rounded-full border border-border/60 px-2.5 py-1 text-ui-10p5 text-muted-foreground transition-colors hover:border-border hover:text-foreground disabled:opacity-50"
               >
                 {preset.label}
               </button>

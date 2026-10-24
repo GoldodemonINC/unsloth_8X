@@ -85,6 +85,7 @@ import {
 import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { videoNavHint } from "@/config/hardware-verdict";
 import { useAudioWorkspaceStore } from "@/features/audio/stores/audio-workspace-store";
+import { ensureLabsLoaded, useLabsEnabled } from "@/features/labs/store";
 import {
   AUDIO_WORKFLOWS,
   type AudioWorkflowId,
@@ -3688,6 +3689,19 @@ export function AppSidebar() {
         preloadSilently(router.preloadRoute({ to: "/scale" }));
       },
     },
+    labs: {
+      icon: TestTubeOutlineIcon,
+      label: t("shell.navigation.labs"),
+      active: pathname === "/labs" || pathname.startsWith("/labs/"),
+      // Planning and browsing only: no accelerator verdict decides this page.
+      onClick: () => {
+        navigateFromRow({ to: "/labs" });
+        closeMobileIfOpen();
+      },
+      onIntent: () => {
+        preloadSilently(router.preloadRoute({ to: "/labs" }));
+      },
+    },
     // A host with no video device at all is disabled with a hint instead of bouncing off the root guard.
     video: {
       icon: FlimSlateIcon,
@@ -3772,10 +3786,20 @@ export function AppSidebar() {
   const navRowPinned = (item: SidebarNavItemPref) =>
     sidebarNavRowPinned(item, sidebarNavAuto, { projectsSectionShowing });
   // audio and images are temporarily pinned while active without saving the preference.
-  const { inline: inlineNavIds, overflow: overflowNavIds } = placeNavRows(
+  const { inline: placedInline, overflow: placedOverflow } = placeNavRows(
     sidebarNav.map((item) => ({ id: item.id, pinned: navRowPinned(item) })),
     navRows.audio.active ? "audio" : navRows.images.active ? "images" : null,
   );
+  // The Labs row exists only while the switch does. It stays in the saved layout,
+  // so turning Labs back on restores the row where the user put it.
+  useEffect(() => {
+    ensureLabsLoaded();
+  }, []);
+  const labsEnabled = useLabsEnabled();
+  const visibleNavIds = (ids: SidebarNavItemId[]) =>
+    labsEnabled ? ids : ids.filter((id) => id !== "labs");
+  const inlineNavIds = visibleNavIds(placedInline);
+  const overflowNavIds = visibleNavIds(placedOverflow);
   // The mobile sheet shows labels regardless of the desktop pin state.
   const sidebarRowsLabelled = isMobile || sidebarState !== "collapsed";
   // Mirrors ImagesWorkflowList's own test: it decides which row owns the highlight.

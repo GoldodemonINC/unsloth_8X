@@ -46,7 +46,13 @@ export function isTrainingMethodSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
   cpuOnly = false,
+  simulated = false,
 ): boolean {
+  // A simulated run (Settings -> Debugging) never loads the trainer, so the host's limits
+  // must not hide a method: the fake backend ignores the payload and any method can be exercised.
+  if (simulated) {
+    return true;
+  }
   // No torch accelerator: CoRA and QLoRA are the two recipes the CPU path runs (both are LoRA
   // adapters; QLoRA's 4-bit load is dropped there because bitsandbytes has no CPU training
   // kernel). Full, CPT and RL need Unsloth's GPU loaders and would crash. deviceType stays here
@@ -79,7 +85,11 @@ export function isTrainingLoraVariantSupportedOnDevice(
   trainingMethod: TrainingMethod,
   deviceType?: string,
   cpuOnly = false,
+  simulated = false,
 ): boolean {
+  if (simulated) {
+    return true;
+  }
   const usesAdapter = isAdapterMethod(trainingMethod);
   if (!usesAdapter || loraVariant !== "loftq") return true;
   // LoftQ initialises through bitsandbytes, which needs Apple MLX or a CUDA-class accelerator.

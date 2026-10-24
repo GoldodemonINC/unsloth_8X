@@ -136,7 +136,7 @@ export function MergeModelSlot({
             <button
               type="button"
               onClick={() => onChange(typedRepoId)}
-              className="flex items-center justify-between rounded-lg border border-dashed border-border/70 px-2.5 py-1.5 text-left text-ui-11 hover:border-foreground/40"
+              className="flex items-center justify-between rounded-lg border border-dashed border-border/70 px-2.5 py-1.5 text-left text-ui-11 hover:border-border"
             >
               <span className="truncate font-mono">{typedRepoId}</span>
               <span className="text-ui-10 text-muted-foreground">

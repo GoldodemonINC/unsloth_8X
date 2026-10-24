@@ -198,6 +198,8 @@ function makeWorld(options: {
       TooltipContent: () => null,
       TooltipTrigger: passthrough,
     },
+    // The Debugging tab's switches are settings chrome; none of them drives an export.
+    "@/components/ui/switch": { Switch: () => null },
     "@/features/hub/hooks/use-copy-feedback": {
       useCopyFeedback: () => ({ copied: false, copy: async () => {} }),
     },
@@ -213,6 +215,20 @@ function makeWorld(options: {
     "@hugeicons/core-free-icons": new Proxy({}, { get: () => ({}) }),
     "@hugeicons/react": { HugeiconsIcon: () => null },
     "../api/debug-logs": api,
+    // The simulated-training switch is another settings row: off, and never saved here.
+    "../api/debug-training-simulation": {
+      loadDebugTrainingSimulation: async () => ({
+        enabled: false,
+        defaultEnabled: false,
+      }),
+      saveDebugTrainingSimulation: async (enabled: boolean) => ({
+        enabled,
+        defaultEnabled: false,
+      }),
+    },
+    "../stores/debug-training-simulation-store": {
+      setDebugTrainingSimulationEnabled: () => {},
+    },
     "../components/settings-row": {
       SettingsRow: (props: { label: string; children?: React.ReactNode }) =>
         React.createElement("div", null, props.label, props.children),

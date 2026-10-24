@@ -36,6 +36,7 @@ import {
   Settings02Icon,
   UserCircleIcon,
 } from "@hugeicons/core-free-icons";
+import { TestTubeOutlineIcon } from "@/lib/hugeicons-derived";
 import { ShieldCogIcon } from "@/lib/shield-cog-icon";
 import { MessageCircleIcon } from "@/lib/hugeicons-derived";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -104,6 +105,7 @@ const TAB_LOADERS = {
     import("./tabs/agents-tab").then((m) => ({ default: m.AgentsTab })),
   debugging: () =>
     import("./tabs/debugging-tab").then((m) => ({ default: m.DebuggingTab })),
+  labs: () => import("./tabs/labs-tab").then((m) => ({ default: m.LabsTab })),
   about: () =>
     import("./tabs/about-tab").then((m) => ({ default: m.AboutTab })),
 } satisfies Record<SettingsTab, () => Promise<{ default: FC<SettingsPanelProps> }>>;
@@ -273,6 +275,11 @@ const TABS: TabDef[] = [
     id: "debugging",
     labelKey: "settings.tabs.debugging",
     icon: ComputerTerminal01Icon,
+  },
+  {
+    id: "labs",
+    labelKey: "settings.tabs.labs",
+    icon: TestTubeOutlineIcon,
   },
   { id: "about", labelKey: "settings.tabs.about", icon: HelpCircleIcon },
 ];
@@ -451,6 +458,7 @@ export function SettingsDialog() {
     "remote-lan": null,
     agents: null,
     debugging: null,
+    labs: null,
     about: null,
   });
 

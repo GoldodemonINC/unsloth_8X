@@ -12,6 +12,9 @@ export const OWNER_ONLY_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set<Settin
   "remote-lan",
   "agents",
   "debugging",
+  // The switch is written by an owner-only route, so a managed account sees no
+  // half-working toggle. The experiments themselves are read-only for everyone else.
+  "labs",
 ]);
 
 export function settingsTabVisible(tab: SettingsTab, isOwner: boolean): boolean {

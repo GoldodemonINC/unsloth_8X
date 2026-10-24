@@ -100,6 +100,9 @@ test("Latest picked from the sort menu, outside any section, ranks the same way"
 
 test("datasets and ModelScope never offer Latest", () => {
   const toolbar = readSrc("features/hub/catalog/models-toolbar.tsx");
-  assert.match(toolbar, /!\(option\.value === "fresh" && \(isDataset \|\| hubSource === "modelscope"\)\)/);
+  assert.match(
+    toolbar,
+    /!\(\s*option\.value === "fresh" &&\s*\(isDataset \|\| hubSource === "modelscope"\)\s*\)/,
+  );
   assert.match(readSrc("features/hub/hub-page.tsx"), /isDatasetMode && requestedSort === "fresh"\n\s*\? "createdAt"/);
 });

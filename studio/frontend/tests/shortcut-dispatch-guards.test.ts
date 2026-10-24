@@ -224,9 +224,10 @@ test("route shortcuts stay idle while Settings is open", async () => {
   ]) {
     assert.equal(enabledById.get(id), "routeShortcutEnabled", id);
   }
+  // trainBlocked is the measured verdict minus the CPU CoRA and simulated-training cases.
   assert.equal(
     enabledById.get("switchToTrain"),
-    "routeShortcutEnabled && !chatOnlyMeasured",
+    "routeShortcutEnabled && !trainBlocked",
   );
   assert.equal(
     enabledById.get("switchToVideo"),
@@ -521,7 +522,7 @@ test("selection and clipboard chords stop at a covered sidebar", async () => {
 // so the click lands on a page that shows its own loading state. Gating the
 // chords on the unknown verdict would make them disagree with their own rows.
 test("the workspace chords wait on the same verdict their rows do", async () => {
-  assert.match(SRC__ROOT, /enabled: routeShortcutEnabled && !chatOnlyMeasured,/);
+  assert.match(SRC__ROOT, /enabled: routeShortcutEnabled && !trainBlocked,/);
   assert.match(SRC__ROOT, /enabled: routeShortcutEnabled && !videoDisabled,/);
   const rowState = await readSrcAsync("components/nav-row-state.ts");
   assert.match(

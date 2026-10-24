@@ -112,6 +112,7 @@ export {
   useShortcutAvailable,
 } from "./hooks/use-shortcut";
 export { useHubSourceNotice } from "./hooks/use-hub-source-notice";
+export { useDebugTrainingSimulation } from "./hooks/use-debug-training-simulation";
 export { Shortcut } from "./components/shortcut";
 export {
   currentBinding,

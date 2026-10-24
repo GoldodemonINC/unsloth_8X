@@ -353,9 +353,15 @@ test("the workspace chords land where the guard lets them", async () => {
     SRC__ROOT,
     /const routeShortcutEnabled = !isAuthFlowRoute && !settingsDialogOpen;/,
   );
+  // trainBlocked is the measured verdict minus the CPU CoRA and simulated-training cases,
+  // the same expression the sidebar row disables on.
   assert.match(
     SRC__ROOT,
-    /useShortcut\("switchToTrain", goTo\("\/studio"\), \{\n\s*enabled: routeShortcutEnabled && !chatOnlyMeasured,/,
+    /const trainBlocked =\n?\s*chatOnlyMeasured && !simulatedTraining && !cpuCoraHost;/,
+  );
+  assert.match(
+    SRC__ROOT,
+    /useShortcut\("switchToTrain", goTo\("\/studio"\), \{\n\s*enabled: routeShortcutEnabled && !trainBlocked,/,
   );
   // Video has its own predicate rather than the chat-only one: /video checks
   // auth and nothing else, so the chord would land on the unsupported-hardware
@@ -1396,7 +1402,7 @@ test("a collapsed sidebar section is not published for the chords", async () => 
   );
   assert.match(
     APP_SIDEBAR,
-    /folderChatItems\(projectsSectionRendered && projectsOpen, visibleProjectRecords\)/,
+    /folderChatItems\(\s*projectsSectionRendered && projectsOpen,\s*visibleProjectRecords,?\s*\)/,
   );
   // In one list every project chat is a Recents row, so a folder must not list it again.
   assert.match(APP_SIDEBAR, /if \(!chatListsOnScreen \|\| organizeBy !== "project" \|\| !open\)/);
@@ -1740,7 +1746,7 @@ test("the published chat lists stop where the sidebar stops", async () => {
   );
   assert.match(
     APP_SIDEBAR,
-    /const renderedChatItems = useMemo\(\n\s*\(\) => \[\.\.\.upToPinnedChatItems, \.\.\.belowPinnedChatItems, \.\.\.visibleRecentItems\],/,
+    /const renderedChatItems = useMemo\(\s*\(\) =>\s*\[\s*\.\.\.upToPinnedChatItems,\s*\.\.\.belowPinnedChatItems,\s*\.\.\.visibleRecentItems,?\s*\],/,
   );
   // Gating the arrays is enough because nothing renders from them.
   const rendered = APP_SIDEBAR.slice(APP_SIDEBAR.indexOf("return (", selectAll));

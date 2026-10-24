@@ -277,8 +277,13 @@ test("the sidebar's Train hint stops doing the same", () => {
       "chatOnlyReason",
       "chatOnlyDetail",
       "chatOnlyHint",
+      // The sidebar derives this from the measured verdict plus the CPU CoRA and
+      // simulated-training exceptions; this test is about the hint a blocked row shows.
+      "trainBlocked",
       `${hint.replace(": string | undefined", "")}\nreturn trainDisabledHint;`,
-    )(true, chatOnlyReason, chatOnlyDetail, chatOnlyHint) as string | undefined;
+    )(true, chatOnlyReason, chatOnlyDetail, chatOnlyHint, true) as
+      | string
+      | undefined;
 
   // #14067: a closed AMD node replaces the reinstall advice.
   const closed = forReason("torch_cuda_unavailable", "2.11.0+rocm7.0", HINT);

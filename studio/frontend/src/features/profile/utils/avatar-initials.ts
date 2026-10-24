@@ -17,7 +17,7 @@ export function initialsFromName(name: string): string {
  */
 export function avatarBgStyle(): { backgroundColor: string; color: string } {
   return {
-    backgroundColor: "var(--control-accent, #17b88b)",
+    backgroundColor: "var(--control-accent, #9ceaf0)",
     color: "var(--control-accent-foreground, #ffffff)",
   };
 }

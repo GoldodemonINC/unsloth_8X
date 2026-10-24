@@ -550,7 +550,10 @@ test("the sidebar reads every chat list through the pager, twenty rows at a time
   const src = readSrc("components/app-sidebar.tsx");
   assert.doesNotMatch(src, /useChatSidebarItems\(/);
   assert.match(src, /const RECENTS_PAGE_SIZE = SIDEBAR_PAGE_SIZE;/);
-  assert.match(src, /= useSidebarRowPages\(\n\s*chatRowSlots,/);
+  assert.match(
+    src,
+    /= useSidebarRowPages\(chatRowSlots, !isStudioRoute\);/,
+  );
   for (const list of [
     "pinnedRows",
     "rows",
@@ -601,7 +604,7 @@ test("a drag in a partly loaded list shows its order at once and saves it once e
   assert.doesNotMatch(partial, /settle\(shown\)/);
   assert.match(partial, /if \(attempt >= 2\) throw error;/);
   assert.match(partial, /setPendingManualOrder\(\(\{ \[scope\]: _dropped, \.\.\.rest \}\) => rest\);\n\s*toast\.error\("Couldn't save the new order"\);/);
-  assert.match(src, /applyManualOrder\(items, displayManualOrder\[scope\]/);
+  assert.match(src, /applyManualOrder\(\s*items,\s*displayManualOrder\[scope\]/);
 });
 
 test("the full-list fallback finds a compare row through one of its pane threads", () => {
@@ -617,7 +620,7 @@ test("the last 20 opened chats and every running one load their rows, so row loo
   const src = readSrc("components/app-sidebar.tsx");
   assert.match(
     src,
-    /\[slotActiveId, \.\.\.openedChatIds, \.\.\.runningThreadKey\.split\("\\n"\)\]\.filter\(/,
+    /\[\s*slotActiveId,\s*\.\.\.openedChatIds,\s*\.\.\.runningThreadKey\.split\("\\n"\),\s*\]\.filter\(/,
   );
   assert.match(src, /isAssistantLocalThreadId\(id\),\n\s*\),\n\s*\),\n\s*\]\.sort\(\);/);
   assert.match(
@@ -641,7 +644,7 @@ test("follow-ups that main got from the full list still happen with paged lists"
   // a chord at the last loaded row of any paged list reads its next page; a click there does not
   assert.match(src, /chordTargetRef\.current = item\?\.id \?\? null;\n\s*openChatItemById\(item\);/);
   assert.equal(src.match(/if \(!activeThreadId \|\| chordTargetRef\.current !== activeThreadId\) return;/g)?.length, 2);
-  assert.match(src, /if \(list\.rows\[list\.rows\.length - 1\]\?\.id === activeThreadId\) void list\.loadMore\(\);/);
+  assert.match(src, /if \(list\.rows\[list\.rows\.length - 1\]\?\.id === activeThreadId\)\s*void list\.loadMore\(\);/);
   assert.match(src, /window\.addEventListener\(CHAT_HISTORY_UPDATED_EVENT, probe\);/);
   const write = src.slice(src.indexOf("const writeManualOrder = useCallback("));
   assert.ok(write.indexOf("writes.set(scope, generation);") < write.indexOf("const slot ="));
@@ -657,7 +660,7 @@ test("\"No chats yet\" asks for any chat, archived or in an unloaded folder, bef
   const src = readSrc("components/app-sidebar.tsx");
   assert.match(src, /\[sidebarRowQuery\(\{\}\), sidebarRowQuery\(\{ archived: true \}\)\]/);
   // and shows nothing until a probe has answered, so it never flashes while one is in flight
-  assert.match(src, /useState<boolean \| null>\(null\);/);
+  assert.match(src, /useState<boolean \| null>\(\s*null,?\s*\);/);
   assert.match(src, /hasUnlistedChats === false && \(/);
   assert.match(src, /\.then\(\(\) => setSelectAllPending\(true\)\)\n\s*\.catch\(\(\) => undefined\);/);
 });
@@ -682,12 +685,12 @@ test("a section's Mark all read and Archive act on the whole section, not its lo
   const menu = src.slice(src.indexOf("const unreadInSection"), src.indexOf("const unreadInSection") + 1600);
   assert.match(menu, /inSection\(unreadRowIds\[threadId\] \?\? threadId\)/);
   assert.match(menu, /onSelect=\{\(\) => clearThreadsUnread\(unreadInSection\)\}/);
-  assert.match(menu, /sectionPages\?\.hasMore && sectionQuery \? await readAllSidebarRows\(sectionQuery\) : chats/);
+  assert.match(menu, /sectionPages\?\.hasMore && sectionQuery\s*\?\s*await readAllSidebarRows\(sectionQuery\)\s*:\s*chats/);
 });
 
 test("only folder rows on screen read their chats", () => {
   const src = readSrc("components/app-sidebar.tsx");
-  assert.match(src, /!collapsedProjectIds\.has\(project\.id\) && mountedFolderIds\.has\(project\.id\)/);
+  assert.match(src, /!collapsedProjectIds\.has\(project\.id\) &&\s*mountedFolderIds\.has\(project\.id\)/);
   assert.match(src, /<MountedFolder id=\{project\.id\} onChange=\{setFolderMounted\} \/>/);
 });
 
@@ -699,7 +702,10 @@ test("a list that shrank while a page was read frees its paging latch", () => {
 test("a running Compare pane keeps its opened pair row, which is opened by pair id", () => {
   const src = readSrc("components/app-sidebar.tsx");
   assert.match(src, /if \(item\.threadIds\?\.some\(\(id\) => running\.has\(id\)\)\) rows\.add\(item\.id\);/);
-  assert.match(src, /const running = new Set\(runningRowKey\.split\("\\n"\)\);\n\s*setOpenedChatIds\(\(opened\) => keepOpenedChats\(touchOpenedChat\(opened, slotActiveId\), running\)\);/);
+  assert.match(
+    src,
+    /const running = new Set\(runningRowKey\.split\("\\n"\)\);\s*setOpenedChatIds\(\(opened\) =>\s*keepOpenedChats\(touchOpenedChat\(opened, slotActiveId\), running\),\s*\);/,
+  );
 });
 
 test("a page emptied by chats deleted here does not end the list: the next page still loads", async () => {
@@ -842,8 +848,14 @@ test("Pinned and custom sections mount every row they have, so navigation sees o
   assert.equal(html(false).match(/data-row=/g)?.length, 20);
   assert.equal(html(true).match(/data-row=/g)?.length, 27);
   const src = readSrc("components/app-sidebar.tsx");
-  assert.match(src, /items=\{pinnedRows\}\n\s*pageSize=\{SIDEBAR_PAGE_SIZE\}\n\s*mountAll\n/);
-  assert.match(src, /items=\{rows\}\n\s*pageSize=\{SIDEBAR_PAGE_SIZE\}\n\s*mountAll\n/);
+  assert.match(
+    src,
+    /items=\{pinnedRows\}\s*pageSize=\{SIDEBAR_PAGE_SIZE\}\s*mountAll/,
+  );
+  assert.match(
+    src,
+    /items=\{rows\}\s*pageSize=\{SIDEBAR_PAGE_SIZE\}\s*mountAll/,
+  );
 });
 
 test("an empty spell starts with no answer from an earlier one, from its first paint", () => {

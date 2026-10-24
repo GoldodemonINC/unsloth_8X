@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
+import { useLabsHandoffStore } from "@/features/labs/handoff";
 import { useTrainingConfigStore } from "@/features/training";
-import type { ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { ScalerPanel } from "./components/scaler-panel";
 
 export function ScalePage(): ReactElement {
+  // A row in the Artifacts studio can hand this page one checkpoint. Read it once,
+  // so a later visit does not silently reuse a path the user has moved on from.
+  const [prefill] = useState(
+    () => useLabsHandoffStore.getState().consumeScaleSource() ?? "",
+  );
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
       <div className="mx-auto flex w-full max-w-[calc(1180px*var(--ui-space-scale,1))] flex-col gap-6 px-5 pb-20 pt-8 max-sm:px-4 sm:px-9">
@@ -23,6 +29,7 @@ export function ScalePage(): ReactElement {
 
         <section className="elevated-card flex flex-col gap-4 p-5">
           <ScalerPanel
+            defaultSource={prefill}
             onUseCheckpoint={(path) =>
               useTrainingConfigStore
                 .getState()

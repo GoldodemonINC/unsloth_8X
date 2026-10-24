@@ -145,6 +145,33 @@ test("a measured CPU backend decides, whatever the OS is called", () => {
   );
 });
 
+test("a simulated run offers every method and LoRA variant", () => {
+  assert.equal(isTrainingMethodSupportedOnDevice("full", "windows", true), false);
+  assert.equal(
+    isTrainingMethodSupportedOnDevice("full", "windows", true, true),
+    true,
+  );
+  assert.equal(isTrainingMethodSupportedOnDevice("cpt", "mac", false), false);
+  assert.equal(
+    isTrainingMethodSupportedOnDevice("cpt", "mac", false, true),
+    true,
+  );
+  assert.equal(
+    isTrainingLoraVariantSupportedOnDevice("loftq", "qlora", "linux", true),
+    false,
+  );
+  assert.equal(
+    isTrainingLoraVariantSupportedOnDevice(
+      "loftq",
+      "qlora",
+      "linux",
+      true,
+      true,
+    ),
+    true,
+  );
+});
+
 test("CoRA's CPU recipe drops the bitsandbytes pieces", () => {
   const patch = buildTrainingMethodPatch(state("qlora") as never, "cora", "cpu");
 

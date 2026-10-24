@@ -13,6 +13,7 @@ import {
   isCptTargetModuleActive,
   toggleCptTargetModule,
 } from "@/config/training";
+import { useDebugTrainingSimulation } from "@/features/settings";
 import {
   isTrainingLoraVariantSupportedOnDevice,
   useTrainingConfigStore,
@@ -30,6 +31,8 @@ export function LoraParamsSection(): ReactElement | null {
   const t = useT();
   const deviceType = usePlatformStore((state) => state.deviceType);
   const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
+  // Settings -> Debugging: LoftQ never runs, so its bitsandbytes requirement is not a limit.
+  const simulated = useDebugTrainingSimulation();
   const store = useTrainingConfigStore(
     useShallow((state) => ({
       trainingMethod: state.trainingMethod,
@@ -271,6 +274,7 @@ export function LoraParamsSection(): ReactElement | null {
                     store.trainingMethod,
                     deviceType,
                     cpuOnly,
+                    simulated,
                   );
                 const needsVisionOff =
                   option.value === "dora" && doraNeedsVisionOff;

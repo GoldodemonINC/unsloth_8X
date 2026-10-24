@@ -26,9 +26,15 @@ function isTrainingConfigSupportedOnDevice(
   config: TrainingConfigState,
   deviceType?: string,
   cpuOnly = false,
+  simulated = false,
 ): boolean {
   if (
-    !isTrainingMethodSupportedOnDevice(config.trainingMethod, deviceType, cpuOnly)
+    !isTrainingMethodSupportedOnDevice(
+      config.trainingMethod,
+      deviceType,
+      cpuOnly,
+      simulated,
+    )
   ) {
     return false;
   }
@@ -41,6 +47,7 @@ function isTrainingConfigSupportedOnDevice(
       config.trainingMethod,
       deviceType,
       cpuOnly,
+      simulated,
     )
   ) {
     return false;
@@ -177,6 +184,7 @@ export function validateTrainingConfig(
   deviceType?: string,
   isOwner = true,
   cpuOnly = false,
+  simulated = false,
 ): StartValidationResult {
   if (!config.selectedModel) {
     return {
@@ -219,7 +227,9 @@ export function validateTrainingConfig(
     }
   }
 
-  if (!isTrainingConfigSupportedOnDevice(config, deviceType, cpuOnly)) {
+  if (
+    !isTrainingConfigSupportedOnDevice(config, deviceType, cpuOnly, simulated)
+  ) {
     return {
       ok: false,
       errorKey:

@@ -253,8 +253,11 @@
 	--card-foreground-base: oklch(0.1281 0.0179 169.2764);
 	--popover-base: oklch(1 0 0);
 	--popover-foreground-base: oklch(0.1281 0.0179 169.2764);
-	--primary: #17b88b;
-	--primary-foreground: oklch(1 0 0);
+	/* Brand accent. Light cyan, so the ink on it is the dark foreground rather
+	   than white: #9ceaf0 scores ~15:1 against #0f1114 and ~1.3:1 against
+	   white, which would have made every primary button unreadable. */
+	--primary: #9ceaf0;
+	--primary-foreground: #0f1114;
 	--secondary-base: oklch(0.9596 0.0275 167.8295);
 	--secondary-foreground-base: oklch(0.2868 0.0649 159.9823);
 	--muted-base: oklch(0.9702 0 0);
@@ -262,7 +265,7 @@
 	/* Trace ink: muted, pulled toward the page so the answer stands apart. */
 	--trace-fade: 7%;
 	/* Hover/active washes are neutral grey (matches the sidebar), not the
-	   brand green; green stays on primary controls only. */
+	   brand accent; the accent stays on primary controls only. */
 	--accent-base: #ececec;
 	--accent-foreground-base: #262626;
 	--destructive: oklch(0.6368 0.2078 25.3313);
@@ -287,8 +290,8 @@
 	   the separator now that the right-edge divider is gone. */
 	--sidebar-base: #ffffff;
 	--sidebar-foreground-base: oklch(0.1281 0.0179 169.2764);
-	--sidebar-primary: #17b88b;
-	--sidebar-primary-foreground: oklch(1 0 0);
+	--sidebar-primary: #9ceaf0;
+	--sidebar-primary-foreground: #0f1114;
 	--sidebar-accent-base: #ececec;
 	--sidebar-accent-foreground-base: #262626;
 	/* Selected tab on the line variant, a step above the page. */
@@ -377,8 +380,8 @@
 	--control-accent-foreground: var(--primary-foreground);
 
 	/* Status color for meaning-carrying marks (verified badges, token
-	   indicators). Pinned to the brand green in every palette and mode so
-	   the signal never changes with the theme. */
+	   indicators). Status green is a signal, not a theme color: pinned in
+	   every palette and mode so it never follows the accent. */
 	--verified: #17b88b;
 
 	/* Typography tokens use a 16px base; the default is 15px. UI font size sets
@@ -476,8 +479,10 @@
 	--card-foreground-base: #fcfcfc;
 	--popover-base: #272727;
 	--popover-foreground-base: #fcfcfc;
-	--primary: #17b88b;
-	--primary-foreground: oklch(1 0 0);
+	/* Same accent and ink as light: the cyan is light enough that white text on
+	   it disappears, so the dark ink carries the contrast in both modes. */
+	--primary: #9ceaf0;
+	--primary-foreground: #0f1114;
 	--secondary-base: #303030;
 	--secondary-foreground-base: #fcfcfc;
 	--muted-base: #303030;
@@ -507,8 +512,8 @@
 	   Matches --card, so every elevated surface reads as one plane. */
 	--sidebar-base: #272727;
 	--sidebar-foreground-base: #fcfcfc;
-	--sidebar-primary: #17b88b;
-	--sidebar-primary-foreground: oklch(1 0 0);
+	--sidebar-primary: #9ceaf0;
+	--sidebar-primary-foreground: #0f1114;
 	--sidebar-accent-base: #3a3a3a;
 	--sidebar-accent-foreground-base: #fcfcfc;
 	--tabs-line-indicator-base: #3a3a3a;
@@ -574,7 +579,7 @@
    carried on <html> as `data-palette` (managed by theme-store.ts alongside the
    light/dark class):
 
-     (no attribute)            → Standard: the signature Unsloth green.
+     (no attribute)            → Standard: the signature Unsloth accent (#9ceaf0).
      data-palette="classic"    → Classic: neutral grays with a calm blue
                                  accent; enterprise-safe.
      data-palette="minimal"    → Minimal: strictly black, white, and gray.
@@ -2821,7 +2826,7 @@ html[data-chat-font] .aui-root {
 		box-shadow: 0 0 0 1px var(--ring-soft) !important;
 	}
 
-	/* Switch — unsloth-green track when active, slider-gray thumb in
+	/* Switch — brand-accent track when active, slider-gray thumb in
 	   both states. Keeps the on-state recognizable as an "engaged"
 	   primary control while the moving thumb sits in the same neutral
 	   palette as the panel sliders, tying every control in the panel

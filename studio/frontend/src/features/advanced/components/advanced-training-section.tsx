@@ -735,7 +735,7 @@ export function AdvancedTrainingSection() {
                           }
                           className={`rounded-full border px-2.5 py-1 text-ui-11 transition-colors ${
                             selected
-                              ? "border-foreground/30 bg-foreground/10 text-foreground"
+                              ? "border-border bg-muted text-foreground"
                               : "border-border/60 text-muted-foreground hover:text-foreground"
                           }`}
                         >

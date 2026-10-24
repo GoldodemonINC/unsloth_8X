@@ -345,6 +345,12 @@ export const SETTINGS_SEARCH_INDEX: Record<SettingsTab, TranslationKey[]> = {
     "settings.debugging.mode",
     "settings.debugging.keywords",
   ],
+  labs: [
+    "settings.labs.title",
+    "settings.labs.section",
+    "settings.labs.enableLabel",
+    "settings.labs.features",
+  ],
   about: [
     "settings.about.updates",
     "settings.about.releaseNotes",

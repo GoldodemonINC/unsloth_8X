@@ -113,16 +113,24 @@ test("a customized version-5 sidebar keeps its order and only gains the rows add
   );
   assert.deepEqual(
     customization.sidebarNav.map((item) => item.id),
-    [...customizedV5.map((item) => item.id), "library", "audio", "merge", "scale"],
+    [
+      ...customizedV5.map((item) => item.id),
+      "library",
+      "audio",
+      "merge",
+      "scale",
+      "labs",
+    ],
   );
   // Each appended row keeps the default it shipped with.
   assert.deepEqual(
-    customization.sidebarNav.slice(-4).map((item) => [item.id, item.pinned]),
+    customization.sidebarNav.slice(-5).map((item) => [item.id, item.pinned]),
     [
       ["library", true],
       ["audio", false],
       ["merge", true],
       ["scale", true],
+      ["labs", true],
     ],
   );
 });
@@ -152,6 +160,7 @@ test("an install sitting on the version-6 default adopts the current layout", ()
     "train",
     "merge",
     "scale",
+    "labs",
   ]);
 });
 

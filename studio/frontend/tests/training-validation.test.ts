@@ -222,6 +222,34 @@ test("training validation rejects MLX-incompatible training modes", () => {
   );
 });
 
+test("a simulated run ignores the host's method limits", () => {
+  const cpuFull = {
+    ...validConfig,
+    trainingMethod: "full" as const,
+    loraVariant: "loftq" as const,
+  };
+  // Without the Debugging switch the CPU host refuses Full + LoftQ...
+  assert.deepEqual(validateTrainingConfig(cpuFull, "linux", true, true), {
+    ok: false,
+    errorKey: "studio.params.notSupportedCpu",
+  });
+  // ...and a simulated run, whose fake trainer never loads them, accepts it.
+  assert.deepEqual(validateTrainingConfig(cpuFull, "linux", true, true, true), {
+    ok: true,
+    errorKey: null,
+  });
+  assert.deepEqual(
+    validateTrainingConfig(
+      { ...validConfig, trainingMethod: "rl" },
+      "mac",
+      true,
+      false,
+      true,
+    ),
+    { ok: true, errorKey: null },
+  );
+});
+
 test("training validation rejects audio training on MLX", () => {
   assert.deepEqual(
     validateTrainingConfig(

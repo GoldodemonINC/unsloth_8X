@@ -19,6 +19,7 @@ import { usePlatformStore } from "@/config/env";
 import { HfTokenIndicator } from "@/features/hub";
 import {
   DECISION_MODEL_LABELS,
+  useDebugTrainingSimulation,
   useSettingsDialogStore,
 } from "@/features/settings";
 import { TrainModelSelector } from "@/features/train-model-picker";
@@ -177,16 +178,20 @@ function TrainingMethodSelect() {
   );
   const deviceType = usePlatformStore((state) => state.deviceType);
   const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
+  // Settings -> Debugging: the simulated trainer ignores the method, so no host limit
+  // narrows the list and nothing gets rewritten under the user.
+  const simulated = useDebugTrainingSimulation();
   // A method persisted from another host (or the default) would sit selected while its row is
   // disabled, and Start would refuse it. On CPU, CoRA is the only choice, so make it the choice.
   useEffect(() => {
     if (
+      !simulated &&
       cpuOnly &&
       !isTrainingMethodSupportedOnDevice(trainingMethod, deviceType, cpuOnly)
     ) {
       setTrainingMethod("cora");
     }
-  }, [cpuOnly, deviceType, trainingMethod, setTrainingMethod]);
+  }, [simulated, cpuOnly, deviceType, trainingMethod, setTrainingMethod]);
   const activeMeta = TRAINING_METHOD_META[trainingMethod];
   const activeLabel = activeMeta ? t(activeMeta.labelKey) : trainingMethod;
   return (
@@ -234,6 +239,7 @@ function TrainingMethodSelect() {
             method,
             deviceType,
             cpuOnly,
+            simulated,
           );
           const unsupportedLabel = t(
             cpuOnly

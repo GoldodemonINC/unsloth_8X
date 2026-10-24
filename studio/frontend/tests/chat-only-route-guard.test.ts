@@ -44,9 +44,12 @@ const declarations = [
     "waitsOutUnknownVerdict",
   ),
   lift(/function isChatOnlyAllowed\([\s\S]*?\n\}/, "isChatOnlyAllowed"),
+  // The CPU CoRA exception is scoped to Train, so the guard reads this flag.
+  lift(/const opensStudio =[\s\S]*?;\n/, "opensStudio"),
 ]
   .join("\n")
-  .replaceAll("(pathname: string): boolean", "(pathname)");
+  .replaceAll("(pathname: string): boolean", "(pathname)")
+  .replaceAll("location.pathname", "pathname");
 
 // The guard itself, with its two inputs made into parameters: the store call becomes the
 // host verdict, the router's location becomes the path under test.
@@ -73,12 +76,14 @@ const evaluateGuard = new Function(
   "chatOnly",
   "unmeasured",
   "simulatedTraining",
+  "cpuCoraHost = false",
   `${declarations}\nreturn Boolean(${condition});`,
 ) as (
   pathname: string,
   chatOnly: boolean,
   unmeasured: boolean,
   simulatedTraining: boolean,
+  cpuCoraHost?: boolean,
 ) => boolean;
 
 const redirectsToChat = (
@@ -159,6 +164,19 @@ test("simulated training opens /studio on a measured chat-only host", () => {
   );
   // The flag is only loaded for /studio (beforeLoad reads it under opensStudio), so the
   // lifted guard's global "don't redirect" is not a bypass for the other gated pages.
+});
+
+test("a CPU host that runs CoRA keeps /studio reachable", () => {
+  // The Train wizard's method picker offers CoRA alone there, and the backend refuses the rest,
+  // so a GPU-less CPU host is not the same thing as a host that cannot train at all.
+  assert.equal(
+    evaluateGuard("/studio", true, false, false, true),
+    false,
+    "the CPU CoRA path is why Train stays open on a measured chat-only host",
+  );
+  // It is not a general bypass: a page that is neither allowed nor self-gated still bounces.
+  assert.equal(evaluateGuard("/settings", true, false, false, true), true);
+  assert.equal(evaluateGuard("/videos", true, false, false, true), true);
 });
 
 test("a host that is not chat-only is never redirected", () => {

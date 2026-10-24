@@ -3,6 +3,9 @@
 
 import { usePlatformStore } from "@/config/env";
 import { useIsAccountOwner } from "@/features/auth";
+// Deep import, not the settings barrel: the barrel re-exports .tsx surfaces that the node
+// test resolver cannot load, and tests import deriveTrainingReadiness from this module.
+import { useDebugTrainingSimulation } from "@/features/settings/hooks/use-debug-training-simulation";
 import { useMemo } from "react";
 import {
   type StartValidationResult,
@@ -30,12 +33,14 @@ export function deriveTrainingReadiness(
   deviceType: string,
   isOwner: boolean,
   cpuOnly = false,
+  simulated = false,
 ): TrainingReadiness {
   const configValidation = validateTrainingConfig(
     state,
     deviceType,
     isOwner,
     cpuOnly,
+    simulated,
   );
   const hasModel = !!state.selectedModel;
   const hasDataset =
@@ -103,6 +108,7 @@ function createTrainingReadinessSelector(
   deviceType: string,
   isOwner: boolean,
   cpuOnly: boolean,
+  simulated: boolean,
 ) {
   let cachedReadiness: Readonly<TrainingReadiness> | null = null;
   let cachedState: TrainingConfigState | null = null;
@@ -111,7 +117,13 @@ function createTrainingReadinessSelector(
     if (state === cachedState && cachedReadiness) {
       return cachedReadiness;
     }
-    const next = deriveTrainingReadiness(state, deviceType, isOwner, cpuOnly);
+    const next = deriveTrainingReadiness(
+      state,
+      deviceType,
+      isOwner,
+      cpuOnly,
+      simulated,
+    );
     if (!(cachedReadiness && readinessEqual(cachedReadiness, next))) {
       cachedReadiness = Object.freeze(next);
     }
@@ -124,9 +136,13 @@ export function useTrainingReadiness(): Readonly<TrainingReadiness> {
   const deviceType = usePlatformStore((state) => state.deviceType);
   const cpuOnly = usePlatformStore((state) => state.isCpuTrainingHost());
   const isOwner = useIsAccountOwner();
+  // Settings -> Debugging: the fake trainer never loads the hardware path, so the CPU and
+  // Apple Silicon method limits must not mark a simulated config unsupported.
+  const simulated = useDebugTrainingSimulation();
   const selector = useMemo(
-    () => createTrainingReadinessSelector(deviceType, isOwner, cpuOnly),
-    [deviceType, isOwner, cpuOnly],
+    () =>
+      createTrainingReadinessSelector(deviceType, isOwner, cpuOnly, simulated),
+    [deviceType, isOwner, cpuOnly, simulated],
   );
   return useTrainingConfigStore(selector);
 }

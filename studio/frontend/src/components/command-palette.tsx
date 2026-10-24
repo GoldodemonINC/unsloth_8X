@@ -150,6 +150,7 @@ const SETTINGS_TAB_LABELS: Record<SettingsTab, TranslationKey> = {
   voice: "settings.tabs.voice",
   connections: "settings.tabs.connections",
   library: "shell.navigation.library",
+  labs: "settings.tabs.labs",
   data: "settings.tabs.data",
   sandbox: "settings.tabs.sandbox",
   "api-keys": "settings.tabs.apiKeys",

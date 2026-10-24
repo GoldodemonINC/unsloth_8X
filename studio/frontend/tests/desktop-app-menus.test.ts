@@ -101,7 +101,12 @@ test("Go > Settings lists every Settings page, in the dialog's order", () => {
 
 test("every action is handled in the app shell", () => {
   for (const action of rustActions) {
-    assert.ok(ROOT.includes(`"${action}":`), `__root.tsx handles ${action}`);
+    // The handlers map writes bare keys where they are valid identifiers, so accept both.
+    assert.match(
+      ROOT,
+      new RegExp(`(?:^|[\\s{,{])"?${action}"?:`),
+      `__root.tsx handles ${action}`,
+    );
   }
   // Help items for owner-only pages are off for managed accounts, in both menus.
   assert.match(ROOT, /isAuthFlowRoute \|\| !helpActionAvailable\(action, isOwner\)/);
@@ -214,7 +219,7 @@ test("every menu item stays disabled while the desktop app is not showing the ap
   // Published as the same predicate that reveals the app, not just "backend up".
   assert.match(provider, /setDesktopShellReady\(canMountApp && appShellReady\);\s*return \(\) => setDesktopShellReady\(false\);/);
   assert.match(provider, /const showApp = canMountApp && appShellReady;/);
-  assert.match(ROOT, /\}, desktopShellReady\);/);
+  assert.match(ROOT, /desktopShellReady,\s*\);/);
   assert.match(hook, /const enabled = ready\s*\?/);
   assert.match(hook, /latest\.current = ready \? handlers : \{\};/);
 });
@@ -223,7 +228,10 @@ test("Open Folder is disabled until the open in progress finishes", () => {
   const openFolder = readSrc("features/chat/utils/open-folder-as-project.ts");
   assert.match(openFolder, /if \(opening\) return null;\s*setOpening\(true\);/);
   assert.match(openFolder, /\} finally \{\s*setOpening\(false\);/);
-  assert.match(ROOT, /pathLeasesSupported && !ragUnavailable && !openingFolder/);
+  assert.match(
+    ROOT,
+    /pathLeasesSupported &&\s*!ragUnavailable &&\s*!openingFolder/,
+  );
 });
 
 test("menu triggers reach the newest mounted handler that claims the action", async () => {

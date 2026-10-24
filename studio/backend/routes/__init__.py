@@ -14,6 +14,7 @@ from routes.auth import router as auth_router
 from routes.data_recipe import router as data_recipe_router
 from routes.export import router as export_router
 from routes.advanced import router as advanced_router
+from routes.labs import router as labs_router
 from routes.training_history import router as training_history_router
 from routes.chat_history import router as chat_history_router
 from routes.external_import import router as external_import_router
@@ -39,6 +40,7 @@ __all__ = [
     "data_recipe_router",
     "export_router",
     "advanced_router",
+    "labs_router",
     "training_history_router",
     "chat_history_router",
     "external_import_router",

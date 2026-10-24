@@ -43,6 +43,7 @@ const ITEM_META: Record<
   train: { icon: TestTubeOutlineIcon, labelKey: "shell.navigation.train" },
   merge: { icon: LayerIcon, labelKey: "shell.navigation.merge" },
   scale: { icon: ArrowExpand02Icon, labelKey: "shell.navigation.scale" },
+  labs: { icon: TestTubeOutlineIcon, labelKey: "shell.navigation.labs" },
   video: { icon: FlimSlateIcon, labelKey: "shell.navigation.video" },
   audio: { icon: AiSpeechIcon, labelKey: "shell.navigation.audio" },
   recipes: { icon: ChefHatIcon, labelKey: "shell.navigation.recipes" },

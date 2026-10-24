@@ -105,9 +105,10 @@ Unsloth works on **Windows, Linux, WSL** and **macOS**. We support **Multi GPU s
 * **Complete support:** Supports [reinforcement learning](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide), LoRA, QLoRA, full fine tuning, pretraining, RL, GRPO, DPO, and FP8.
 * **Export & Deploy:** [Export](https://unsloth.ai/docs/new/studio/export) or Deploy models including [GGUF](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf), NVFP4, FP8 and more formats.
 * **Datasets:** Build datasets from PDFs, CSVs, DOCX files, and more with [Data Recipes](https://unsloth.ai/docs/new/studio/data-recipe).
+* **Debugging:** Settings → Debugging → *Simulated training* drives the whole training flow against a fake trainer on any machine, no GPU or dataset needed — see [docs/simulated-training.md](docs/simulated-training.md).
 
 ### Platform scope
-Unsloth Studio is **three studios** — **Training**, **Merging**, **Export** — with a run layer underneath them (jobs, resource arbitration, run manifests). Merging, MMoE and export are engines inside those studios, not separate headlines.
+Unsloth Studio is one sidebar over several studios — **Training**, **Merge**, **Scaler**, **Export** — plus the media workspaces (**Images**, **Video**, **Audio**), **Data Recipes**, and the **API** monitor, with a run layer underneath them (jobs, resource arbitration, run manifests). Merging, scaling, MMoE and export are engines inside those studios, not separate headlines.
 
 **CPU is not recommended — use it only if you have no GPU.** On CPU (8 GB+ available RAM) you get **basic merge, slow training, and all recipes**. **A GPU is recommended (8 GB+ VRAM) and gets all features.** Colab covers MMoE and small training runs.
 
@@ -116,6 +117,15 @@ CPU training is limited to the CoRA / QLoRA LoRA recipes on text models: the bas
 A CPU merge is **streaming only**: it holds one tensor pair in memory instead of both parents, which is what makes the 8 GB tier real. A full-load merge would not fit and is not offered. The result is written into the folder the Library, Export and Chat scan, so a CPU merge feeds straight into GGUF quantization.
 
 Every stage writes a `run_manifest.json` beside its output — versions, seeds, dataset identity, the layer-LR zone definition, the blend schedule and any policy override — so a model can be reproduced from its folder alone.
+
+## 📚 Repository docs
+These describe this checkout rather than the hosted documentation:
+
+- [docs/README.md](docs/README.md) — what lives where, the surfaces of the Studio, and the checks to run before a change lands.
+- [docs/simulated-training.md](docs/simulated-training.md) — the Debugging simulator: what it bypasses and what it still refuses.
+- [docs/labs.md](docs/labs.md) — the Labs switch, its experiment registry, and the Artifacts and Pipelines studios.
+- [docs/theming.md](docs/theming.md) — palettes, the `#9ceaf0` accent, and the greens that stay greens.
+
   
 ## 🚀 Unsloth Start
 

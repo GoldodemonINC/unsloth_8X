@@ -781,3 +781,28 @@ test("a fresh Clef pick from full fine-tuning starts as QLoRA, a Laya pick as Lo
   assert.equal(useTrainingConfigStore.getState().trainingMethod, "lora");
   assert.equal(useTrainingConfigStore.getState().decisionLayout, "laya");
 });
+
+test("a simulated run is ready even where the host would refuse the method", () => {
+  useTrainingConfigStore.getState().reset();
+  useTrainingConfigStore.setState({
+    selectedModel: LLM,
+    datasetSource: "huggingface",
+    dataset: "roneneldan/TinyStories",
+    datasetSplit: "train",
+    manualDatasetOptionsValid: true,
+  });
+  const config = {
+    ...useTrainingConfigStore.getState(),
+    trainingMethod: "full" as const,
+  };
+
+  // Full fine-tuning needs a GPU, so a CPU-only host cannot start it for real.
+  const blocked = deriveTrainingReadiness(config, "windows", true, true);
+  assert.equal(blocked.configValidation.ok, false);
+  assert.equal(blocked.isReady, false);
+
+  // Settings -> Debugging: the fake trainer never loads that path, so Start stays live.
+  const simulated = deriveTrainingReadiness(config, "windows", true, true, true);
+  assert.equal(simulated.configValidation.ok, true);
+  assert.equal(simulated.isReady, true);
+});

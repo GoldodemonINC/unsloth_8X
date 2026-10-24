@@ -291,6 +291,9 @@ const CHAT_ONLY_ALLOWED = new Set([
   // Expansion loads a checkpoint, so it is CPU work too, and a chat-only host must be able to
   // read its own refusal reasons instead of being redirected away from them.
   "/scale",
+  // Labs is browsing and config-only planning: no accelerator is involved, and the
+  // page has to be able to render its own "turn Labs on" card.
+  "/labs",
   // Chat-only hosts serve the API like any other, so the monitor must be reachable there
   // or the overlay's "Expand" and the Settings API card redirect to /chat.
   "/api-monitor",
@@ -363,7 +366,9 @@ export const Route = createRootRoute({
     if (
       isChatOnly() &&
       !isChatOnlyAllowed(location.pathname) &&
-      !cpuCoraHost &&
+      // Scoped to Train: a CPU CoRA host gains the wizard, not every gated page (video
+      // generation, the Hub and settings still need what that host does not have).
+      !(cpuCoraHost && opensStudio) &&
       !simulatedTraining &&
       !(unmeasured && waitsOutUnknownVerdict(location.pathname))
     ) {
