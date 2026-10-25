@@ -3281,6 +3281,34 @@ export const ptBR = {
     },
   },
   studio: {
+    presets: {
+      title: "Predefinições e capacidade",
+      description:
+        "Aplique um conjunto nomeado de hiperparâmetros de treino, salve o atual e verifique se a execução cabe na GPU antes de iniciá-la.",
+      builtin: "Integrado",
+      builtinHint:
+        "Só os hiperparâmetros mudam. O modelo e o conjunto de dados que você já escolheu permanecem.",
+      mine: "Salvos",
+      none: "Nenhum ainda.",
+      saveCurrent: "Salvar o atual…",
+      namePlaceholder: "Nome da predefinição",
+      save: "Salvar",
+      saved: "Predefinição salva",
+      applied: "Predefinição aplicada",
+      delete: "Excluir esta predefinição",
+      fitTitle: "Verificação de capacidade",
+      check: "Verificar esta execução",
+      checking: "Verificando…",
+      needModel: "Escolha um modelo antes de verificar a capacidade.",
+      checkFailed: "Não foi possível executar a verificação de capacidade",
+      fitHint:
+        "Estima pesos, estado do otimizador, estado do adaptador e ativações a partir de config.json. É um orçamento, não uma promessa.",
+      required: "necessidade estimada",
+      budget: "de {gb} GB",
+      headroom: "{gb} GB de folga",
+      trainable: "treinável",
+      assumptions: "Como a estimativa é montada",
+    },
     goToLibrary: "Ir para a Biblioteca",
     routeTitle: "Treinar",
     wizard: {
