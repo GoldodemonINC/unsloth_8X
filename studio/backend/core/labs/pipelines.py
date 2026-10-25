@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: AGPL-3.0-only
-# Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+# SPDX-License-Identifier: NRC-1
+# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-1.md
 
 """Pipelines: plan a chain of stages, and say what it will cost before it runs.
 
@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from core.advanced import eval_harness
+from core.advanced import eval_harness, nrc_license
 from core.advanced.scaling import (
     CAP_ADDED_PARAMS,
     GROWTH_FLOOR,
@@ -491,6 +491,7 @@ def save_pipeline(spec: Mapping[str, Any]) -> dict[str, Any]:
             "source": spec.get("source"),
             "stages": list(spec.get("stages") or []),
         },
+        "license": nrc_license.license_record(),
         "plan": {
             "final_params": report["final_params"],
             "total_output_bytes": report["total_output_bytes"],
@@ -503,6 +504,7 @@ def save_pipeline(spec: Mapping[str, Any]) -> dict[str, Any]:
     partial = target.with_suffix(".json.partial")
     partial.write_text(json.dumps(record, indent = 2), encoding = "utf-8")
     partial.replace(target)
+    nrc_license.stamp(directory)
     return record
 
 

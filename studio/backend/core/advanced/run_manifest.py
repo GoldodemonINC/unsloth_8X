@@ -337,11 +337,20 @@ def manifest_path(directory: str | Path) -> Path:
 
 
 def write_manifest(directory: str | Path, manifest: Mapping[str, Any]) -> Path:
-    """Write the manifest atomically, so a reader never sees a half document."""
-    from . import policy as policy_module  # noqa: PLC0415 - avoids a cycle at import
+    """Write the manifest atomically, so a reader never sees a half document.
 
+    Every produced folder also gets the NRC-1 notice beside its weights: the
+    manifest already travels with the run, and the notice is what a reader sees
+    without opening JSON. A stage that supplies its own ``license`` block keeps
+    it; only a missing one is filled in.
+    """
+    from . import nrc_license, policy as policy_module  # noqa: PLC0415 - avoids a cycle at import
+
+    document = dict(manifest)
+    document.setdefault("license", nrc_license.license_record())
     target = manifest_path(directory)
-    policy_module.atomic_write_json(target, dict(manifest))
+    policy_module.atomic_write_json(target, document)
+    nrc_license.stamp(directory)
     return target
 
 
