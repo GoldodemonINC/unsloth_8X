@@ -8,7 +8,9 @@ export type TrainingMethod =
   | "full"
   | "cpt"
   | "rl"
-  | "cora";
+  | "cora"
+  // Labs experiment: capacity matched training runs on its own engine, not the trainer.
+  | "cmt";
 
 export function isTrainingMethod(value: unknown): value is TrainingMethod {
   return (
@@ -17,11 +19,13 @@ export function isTrainingMethod(value: unknown): value is TrainingMethod {
     value === "full" ||
     value === "cpt" ||
     value === "rl" ||
-    value === "cora"
+    value === "cora" ||
+    value === "cmt"
   );
 }
 
 export function isAdapterMethod(method: TrainingMethod): boolean {
+  // CMT inserts whole transformer blocks and trains them densely, so no LoRA variant applies.
   return (
     method === "lora" ||
     method === "qlora" ||

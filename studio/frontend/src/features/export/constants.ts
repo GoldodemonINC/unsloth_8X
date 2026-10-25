@@ -353,6 +353,7 @@ export const METHOD_LABELS: Record<TrainingMethod, string> = {
   full: "Full Fine-tune",
   cpt: "Continued Pretraining",
   rl: "Policy Alignment",
+  cmt: "Capacity Matched",
 };
 
 export const GUIDE_STEPS = [

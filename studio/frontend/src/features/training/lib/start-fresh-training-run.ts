@@ -271,6 +271,12 @@ export async function startFreshTrainingRun(): Promise<boolean> {
     return false;
   }
 
+  // CMT is a Labs engine with its own datasets and steps; the trainer has no method for it,
+  // so refuse here rather than send a payload the request schema would reject.
+  if (attempt.config.trainingMethod === "cmt") {
+    return attempt.cancel(translate("labs.cmt.trainerNote"));
+  }
+
   // Settings -> Debugging: the backend runs a fake trainer and ignores the
   // payload, so the model, dataset, token and consent steps below are skipped.
   if (await simulatedTrainingEnabled()) {

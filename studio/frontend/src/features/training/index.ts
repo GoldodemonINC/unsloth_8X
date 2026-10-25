@@ -148,6 +148,7 @@ export {
 export {
   TRAINING_METHOD_META,
   TRAINING_METHOD_ORDER,
+  visibleTrainingMethods,
 } from "./lib/training-method-meta";
 export {
   LEGACY_TRAINING_PARAM_MODE_STORAGE_KEY,

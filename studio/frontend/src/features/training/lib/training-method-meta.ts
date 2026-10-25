@@ -11,7 +11,27 @@ export const TRAINING_METHOD_ORDER: readonly TrainingMethod[] = [
   "full",
   "cpt",
   "rl",
+  "cmt",
 ];
+
+/**
+ * The rows the method picker shows. CMT is a Labs experiment, so it exists only
+ * while that switch is on, and a decision model has no backbone for it anyway.
+ */
+export function visibleTrainingMethods(input: {
+  cmtEnabled: boolean;
+  isDecision: boolean;
+  decisionTakesQlora: boolean;
+}): TrainingMethod[] {
+  return TRAINING_METHOD_ORDER.filter(
+    (method) =>
+      (method !== "cmt" || input.cmtEnabled) &&
+      (!input.isDecision ||
+        method === "lora" ||
+        method === "full" ||
+        (input.decisionTakesQlora && method === "qlora")),
+  );
+}
 
 interface TrainingMethodMeta {
   labelKey: TranslationKey;
@@ -57,5 +77,13 @@ export const TRAINING_METHOD_META: Record<TrainingMethod, TrainingMethodMeta> =
       hintKey: "studio.methods.rl.hint",
       noteKey: "studio.methods.rl.note",
       dotClass: "bg-rose-500/70",
+    },
+    // CMT's copy lives under Labs because it is only offered while that experiment is on,
+    // and an experiment's labels should travel with it rather than with the stable trainer.
+    cmt: {
+      labelKey: "labs.cmt.methodLabel",
+      hintKey: "labs.cmt.methodHint",
+      noteKey: "labs.cmt.methodNote",
+      dotClass: "bg-teal-500/70",
     },
   };
