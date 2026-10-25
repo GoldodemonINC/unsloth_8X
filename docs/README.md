@@ -38,8 +38,11 @@ gated on the same measured hardware verdict (`usePlatformStore`):
 - **Recipes** — Data Recipes for building datasets.
 - **Export** — merged, adapter, GGUF and quantized export.
 - **Labs** — the experimental row, hidden until Settings → Labs is on. It hosts
-  the **Artifacts** studio (what each produced checkpoint allows next) and the
-  **Pipelines** planner (chain the stages and price them before any compute).
+  the **Artifacts** studio (what each produced checkpoint allows next), the
+  **Pipelines** planner (chain the stages and price them before any compute),
+  **Benchmarks** (score an artifact and keep the report), **CMT** (capacity
+  matched to the data, then train only the new blocks) and **Cleanup** (what
+  outputs and caches are using, with a guarded delete).
 - **API** — the OpenAI-compatible server and request monitor.
 
 Merging, scaling and export are engines under the run layer (jobs, resource

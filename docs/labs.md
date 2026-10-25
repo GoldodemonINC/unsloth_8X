@@ -37,12 +37,85 @@ not copy the list into the frontend.
 | --- | --- | --- |
 | `artifacts` | studio | The Artifacts studio: produced checkpoints, provenance, legal next steps |
 | `pipelines` | studio | The Pipelines planner: plan a merge → scale → train → quantize → benchmark chain |
+| `benchmarks` | studio | The Benchmark studio: score an artifact, keep the report, compare later |
+| `cmt` | studio | CMT: per-dataset splits, capacity-matched expansion, new-blocks-only training |
+| `housekeeping` | studio | The Cleanup studio: output and HF-cache sizes, guarded delete |
+| `auto-scale` | feature | The wizard card that grows a checkpoint by the size its own datasets justify |
 | `manifest-viewer` | feature | The raw `run_manifest.json` beside an artifact |
 | `scale-from-artifact` | feature | Hand one artifact's path to the Scaler |
 | `training-continuation` | feature | Make an artifact the Training model in one click |
 
 Each row in the Settings tab toggles one of these. A feature that is off says so
 on its own page (`LabsOffCard`) rather than disappearing.
+
+## Benchmarks keep evidence, not the checkpoint
+
+A benchmark record lives under `outputs/labs-benchmarks/records/<id>.json` and
+never edits the artifact it describes. The eval job still writes
+`auto_eval_report.json` and `.md` under its own run directory; the record is the
+small, listable summary the page reads after the job is gone.
+
+The studio reuses the existing `eval_harness`/`eval_runner` pair. It does not
+add a second benchmark implementation, so the suites and the `lm-eval` install
+check stay in one place. A delta under 1.5 points is labelled within noise, the
+same convention the post-training Regression Guard uses.
+
+## CMT is one job and one experiment
+
+CMT (`core/labs/cmt.py`) loads the base on CPU, splits every local dataset into
+its own train and held-out rows, expands the checkpoint with
+`force_small_growth=True`, freezes every inherited parameter, and trains only
+the inserted blocks. Each held-out split becomes one held-out perplexity task in
+the same `cpt_train` call, so the per-dataset delta comes from the training run
+itself rather than a second eval pass.
+
+The sizing rule is `clamp(((1.7 * megatokens + 12) / 10) * 1M, 1M, 700M)`, with
+the row fallback at 1M per 10k rows. It is a heuristic, and the page says so.
+Two limits are honest, not bugs:
+
+* The engine inserts whole blocks. If the requested growth is smaller than one
+  block, the plan reports the block's size as the real growth.
+* A growth below the Scaler's 2x floor is deliberately forced here. The manifest
+  records `floor_bypassed: true`; no other stage gets that flag.
+
+CMT v1 reads local `.jsonl`, `.json`, `.parquet`, `.csv` and `.txt` files. It
+does not download Hub datasets during planning.
+
+### CMT is also a method in the trainer
+
+While the `cmt` experiment is on, the wizard's method picker offers **CMT** next
+to LoRA/QLoRA/Full/CPT. Picking it swaps the dataset, preset, parameter and
+advanced cards for the CMT card, because CMT owns its datasets, per-dataset
+splits, eval and steps. The trainer's Start button is replaced by a note: CMT
+never posts `/api/training/start`, and `startFreshTrainingRun()` refuses the
+method before a payload is built. Everything the run needs travels to
+`/api/labs/cmt/run` instead.
+
+Two consequences are deliberate:
+
+* CMT is offered only on a CUDA-class host. It loads in fp16, expands the
+  checkpoint and trains dense new blocks; CPU and Apple Silicon hosts cannot.
+* Turning the experiment off resets a persisted `cmt` selection to `lora`, so a
+  stale browser cannot sit on an engine whose routes now answer 403.
+
+`toBackendTrainingType("cmt")` throws. That is the boundary: the trainer's
+`training_type` literal has no CMT member, and the tests pin the refusal.
+
+## Scale before training
+
+`core/labs/autoscale.py` shares CMT's sizing rule and then stops: it expands the
+checkpoint, saves it, and leaves training to the method the user picks. It is
+the data-sized alternative to the Scaler's slider.
+
+The wizard shows it as **Scale from the dataset** whenever `auto-scale` is on
+and the method is not CMT (CMT does the same sizing internally). It accepts one
+local dataset path per line, plans without loading a weight, then runs one job
+that writes a `scaled/` checkpoint and its manifest. *Use as the training model*
+points the wizard at that folder; the run itself stays a separate, normal start.
+
+Keeping growth and training separate is on purpose. Re-scaling from inside every
+Start would grow the model again on each retry and make an accidental rerun
+permanent. The card makes the growth a step the user can see and keep.
 
 ## Why Pipelines does not run
 
@@ -82,13 +155,16 @@ user a chain is impossible before they spend the GPU hours.
 Backend (`studio/backend/tests/`):
 
 ```bash
-pytest tests/test_labs.py tests/test_labs_artifacts.py -q
+pytest tests/test_labs.py tests/test_labs_artifacts.py \
+  tests/test_labs_benchmarks.py tests/test_labs_cmt.py \
+  tests/test_labs_autoscale.py tests/test_labs_housekeeping.py -q
 ```
 
 Frontend (`studio/frontend/`):
 
 ```bash
 node --experimental-strip-types --test tests/labs-feature-gate.test.ts
+node --experimental-strip-types --test tests/training-method-cmt.test.ts
 node --experimental-strip-types --test tests/sidebar-nav-backend-parity.test.ts
 ```
 
