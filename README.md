@@ -517,6 +517,9 @@ Unsloth uses a dual-licensing model of Apache 2.0 and AGPL-3.0. The core Unsloth
 
 This structure helps support ongoing Unsloth development while keeping the project open source and enabling the broader ecosystem to continue growing.
 
+### NRC-1
+Additions original to this fork — the Labs engines, the trainer surface and the produced run records — are offered under **[NRC-1](LICENSE-NRC-1.md)**, a light source-available license. It permits private and internal commercial use, modification and sharing with attribution, and reserves two things only: relaunching the work as a rebranded product, and mass public redistribution of it from a company. It does not relicense anything inherited from upstream or any weight, tokenizer or dataset that came from another source. Every merge, scale and pipeline output writes `LICENSE-NRC-1.txt` beside its `run_manifest.json` so a folder keeps those terms wherever it is copied.
+
 ### Thank You to
 - The [llama.cpp library](https://github.com/ggml-org/llama.cpp) that lets users run and save models with Unsloth
 - The Hugging Face team and their libraries: [transformers](https://github.com/huggingface/transformers) and [TRL](https://github.com/huggingface/trl)
