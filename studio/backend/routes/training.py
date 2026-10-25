@@ -1724,6 +1724,38 @@ def _prepare_resume_resource_provenance(
     )
 
 
+class TrainingFitRequest(PydanticBaseModel):
+    """What the wizard's fit check needs; every field is already on the page."""
+
+    model: str = PydanticField(..., min_length = 1)
+    method: Literal["lora", "qlora", "full", "cpt"] = "lora"
+    load_in_4bit: bool = False
+    max_seq_length: int = PydanticField(2048, ge = 128, le = 131_072)
+    batch_size: int = PydanticField(1, ge = 1, le = 512)
+    gradient_accumulation: int = PydanticField(1, ge = 1, le = 512)
+    lora_rank: int = PydanticField(16, ge = 1, le = 1024)
+    gradient_checkpointing: bool = True
+    gpu_memory_gb: Optional[float] = PydanticField(None, gt = 0, le = 4096)
+
+
+@router.post("/fit")
+def estimate_training_fit(
+    request: TrainingFitRequest,
+    current_subject: str = Depends(get_current_subject),
+) -> dict[str, Any]:
+    """A conservative VRAM budget for the current wizard settings.
+
+    Reads config.json only; says "unknown" rather than inventing a budget when
+    the host reports no GPU memory.
+    """
+    from core.training import fit as training_fit
+
+    try:
+        return training_fit.estimate(request.model_dump())
+    except ValueError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+
+
 @router.get("/hardware")
 async def get_hardware_utilization(current_subject: str = Depends(get_current_subject)):
     """
