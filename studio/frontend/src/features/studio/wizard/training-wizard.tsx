@@ -26,7 +26,7 @@ import { TrainModelSelector } from "@/features/train-model-picker";
 import {
   type DecisionCheckpoint,
   TRAINING_METHOD_META,
-  TRAINING_METHOD_ORDER,
+  visibleTrainingMethods,
   isTrainingMethodSupportedOnDevice,
   useTrainingConfigStore,
 } from "@/features/training";
@@ -36,16 +36,25 @@ import type { TrainingMethod } from "@/types/training";
 import {
   AiBrain01Icon,
   ArrowExpand02Icon,
+  DashboardSpeed01Icon,
   Database02Icon,
   FloppyDiskIcon,
   Settings05Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
 import { type CSSProperties, type ReactNode, useEffect } from "react";
+import { AutoScaleCard } from "@/features/labs/components/auto-scale-card";
+import { CmtPanel } from "@/features/labs/components/cmt-panel";
+import {
+  ensureLabsLoaded,
+  useLabsFeature,
+  useLabsStore,
+} from "@/features/labs/store";
 import { DatasetPanel } from "../sections/dataset-section";
 import { DatasetSourceToggleAction } from "../sections/dataset-source-toggle";
 import { FieldHint } from "../sections/field-hint";
 import { ParamsSection } from "../sections/params-section";
+import { TrainingPresetSection } from "../sections/training-preset-section";
 import { ConfigActions } from "./config-actions";
 import { AdvancedTrainingSection } from "@/features/advanced/components/advanced-training-section";
 import { ScalerPanel } from "@/features/advanced/components/scaler-panel";
@@ -181,6 +190,12 @@ function TrainingMethodSelect() {
   // Settings -> Debugging: the simulated trainer ignores the method, so no host limit
   // narrows the list and nothing gets rewritten under the user.
   const simulated = useDebugTrainingSimulation();
+  // CMT is a Labs experiment: its row exists only while that experiment is on.
+  const cmtEnabled = useLabsFeature("cmt");
+  const labsLoaded = useLabsStore((state) => state.loaded);
+  useEffect(() => {
+    ensureLabsLoaded();
+  }, []);
   // A method persisted from another host (or the default) would sit selected while its row is
   // disabled, and Start would refuse it. On CPU, CoRA is the only choice, so make it the choice.
   useEffect(() => {
@@ -192,6 +207,15 @@ function TrainingMethodSelect() {
       setTrainingMethod("cora");
     }
   }, [simulated, cpuOnly, deviceType, trainingMethod, setTrainingMethod]);
+  // Turning the CMT experiment off must not leave the wizard pointed at an engine whose
+  // routes now answer 403, so the selection falls back to the default recipe. Wait for the
+  // switch to be read: until then "off" only means "not loaded", and resetting on that would
+  // discard a persisted CMT selection on every page load.
+  useEffect(() => {
+    if (labsLoaded && !cmtEnabled && trainingMethod === "cmt") {
+      setTrainingMethod("lora");
+    }
+  }, [cmtEnabled, labsLoaded, trainingMethod, setTrainingMethod]);
   const activeMeta = TRAINING_METHOD_META[trainingMethod];
   const activeLabel = activeMeta ? t(activeMeta.labelKey) : trainingMethod;
   return (
@@ -227,13 +251,11 @@ function TrainingMethodSelect() {
         sideOffset={8}
         className="rounded-[14px] ring-0"
       >
-        {TRAINING_METHOD_ORDER.filter(
-          (method) =>
-            !isDecision ||
-            method === "lora" ||
-            method === "full" ||
-            (decisionTakesQlora && method === "qlora"),
-        ).map((method) => {
+        {visibleTrainingMethods({
+          cmtEnabled,
+          isDecision,
+          decisionTakesQlora,
+        }).map((method) => {
           const meta = TRAINING_METHOD_META[method];
           const unsupported = !isTrainingMethodSupportedOnDevice(
             method,
@@ -492,6 +514,11 @@ export function TrainingWizard({
   const t = useT();
   const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
   const selectedModel = useTrainingConfigStore((s) => s.selectedModel);
+  // CMT owns its datasets, splits, eval and steps, so it replaces the trainer's
+  // dataset/params cards instead of trying to live inside them.
+  const cmtFeatureOn = useLabsFeature("cmt");
+  const isCmt = trainingMethod === "cmt" && cmtFeatureOn;
+  const autoScaleOn = useLabsFeature("auto-scale");
   return (
     <div className="flex flex-col gap-6">
       <SectionBox
@@ -509,42 +536,62 @@ export function TrainingWizard({
         icon={ArrowExpand02Icon}
         chipTint="var(--chart-2)"
       >
-        <ScalerPanel
-          defaultSource={selectedModel ?? ""}
-          onUseCheckpoint={(path) =>
-            useTrainingConfigStore
-              .getState()
-              .selectTrainingModel(path, null, { localPath: path })
-          }
-        />
+        <div className="flex flex-col gap-5">
+          {autoScaleOn && !isCmt ? (
+            <AutoScaleCard defaultModel={selectedModel ?? ""} />
+          ) : null}
+          <ScalerPanel
+            defaultSource={selectedModel ?? ""}
+            onUseCheckpoint={(path) =>
+              useTrainingConfigStore
+                .getState()
+                .selectTrainingModel(path, null, { localPath: path })
+            }
+          />
+        </div>
       </SectionBox>
 
-      <SectionBox
-        title={t("studio.wizard.datasetTitle")}
-        description={t("studio.wizard.datasetDescription")}
-        icon={Database02Icon}
-        chipTint="var(--chart-4)"
-        dataTour="studio-dataset"
-        titleAction={<DatasetSourceToggleAction />}
-      >
-        <DatasetPanel />
-      </SectionBox>
+      {isCmt ? (
+        <CmtPanel />
+      ) : (
+        <>
+          <SectionBox
+            title={t("studio.wizard.datasetTitle")}
+            description={t("studio.wizard.datasetDescription")}
+            icon={Database02Icon}
+            chipTint="var(--chart-4)"
+            dataTour="studio-dataset"
+            titleAction={<DatasetSourceToggleAction />}
+          >
+            <DatasetPanel />
+          </SectionBox>
 
-      <SectionBox
-        title={t("studio.wizard.paramsTitle")}
-        description={t("studio.wizard.paramsDescription")}
-        icon={Settings05Icon}
-        chipTint="var(--chart-5)"
-        dataTour="studio-params"
-        titleAction={
-          <ParamModeToggle mode={paramMode} onChange={onParamModeChange} />
-        }
-      >
-        <ParamsSection mode={paramMode} />
-      </SectionBox>
+          <SectionBox
+            title={t("studio.presets.title")}
+            description={t("studio.presets.description")}
+            icon={DashboardSpeed01Icon}
+            chipTint="var(--chart-6)"
+          >
+            <TrainingPresetSection />
+          </SectionBox>
 
-      {trainingMethod === "cora" ? <CoraRecipeCard /> : null}
-      <AdvancedTrainingSection />
+          <SectionBox
+            title={t("studio.wizard.paramsTitle")}
+            description={t("studio.wizard.paramsDescription")}
+            icon={Settings05Icon}
+            chipTint="var(--chart-5)"
+            dataTour="studio-params"
+            titleAction={
+              <ParamModeToggle mode={paramMode} onChange={onParamModeChange} />
+            }
+          >
+            <ParamsSection mode={paramMode} />
+          </SectionBox>
+
+          {trainingMethod === "cora" ? <CoraRecipeCard /> : null}
+          <AdvancedTrainingSection />
+        </>
+      )}
 
       <SectionBox
         title={t("studio.wizard.configTitle")}

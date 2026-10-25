@@ -97,6 +97,7 @@ export function StartTrainingCta() {
   } = useTrainingReadiness();
   const { startError, startBlocked, stopRequested, startTrainingRun } =
     useTrainingActions();
+  const trainingMethod = useTrainingConfigStore((s) => s.trainingMethod);
   // Settings -> Debugging: a fake trainer runs instead, so no model, dataset
   // or GPU is needed and none of the usual readiness gates apply.
   const simulated = useDebugTrainingSimulation();
@@ -138,6 +139,19 @@ export function StartTrainingCta() {
     configValidation.ok &&
     hasModel &&
     hasDataset;
+
+  // CMT never posts a training start: its engine owns the datasets, the expansion and
+  // the training loop, and the CMT card above carries the button that runs it.
+  if (trainingMethod === "cmt") {
+    return (
+      <p
+        role="status"
+        className="rounded-xl border border-border/60 bg-muted/30 px-3 py-2.5 text-ui-11p5 leading-relaxed text-muted-foreground"
+      >
+        {t("labs.cmt.trainerNote")}
+      </p>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-2">

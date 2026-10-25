@@ -5,13 +5,16 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { useSettingsDialogStore } from "@/features/settings";
-import { useT } from "@/i18n";
+import { type TranslationKey, useT } from "@/i18n";
 import { TestTubeOutlineIcon } from "@/lib/hugeicons-derived";
 import { cn } from "@/lib/utils";
 import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactElement, useEffect, useState } from "react";
 import { ArtifactsPanel } from "./components/artifacts-panel";
+import { BenchmarksPanel } from "./components/benchmarks-panel";
+import { CmtPanel } from "./components/cmt-panel";
+import { JanitorPanel } from "./components/janitor-panel";
 import { LabsFeatureGate } from "./components/labs-off-card";
 import { PipelinesPanel } from "./components/pipelines-panel";
 import {
@@ -21,7 +24,15 @@ import {
   useLabsStore,
 } from "./store";
 
-type StudioTab = "artifacts" | "pipelines";
+type StudioTab = "artifacts" | "pipelines" | "benchmarks" | "cmt" | "cleanup";
+
+const TABS: ReadonlyArray<readonly [StudioTab, TranslationKey]> = [
+  ["artifacts", "labs.tab.artifacts"],
+  ["pipelines", "labs.tab.pipelines"],
+  ["benchmarks", "labs.tab.benchmarks"],
+  ["cmt", "labs.tab.cmt"],
+  ["cleanup", "labs.tab.cleanup"],
+];
 
 export function LabsPage(): ReactElement {
   const t = useT();
@@ -98,12 +109,7 @@ export function LabsPage(): ReactElement {
         {enabled ? (
           <>
             <div className="flex flex-wrap items-center gap-1.5">
-              {(
-                [
-                  ["artifacts", "labs.tab.artifacts"],
-                  ["pipelines", "labs.tab.pipelines"],
-                ] as const
-              ).map(([id, key]) => (
+              {TABS.map(([id, key]) => (
                 <button
                   key={id}
                   type="button"
@@ -132,11 +138,27 @@ export function LabsPage(): ReactElement {
               <LabsFeatureGate feature="artifacts">
                 <ArtifactsPanel />
               </LabsFeatureGate>
-            ) : (
+            ) : null}
+            {tab === "pipelines" ? (
               <LabsFeatureGate feature="pipelines">
                 <PipelinesPanel />
               </LabsFeatureGate>
-            )}
+            ) : null}
+            {tab === "benchmarks" ? (
+              <LabsFeatureGate feature="benchmarks">
+                <BenchmarksPanel />
+              </LabsFeatureGate>
+            ) : null}
+            {tab === "cmt" ? (
+              <LabsFeatureGate feature="cmt">
+                <CmtPanel />
+              </LabsFeatureGate>
+            ) : null}
+            {tab === "cleanup" ? (
+              <LabsFeatureGate feature="housekeeping">
+                <JanitorPanel />
+              </LabsFeatureGate>
+            ) : null}
           </>
         ) : null}
       </div>

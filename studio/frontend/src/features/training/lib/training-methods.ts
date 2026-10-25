@@ -9,7 +9,12 @@ import type {
 } from "@/types/training";
 import type { LoraVariant } from "../types/config";
 
-const BACKEND_TRAINING_TYPE: Record<TrainingMethod, string> = {
+// CMT is absent on purpose: it trains on the Labs engine, which takes its own
+// datasets and steps, so there is no training_type to send the trainer.
+const BACKEND_TRAINING_TYPE: Record<
+  Exclude<TrainingMethod, "cmt">,
+  string
+> = {
   cora: "LoRA/QLoRA",
   qlora: "LoRA/QLoRA",
   lora: "LoRA/QLoRA",
@@ -25,9 +30,15 @@ const TRAINING_METHOD_LABELS: Record<TrainingMethod, string> = {
   full: "Full",
   cpt: "CPT",
   rl: "RL",
+  cmt: "CMT",
 };
 
 export function toBackendTrainingType(trainingMethod: TrainingMethod): string {
+  if (trainingMethod === "cmt") {
+    throw new Error(
+      "CMT runs on its own engine; it is never sent to the trainer.",
+    );
+  }
   return BACKEND_TRAINING_TYPE[trainingMethod];
 }
 
@@ -52,6 +63,11 @@ export function isTrainingMethodSupportedOnDevice(
   // must not hide a method: the fake backend ignores the payload and any method can be exercised.
   if (simulated) {
     return true;
+  }
+  // CMT expands the checkpoint, then trains the new blocks densely: it needs a CUDA-class
+  // accelerator and refuses quantized loads, so CPU and Apple Silicon hosts cannot run it.
+  if (trainingMethod === "cmt") {
+    return !cpuOnly && deviceType !== "cpu" && deviceType !== "mac";
   }
   // No torch accelerator: CoRA and QLoRA are the two recipes the CPU path runs (both are LoRA
   // adapters; QLoRA's 4-bit load is dropped there because bitsandbytes has no CPU training
