@@ -45,6 +45,47 @@ FEATURES: tuple[dict[str, Any], ...] = (
         "studio": True,
     },
     {
+        "id": "benchmarks",
+        "label": "Benchmark studio",
+        "description": (
+            "Score any produced checkpoint against a baseline on the eval suites, "
+            "and keep the report beside the run so two checkpoints can be compared later."
+        ),
+        "status": "alpha",
+        "studio": True,
+    },
+    {
+        "id": "cmt",
+        "label": "CMT",
+        "description": (
+            "Capacity matched to the data: split 2+ datasets, grow the model by the "
+            "size their content justifies, freeze the base, and train only the new blocks."
+        ),
+        "status": "alpha",
+        "studio": True,
+    },
+    {
+        "id": "housekeeping",
+        "label": "Cleanup studio",
+        "description": (
+            "What the outputs folder and the Hugging Face cache are using, with a "
+            "guarded delete for the folders that are safe to remove."
+        ),
+        "status": "beta",
+        "studio": True,
+    },
+    {
+        "id": "auto-scale",
+        "label": "Scale before training",
+        "description": (
+            "Grow a checkpoint by the 1M-700M its training data justifies, then train "
+            "the method you chose on the larger model. CMT trains only what it grows; "
+            "this stage grows and leaves the training to you."
+        ),
+        "status": "alpha",
+        "studio": False,
+    },
+    {
         "id": "manifest-viewer",
         "label": "Run manifest viewer",
         "description": (

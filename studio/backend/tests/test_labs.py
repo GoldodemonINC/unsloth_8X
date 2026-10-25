@@ -101,7 +101,13 @@ def test_put_rejects_an_unknown_feature(monkeypatch):
 
 def test_every_studio_route_is_closed_while_labs_is_off(monkeypatch):
     client, _ = _client(monkeypatch)
-    for path in ("/api/labs/artifacts", "/api/labs/pipelines", "/api/labs/artifacts/manifest?path=/tmp"):
+    for path in (
+        "/api/labs/artifacts",
+        "/api/labs/pipelines",
+        "/api/labs/benchmarks",
+        "/api/labs/housekeeping",
+        "/api/labs/artifacts/manifest?path=/tmp",
+    ):
         response = client.get(path)
         assert response.status_code == 403, path
         assert "Labs" in response.json()["detail"]
@@ -111,6 +117,18 @@ def test_every_studio_route_is_closed_while_labs_is_off(monkeypatch):
         json = {"spec": {"source": "/tmp/none", "stages": [{"kind": "benchmark"}]}},
     )
     assert planned.status_code == 403
+    assert client.post("/api/labs/cmt/plan", json = {"spec": {}}).status_code == 403
+    assert (
+        client.post(
+            "/api/labs/benchmarks/run",
+            json = {
+                "artifact": "/tmp/a",
+                "baseline": "/tmp/b",
+                "suites": ["mmlu"],
+            },
+        ).status_code
+        == 403
+    )
 
 
 def test_a_feature_that_is_off_closes_only_its_route(monkeypatch, tmp_path):
