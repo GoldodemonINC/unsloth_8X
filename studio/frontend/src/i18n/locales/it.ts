@@ -3309,6 +3309,34 @@ export const it = {
     },
   },
   studio: {
+    presets: {
+      title: "Preset e capacità",
+      description:
+        "Applica un insieme con nome di iperparametri di addestramento, salva quello corrente e controlla se l'esecuzione entra nella GPU prima di avviarla.",
+      builtin: "Integrati",
+      builtinHint:
+        "Cambiano solo gli iperparametri. Il modello e il dataset già scelti restano.",
+      mine: "Salvati",
+      none: "Nessuno per ora.",
+      saveCurrent: "Salva quello corrente…",
+      namePlaceholder: "Nome del preset",
+      save: "Salva",
+      saved: "Preset salvato",
+      applied: "Preset applicato",
+      delete: "Elimina questo preset",
+      fitTitle: "Controllo di capacità",
+      check: "Controlla questa esecuzione",
+      checking: "Controllo…",
+      needModel: "Scegli un modello prima di controllare la capacità.",
+      checkFailed: "Impossibile eseguire il controllo di capacità",
+      fitHint:
+        "Stima pesi, stato dell'ottimizzatore, stato dell'adattatore e attivazioni da config.json. È un budget, non una promessa.",
+      required: "fabbisogno stimato",
+      budget: "di {gb} GB",
+      headroom: "{gb} GB di margine",
+      trainable: "addestrabile",
+      assumptions: "Come viene costruita la stima",
+    },
     goToLibrary: "Vai alla Libreria",
     routeTitle: "Addestra",
     wizard: {

@@ -3487,6 +3487,34 @@ export const sv = {
     },
   },
   studio: {
+    presets: {
+      title: "Förinställningar och kapacitet",
+      description:
+        "Använd en namngiven uppsättning träningshyperparametrar, spara den nuvarande och kontrollera om körningen får plats på GPU:n innan du startar den.",
+      builtin: "Inbyggda",
+      builtinHint:
+        "Bara hyperparametrar ändras. Modellen och datamängden du redan valt ligger kvar.",
+      mine: "Sparade",
+      none: "Inga än.",
+      saveCurrent: "Spara nuvarande…",
+      namePlaceholder: "Namn på förinställning",
+      save: "Spara",
+      saved: "Förinställning sparad",
+      applied: "Förinställning använd",
+      delete: "Ta bort den här förinställningen",
+      fitTitle: "Kapacitetskontroll",
+      check: "Kontrollera den här körningen",
+      checking: "Kontrollerar…",
+      needModel: "Välj en modell innan du kontrollerar kapaciteten.",
+      checkFailed: "Kapacitetskontrollen kunde inte köras",
+      fitHint:
+        "Uppskattar vikter, optimerartillstånd, adaptertillstånd och aktiveringar från config.json. Det är en budget, inte ett löfte.",
+      required: "uppskattat behov",
+      budget: "av {gb} GB",
+      headroom: "{gb} GB marginal",
+      trainable: "träningsbara",
+      assumptions: "Så byggs uppskattningen",
+    },
     routeTitle: "Träna",
     wizard: {
       modelTitle: "Modell",

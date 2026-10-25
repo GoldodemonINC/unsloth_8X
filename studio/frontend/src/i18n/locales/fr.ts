@@ -3310,6 +3310,34 @@ export const fr = {
     },
   },
   studio: {
+    presets: {
+      title: "Préréglages et capacité",
+      description:
+        "Appliquez un jeu nommé d'hyperparamètres d'entraînement, enregistrez celui en cours et vérifiez si l'exécution tient sur le GPU avant de la lancer.",
+      builtin: "Intégré",
+      builtinHint:
+        "Seuls les hyperparamètres changent. Le modèle et le jeu de données déjà choisis restent.",
+      mine: "Enregistrés",
+      none: "Aucun pour l'instant.",
+      saveCurrent: "Enregistrer l'actuel…",
+      namePlaceholder: "Nom du préréglage",
+      save: "Enregistrer",
+      saved: "Préréglage enregistré",
+      applied: "Préréglage appliqué",
+      delete: "Supprimer ce préréglage",
+      fitTitle: "Vérification de capacité",
+      check: "Vérifier cette exécution",
+      checking: "Vérification…",
+      needModel: "Choisissez un modèle avant de vérifier la capacité.",
+      checkFailed: "La vérification de capacité n'a pas pu s'exécuter",
+      fitHint:
+        "Estime les poids, l'état de l'optimiseur, l'état de l'adaptateur et les activations depuis config.json. C'est un budget, pas une promesse.",
+      required: "besoin estimé",
+      budget: "sur {gb} Go",
+      headroom: "{gb} Go de marge",
+      trainable: "entraînable",
+      assumptions: "Comment l'estimation est construite",
+    },
     goToLibrary: "Aller à la Bibliothèque",
     routeTitle: "Entraîner",
     wizard: {

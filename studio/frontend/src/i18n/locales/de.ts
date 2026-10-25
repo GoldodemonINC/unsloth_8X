@@ -3307,6 +3307,34 @@ export const de = {
     },
   },
   studio: {
+    presets: {
+      title: "Voreinstellungen und Kapazität",
+      description:
+        "Wende einen benannten Satz Trainings-Hyperparameter an, speichere die aktuellen und prüfe vor dem Start, ob der Lauf auf die GPU passt.",
+      builtin: "Integriert",
+      builtinHint:
+        "Nur Hyperparameter ändern sich. Modell und Datensatz bleiben, wie du sie gewählt hast.",
+      mine: "Gespeichert",
+      none: "Noch keine.",
+      saveCurrent: "Aktuelle speichern…",
+      namePlaceholder: "Name der Voreinstellung",
+      save: "Speichern",
+      saved: "Voreinstellung gespeichert",
+      applied: "Voreinstellung angewendet",
+      delete: "Diese Voreinstellung löschen",
+      fitTitle: "Kapazitätsprüfung",
+      check: "Diesen Lauf prüfen",
+      checking: "Prüfe…",
+      needModel: "Wähle ein Modell, bevor du die Kapazität prüfst.",
+      checkFailed: "Die Kapazitätsprüfung konnte nicht laufen",
+      fitHint:
+        "Schätzt Gewichte, Optimiererzustand, Adapterzustand und Aktivierungen aus config.json. Das ist ein Budget, kein Versprechen.",
+      required: "geschätzter Bedarf",
+      budget: "von {gb} GB",
+      headroom: "{gb} GB Reserve",
+      trainable: "trainierbar",
+      assumptions: "Wie die Schätzung entsteht",
+    },
     goToLibrary: "Zur Bibliothek",
     routeTitle: "Trainieren",
     wizard: {

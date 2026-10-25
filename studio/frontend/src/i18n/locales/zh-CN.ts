@@ -3198,6 +3198,34 @@ export const zhCN = {
     },
   },
   studio: {
+    presets: {
+      title: "预设与容量",
+      description:
+        "应用一组具名的训练超参数，保存当前设置，并在开始前检查本次运行是否能放进 GPU。",
+      builtin: "内置",
+      builtinHint:
+        "只会改变超参数。已选好的模型和数据集保持不变。",
+      mine: "已保存",
+      none: "还没有。",
+      saveCurrent: "保存当前…",
+      namePlaceholder: "预设名称",
+      save: "保存",
+      saved: "预设已保存",
+      applied: "预设已应用",
+      delete: "删除此预设",
+      fitTitle: "容量检查",
+      check: "检查本次运行",
+      checking: "检查中…",
+      needModel: "请先选择模型，再检查容量。",
+      checkFailed: "无法运行容量检查",
+      fitHint:
+        "根据 config.json 估算权重、优化器状态、适配器状态和激活值。这是预算，不是承诺。",
+      required: "预计需求",
+      budget: "共 {gb} GB",
+      headroom: "余量 {gb} GB",
+      trainable: "可训练",
+      assumptions: "估算方式",
+    },
     goToLibrary: "前往资料库",
     routeTitle: "训练",
     wizard: {

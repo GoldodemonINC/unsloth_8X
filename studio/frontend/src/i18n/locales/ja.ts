@@ -3224,6 +3224,34 @@ export const ja = {
     },
   },
   studio: {
+    presets: {
+      title: "プリセットと容量",
+      description:
+        "名前付きの学習ハイパーパラメータを適用し、現在の設定を保存し、開始前に実行が GPU に収まるか確認します。",
+      builtin: "組み込み",
+      builtinHint:
+        "変わるのはハイパーパラメータだけです。選択済みのモデルとデータセットはそのまま残ります。",
+      mine: "保存済み",
+      none: "まだありません。",
+      saveCurrent: "現在の設定を保存…",
+      namePlaceholder: "プリセット名",
+      save: "保存",
+      saved: "プリセットを保存しました",
+      applied: "プリセットを適用しました",
+      delete: "このプリセットを削除",
+      fitTitle: "容量チェック",
+      check: "この実行を確認",
+      checking: "確認中…",
+      needModel: "容量を確認する前にモデルを選んでください。",
+      checkFailed: "容量チェックを実行できませんでした",
+      fitHint:
+        "config.json から重み、オプティマイザ状態、アダプタ状態、アクティベーションを見積もります。保証ではなく目安です。",
+      required: "推定必要量",
+      budget: "/ {gb} GB",
+      headroom: "余裕 {gb} GB",
+      trainable: "学習可能",
+      assumptions: "見積もりの算出方法",
+    },
     goToLibrary: "ライブラリへ移動",
     routeTitle: "トレーニング",
     wizard: {

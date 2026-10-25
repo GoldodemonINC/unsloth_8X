@@ -3247,6 +3247,34 @@ export const ko = {
     },
   },
   studio: {
+    presets: {
+      title: "프리셋과 용량",
+      description:
+        "이름이 붙은 학습 하이퍼파라미터 세트를 적용하고, 현재 설정을 저장하고, 시작하기 전에 실행이 GPU에 들어가는지 확인합니다.",
+      builtin: "기본 제공",
+      builtinHint:
+        "하이퍼파라미터만 바뀝니다. 이미 고른 모델과 데이터셋은 그대로 유지됩니다.",
+      mine: "저장됨",
+      none: "아직 없습니다.",
+      saveCurrent: "현재 설정 저장…",
+      namePlaceholder: "프리셋 이름",
+      save: "저장",
+      saved: "프리셋을 저장했습니다",
+      applied: "프리셋을 적용했습니다",
+      delete: "이 프리셋 삭제",
+      fitTitle: "용량 확인",
+      check: "이 실행 확인",
+      checking: "확인 중…",
+      needModel: "용량을 확인하기 전에 모델을 선택하세요.",
+      checkFailed: "용량 확인을 실행할 수 없습니다",
+      fitHint:
+        "config.json에서 가중치, 옵티마이저 상태, 어댑터 상태, 활성화를 추정합니다. 약속이 아니라 예산입니다.",
+      required: "예상 필요량",
+      budget: "/ {gb} GB",
+      headroom: "{gb} GB 여유",
+      trainable: "학습 가능",
+      assumptions: "추정 방식",
+    },
     goToLibrary: "라이브러리로 이동",
     routeTitle: "학습",
     wizard: {

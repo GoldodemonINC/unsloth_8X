@@ -3301,6 +3301,34 @@ export const es = {
     },
   },
   studio: {
+    presets: {
+      title: "Ajustes predefinidos y capacidad",
+      description:
+        "Aplica un conjunto con nombre de hiperparámetros de entrenamiento, guarda el actual y comprueba si la ejecución cabe en la GPU antes de iniciarla.",
+      builtin: "Integrado",
+      builtinHint:
+        "Solo cambian los hiperparámetros. El modelo y el conjunto de datos que ya elegiste se mantienen.",
+      mine: "Guardados",
+      none: "Todavía ninguno.",
+      saveCurrent: "Guardar el actual…",
+      namePlaceholder: "Nombre del ajuste",
+      save: "Guardar",
+      saved: "Ajuste guardado",
+      applied: "Ajuste aplicado",
+      delete: "Eliminar este ajuste",
+      fitTitle: "Comprobación de capacidad",
+      check: "Comprobar esta ejecución",
+      checking: "Comprobando…",
+      needModel: "Elige un modelo antes de comprobar la capacidad.",
+      checkFailed: "No se pudo ejecutar la comprobación de capacidad",
+      fitHint:
+        "Estima pesos, estado del optimizador, estado del adaptador y activaciones a partir de config.json. Es un presupuesto, no una promesa.",
+      required: "necesidad estimada",
+      budget: "de {gb} GB",
+      headroom: "{gb} GB de margen",
+      trainable: "entrenable",
+      assumptions: "Cómo se calcula la estimación",
+    },
     goToLibrary: "Ir a la Biblioteca",
     routeTitle: "Entrenar",
     wizard: {
