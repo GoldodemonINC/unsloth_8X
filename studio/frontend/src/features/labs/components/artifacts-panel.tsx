@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-// Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
+// SPDX-License-Identifier: NRC-1
+// Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-1.md
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
