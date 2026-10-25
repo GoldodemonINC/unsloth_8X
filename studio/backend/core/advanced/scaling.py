@@ -543,18 +543,30 @@ def run(
     target_params: float,
     method: str = "depth",
     insert_strategy: str = "even",
+    force_small_growth: bool = False,
     token: Optional[str] = None,
     progress: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
-    """Expand ``source`` to ``target_params`` and save a verified checkpoint in ``output_dir``."""
+    """Expand ``source`` to ``target_params`` and save a verified checkpoint in ``output_dir``.
+
+    ``force_small_growth`` is the same opt-in the engine exposes: a CMT run adds
+    capacity sized by its datasets, which is routinely below the 2x research
+    floor. The run records that it bypassed the floor instead of pretending the
+    target was in the evidenced range.
+    """
 
     def stage(name: str, message: str, **extra: Any) -> None:
         if progress is not None:
             progress({"stage": name, "message": message, **extra})
 
     report = plan(source, target_params = target_params, method = method, token = token)
-    if not report["runnable"]:
+    if report["blocked"] or (not report["runnable"] and not force_small_growth):
         raise ValueError(report["blocked_reason"] or "This checkpoint cannot be expanded.")
+    if report["target_below_floor"] and force_small_growth:
+        report.setdefault("notes", []).append(
+            f"Growth is {float(report['target_params']) / max(1, report['base_params']):.2f}x, "
+            "below the evidenced 2x floor; this run opted in deliberately."
+        )
 
     stage("resolving", "Resolving the checkpoint...")
     local = merge.resolve_checkpoint_source(source, token = token)
@@ -581,6 +593,7 @@ def run(
         target_params = float(target_params),
         method = method,
         insert_strategy = insert_strategy,
+        force_small_growth = force_small_growth,
     )
 
     stage("verifying", "Checking the expanded model still computes the base function...")

@@ -1314,6 +1314,8 @@ def cpt_train(
     learning_rate: float = 2e-4,
     new_layer_lr_multiplier: float = 3.0,
     use_lora: bool = True,
+    train_new_layers_only: bool = False,
+    save_final: bool = False,
     lora_rank: int = 16,
     lora_alpha: int = 32,
     lora_dropout: float = 0.0,
@@ -1396,6 +1398,21 @@ def cpt_train(
         )
         if gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
+    elif train_new_layers_only:
+        # CMT's mode: the inherited weights already do the base model's job, so
+        # only the blocks expansion inserted are trained. The freeze is explicit
+        # per parameter (not just the top module) because embeddings and the lm
+        # head sit outside every block and must stay frozen too.
+        if not indices:
+            raise ValueError(
+                "train_new_layers_only needs the inserted blocks; expand the model "
+                "with a depth method first, or pass new_layer_indices."
+            )
+        model.requires_grad_(False)
+        for name, parameter in model.named_parameters():
+            index = _layer_index_from_name(name)
+            if index is not None and index in indices:
+                parameter.requires_grad_(True)
     else:
         model.requires_grad_(True)
 
@@ -1506,8 +1523,21 @@ def cpt_train(
     if best_scores is None and callback.history:
         best_scores = callback.history[-1]["scores"]
 
+    final_dir: Optional[Path] = None
+    if save_final:
+        # The recovery callback only keeps a checkpoint when the eval mean
+        # improves. A caller with no meaningful suite (CMT evaluates per
+        # dataset outside the callback's mean) would otherwise get the step-0
+        # weights back. Saving the trained model is the only honest answer.
+        final_dir = run_dir / "final"
+        final_dir.mkdir(parents = True, exist_ok = True)
+        trainer.model.save_pretrained(str(final_dir))
+        if tokenizer is not None:
+            tokenizer.save_pretrained(str(final_dir))
+
     return {
         "best_checkpoint": str(best_dir) if best_dir.exists() else None,
+        "final_checkpoint": str(final_dir) if final_dir is not None else None,
         "recovery_step": callback.recovery_step,
         "base_scores": anchor,
         "base_scores_source": anchor_source,

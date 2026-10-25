@@ -54,6 +54,13 @@ _COST_MODEL: dict[str, dict[str, Any]] = {
     # Benchmark harness loads one full model on the GPU.
     "eval": {"vram": 1.25, "ram": 0.35, "disk": 0.05, "gpu": True},
     "qat": {"vram": 1.30, "ram": 0.30, "disk": 0.10, "gpu": True},
+    # CMT holds the expanded model, freezes the inherited weights, and trains
+    # only the inserted blocks. The optimizer state is small, but the model,
+    # activations and the saved expanded copy are not.
+    "cmt": {"vram": 3.00, "ram": 1.50, "disk": 2.50, "gpu": True},
+    # Auto-scale expands a checkpoint and saves it, with no training after it:
+    # the same growth as CMT without the optimizer or the activations.
+    "autoscale": {"vram": 3.00, "ram": 1.00, "disk": 1.50, "gpu": True},
 }
 
 
