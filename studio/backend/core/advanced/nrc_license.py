@@ -1,7 +1,7 @@
-# SPDX-License-Identifier: NRC-1
-# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-1.md
+# SPDX-License-Identifier: NRC-2
+# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
-"""The NRC-1 notice that travels with a produced checkpoint.
+"""The NRC-2 notice that travels with a produced checkpoint.
 
 A finished merge or expansion is a folder that leaves this machine, and by then
 nothing in it says what the terms are. ``run_manifest.json`` already records the
@@ -19,16 +19,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-LICENSE_NAME = "NRC-1"
-LICENSE_VERSION = "1.0"
+LICENSE_NAME = "NRC-2"
+LICENSE_VERSION = "2.0"
 LICENSE_TITLE = "Non-Rebranding Commons"
-LICENSE_FILE = "LICENSE-NRC-1.txt"
-LICENSE_DOCUMENT = "LICENSE-NRC-1.md"
+LICENSE_FILE = "LICENSE-NRC-2.txt"
+LICENSE_DOCUMENT = "LICENSE-NRC-2.md"
 
-NOTICE_TEXT = """NRC-1 License 1.0 (Non-Rebranding Commons)
+NOTICE_TEXT = """NRC-2 License 2.0 (Non-Rebranding Commons)
 X8 / Unsloth Studio
 
-This folder was produced by X8. The NRC-1 terms cover the X8 original
+This folder was produced by X8. The NRC-2 terms cover the X8 original
 additions and this run record. Weights, tokenizers and datasets inherited from
 a source checkpoint or dataset keep that source's license; nothing here
 relicenses them.
@@ -45,9 +45,11 @@ You may not, without written permission:
   - present a rebranded copy as your own product under a different name, logo
     or separate interface;
   - redistribute it to the public at scale from a company, whether through a
-    package registry, an app store, a hosted service or a shipped product.
+    package registry, an app store, a hosted service or a shipped product;
+  - stack more than three licenses onto a public distribution of it. This
+    license counts as one of the three, so a fourth needs permission.
 
-The full terms are in LICENSE-NRC-1.md at the project root. This notice is a
+The full terms are in LICENSE-NRC-2.md at the project root. This notice is a
 summary; where the two differ, the document governs.
 """
 
