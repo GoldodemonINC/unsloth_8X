@@ -56,6 +56,7 @@ def test_default_target_is_ten_percent_above_the_base(tmp_path):
     plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)))
 
     assert plan["growth_floor"] == 1.0
+    assert plan["direction"] == "grow"
     assert plan["default_target_params"] > plan["base_params"]
     assert plan["runnable"] is True
     assert plan["refusals"] == []
@@ -103,6 +104,7 @@ def test_growth_below_two_x_plans_normally(tmp_path):
     source = str(_checkpoint(tmp_path, SMOLLM2_135M))
     plan = scaling.plan(source, target_params=170_000_000)
 
+    assert plan["direction"] == "grow"
     assert plan["runnable"] is True
     assert plan["blocked"] is False
     assert "below_floor" not in [item["code"] for item in plan["refusals"]]
@@ -115,6 +117,58 @@ def test_a_target_at_the_base_is_refused_as_no_growth(tmp_path):
     assert plan["runnable"] is False
     assert plan["blocked"] is False
     assert "no_growth" in [item["code"] for item in plan["refusals"]]
+
+
+def test_a_target_below_the_base_plans_a_shrink(tmp_path):
+    plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)), target_params=110_000_000)
+
+    assert plan["direction"] == "shrink"
+    assert plan["runnable"] is True
+    assert plan["shrink_floor"] == 0.5
+    projection = plan["projection"]
+    assert 1 <= projection["removed_layers"] <= projection["max_removable_layers"]
+    assert projection["new_num_layers"] == (
+        SMOLLM2_135M["num_hidden_layers"] - projection["removed_layers"]
+    )
+    assert 0 < projection["shrink_factor"] < 1
+    assert projection["projected_params"] < plan["base_params"]
+    assert plan["min_params"] < plan["target_params"] < plan["max_params"]
+
+
+def test_shrinking_past_half_the_depth_is_refused(tmp_path):
+    plan = scaling.plan(
+        str(_checkpoint(tmp_path, SMOLLM2_135M)), target_params=20_000_000
+    )
+
+    assert plan["direction"] == "shrink"
+    assert plan["runnable"] is False
+    assert "below_shrink_floor" in [item["code"] for item in plan["refusals"]]
+
+
+def test_shrinking_only_supports_depth(tmp_path):
+    with pytest.raises(ValueError):
+        scaling.plan(
+            str(_checkpoint(tmp_path, SMOLLM2_135M)),
+            target_params=110_000_000,
+            method="mlp_width",
+        )
+
+
+@pytest.mark.parametrize(
+    ("config", "code"),
+    [
+        ({**SMOLLM2_135M, "quantization_config": {"quant_method": "bitsandbytes"}}, "quantized"),
+        ({**SMOLLM2_135M, "num_experts": 8}, "moe"),
+        ({**SMOLLM2_135M, "model_type": "mamba"}, "unsupported_family"),
+    ],
+)
+def test_refusals_are_reported_before_the_run(tmp_path, config, code):
+    plan = scaling.plan(str(_checkpoint(tmp_path, config)))
+
+    assert plan["blocked"] is True
+    assert plan["runnable"] is False
+    assert code in [refusal["code"] for refusal in plan["refusals"]]
+    assert plan["blocked_reason"]
 
 
 def test_an_adapter_directory_is_refused(tmp_path):
@@ -167,5 +221,6 @@ def test_supported_families_match_the_engine():
     assert scaling.SUPPORTED_MODEL_TYPES == engine._SUPPORTED_MODEL_TYPES
     assert tuple(scaling.MOE_CONFIG_KEYS) == tuple(engine._MOE_CONFIG_KEYS)
     assert scaling.GROWTH_FLOOR == engine.GROWTH_FLOOR
+    assert scaling.SHRINK_FLOOR == engine.SHRINK_FLOOR
     assert set(scaling.METHODS) == set(engine._METHODS)
     assert scaling.WIDTH_ALIGNMENT == engine._WIDTH_ALIGNMENT
