@@ -48,8 +48,8 @@ def test_plan_endpoint_returns_the_slider_range(client, tmp_path):
     body = response.json()
     assert body["min_params"] == body["base_params"]
     assert body["max_params"] == body["base_params"] + body["cap_added_params"]
-    assert body["floor_params"] == 2 * body["base_params"]
-    assert body["default_target_params"] == body["floor_params"]
+    assert body["floor_params"] == body["base_params"]
+    assert body["default_target_params"] > body["base_params"]
     assert body["runnable"] is True
     assert body["methods"][0]["id"] == "depth"
 
@@ -80,21 +80,23 @@ def test_capabilities_advertise_the_scaler(client):
     assert response.status_code == 200
     scaler = response.json()["scaler"]
     assert scaler["cap_added_params"] == 3_000_000_000
-    assert scaler["growth_floor"] == 2.0
-    assert {"depth", "mlp_width", "depth+mlp_width"} == {item["id"] for item in scaler["methods"]}
+    assert scaler["growth_floor"] == 1.0
+    assert {"depth", "mlp_width", "depth+mlp_width"} == {
+        item["id"] for item in scaler["methods"]
+    }
 
 
-def test_a_below_floor_run_is_refused_before_a_job_starts(client, tmp_path):
-    source = _checkpoint(tmp_path, CONFIG)
+def test_a_no_growth_run_is_refused_before_a_job_starts(client, tmp_path):
+    """A target equal to the base adds nothing, so the run endpoint never starts a job."""
     response = client.post(
         "/api/advanced/scale/run",
         json = {
-            "source": source,
-            "target_params": 150_000_000,
+            "source": _checkpoint(tmp_path, CONFIG),
+            "added_params": 0,
             "method": "depth",
             "output_dir": str(tmp_path / "out"),
         },
     )
 
     assert response.status_code == 400
-    assert "2x" in response.json()["detail"]
+    assert "not larger" in response.json()["detail"]

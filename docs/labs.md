@@ -75,8 +75,9 @@ Two limits are honest, not bugs:
 
 * The engine inserts whole blocks. If the requested growth is smaller than one
   block, the plan reports the block's size as the real growth.
-* A growth below the Scaler's 2x floor is deliberately forced here. The manifest
-  records `floor_bypassed: true`; no other stage gets that flag.
+* These additions are routinely below the 2x range where growth gains have been
+  measured. That is allowed by the Scaler now, but the manifest still records
+  `floor_bypassed: true` so the run is marked as outside the evidenced range.
 
 CMT v1 reads local `.jsonl`, `.json`, `.parquet`, `.csv` and `.txt` files. It
 does not download Hub datasets during planning.
@@ -121,7 +122,7 @@ permanent. The card makes the growth a step the user can see and keep.
 
 The planner prices a chain from `config.json` arithmetic only: parameter
 projections, fp16 bytes, the bytes each GGUF level writes, and the refusals the
-engines already enforce (growth floor, cap, tokenizer mismatch, quantize
+engines already enforce (growth policy, cap, tokenizer mismatch, quantize
 ordering). It never loads weights.
 
 Executing the chain needs durability the job layer does not have yet — jobs live
