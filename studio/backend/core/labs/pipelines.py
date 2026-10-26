@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: NRC-1
-# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-1.md
+# SPDX-License-Identifier: NRC-2
+# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
 """Pipelines: plan a chain of stages, and say what it will cost before it runs.
 
