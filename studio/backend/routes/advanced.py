@@ -188,10 +188,11 @@ class SplitRunRequest(SplitPlanRequest):
 
 
 class ScalePlanRequest(BaseModel):
-    """A checkpoint to grow, and how far. Planning reads config.json only.
+    """A checkpoint to grow or shrink, and how far. Planning reads config.json only.
 
-    ``added_params`` is what the slider sets (0 to 3B); ``target_params`` is the
-    absolute size, for callers that think in totals.
+    ``added_params`` is what the growth slider sets; ``target_params`` is the absolute
+    size, for callers that think in totals and for shrinking (where a target below the
+    base is the whole request).
     """
     source: str = Field(..., min_length = 1)
     target_params: Optional[float] = Field(None, gt = 0, description = "Absolute parameter count")
@@ -199,12 +200,16 @@ class ScalePlanRequest(BaseModel):
         None, ge = 0, description = "Parameters to add, on top of the checkpoint's own count"
     )
     method: Literal["depth", "mlp_width", "depth+mlp_width"] = "depth"
+    direction: Optional[Literal["grow", "shrink"]] = Field(
+        None, description = "Inferred from the target when omitted"
+    )
     hf_token: Optional[str] = None
 
 
 class ScaleRunRequest(ScalePlanRequest):
     output_dir: Optional[str] = None
     insert_strategy: Literal["even", "middle", "tail"] = "even"
+    drop_strategy: Literal["importance", "even", "tail"] = "importance"
 
 
 class EvalPlanRequest(BaseModel):
@@ -567,8 +572,13 @@ def capabilities() -> dict[str, Any]:
         "scaler": {
             "cap_added_params": scaling.CAP_ADDED_PARAMS,
             "growth_floor": scaling.GROWTH_FLOOR,
+            "shrink_floor": scaling.SHRINK_FLOOR,
             "methods": [
                 {"id": key, "label": scaling.METHOD_LABELS[key]} for key in scaling.METHODS
+            ],
+            "shrink_methods": [
+                {"id": key, "label": scaling.SHRINK_METHOD_LABELS[key]}
+                for key in scaling.SHRINK_METHODS
             ],
             "engine_available": scaling.engine_available()[0],
         },
@@ -1191,11 +1201,16 @@ def split_run(request: SplitRunRequest) -> dict[str, Any]:
 
 
 def _scale_default_name(planned: dict[str, Any]) -> str:
-    """``SmolLM2-135M-x2.10``: the base name plus the growth the plan asked for."""
+    """``SmolLM2-135M-x2.10``: the base name plus the factor the plan asked for."""
     label = str(planned.get("source") or "").replace("hf://", "")
     name = Path(label.rstrip("/\\")).name or "model"
-    growth = float((planned.get("projection") or {}).get("growth_factor") or 1.0)
-    return f"{name[:110]}-x{growth:.2f}"
+    projection = planned.get("projection") or {}
+    factor = float(
+        projection.get("growth_factor")
+        or projection.get("shrink_factor")
+        or 1.0
+    )
+    return f"{name[:110]}-x{factor:.2f}"
 
 
 @router.post("/scale/plan")
@@ -1210,6 +1225,7 @@ def scale_plan(request: ScalePlanRequest) -> dict[str, Any]:
             target_params = request.target_params,
             added_params = request.added_params,
             method = request.method,
+            direction = request.direction,
             token = request.hf_token,
         )
     except ValueError as error:
@@ -1226,6 +1242,7 @@ def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
             target_params = request.target_params,
             added_params = request.added_params,
             method = request.method,
+            direction = request.direction,
             token = request.hf_token,
         )
     except ValueError as error:
@@ -1247,24 +1264,33 @@ def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
             target_params = target,
             method = request.method,
             insert_strategy = request.insert_strategy,
+            drop_strategy = request.drop_strategy,
             token = request.hf_token,
             progress = report,
         )
+        shrinking = planned.get("direction") == "shrink"
         result["run_manifest"] = _stage_manifest(
-            "scale",
+            "shrink" if shrinking else "scale",
             str(output),
             config = {
+                "direction": "shrink" if shrinking else "grow",
                 "method": request.method,
-                "insert_strategy": request.insert_strategy,
+                **(
+                    {"drop_strategy": request.drop_strategy}
+                    if shrinking
+                    else {"insert_strategy": request.insert_strategy}
+                ),
                 "target_params": target,
                 "base_params": planned["base_params"],
                 "growth_floor": planned["growth_floor"],
+                **({"shrink_floor": planned["shrink_floor"]} if shrinking else {}),
             },
             inputs = {"source": run_manifest.checkpoint_digest(request.source)},
             artifacts = {
                 "output_dir": str(output),
                 "final_params": result.get("final_params"),
-                "growth_factor": result.get("growth_factor"),
+                "factor": result.get("growth_factor"),
+                "removed_layers": result.get("removed_layers"),
                 "verified": result.get("verified"),
             },
         )
