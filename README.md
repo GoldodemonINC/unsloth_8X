@@ -1,528 +1,157 @@
-<h1 align="center" style="margin:0;">
-  <a href="https://unsloth.ai/docs"><picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/unslothai/unsloth/main/images/unsloth%20logo%20white%20text.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/unslothai/unsloth/main/images/unsloth%20logo%20black%20text.png">
-    <img alt="Unsloth logo" src="https://raw.githubusercontent.com/unslothai/unsloth/main/images/unsloth%20logo%20black%20text.png" height="80" style="max-width:100%;">
-  </picture></a>
-</h1>
-<h3 align="center" style="margin: 0; margin-top: 0;">
-Unsloth is the first desktop app to run and train models.
-</h3>
+# Unsloth X8
 
-<p align="center">
-  <a href="#-features">Features</a> •
-  <a href="#-get-started">Quickstart</a> •
-  <a href="#-free-notebooks">Notebooks</a> •
-  <a href="https://unsloth.ai/docs">Documentation</a>
-</p>
+A fork of [Unsloth](https://github.com/unslothai/unsloth) that keeps the training stack and pushes on the Studio: the Scaler can grow **or** shrink a checkpoint, and Labs is a set of working engines rather than a preview.
 
-<p align="center">
-  <a href="https://unsloth.ai/docs/desktop">
-    <img height="400" alt="unsloth desktop" src="https://unsloth.ai/cgi/image/unsloth_qwen3.8_final_ut2eqWnYJ-SLmu0s7x522.png?format=raw" />
-  </a>
-</p>
+The upstream project is the fastest way to fine-tune open models on one GPU. This fork keeps that and adds a layer for the work that comes *around* a run — sizing it, scaling the model first, chaining stages, scoring the result, and knowing what a produced folder is allowed to do next.
 
-## ⚡ Get started
-Download the native Unsloth Desktop app for your operating system:
-<table>
-  <tr>
-    <td><b>Platform</b></td>
-    <td><b>Link</b></td>
-  </tr>
-  <tr>
-    <td><b>Windows</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Windows.exe'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>macOS</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-MacOS.dmg'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux / Ubuntu (deb)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Ubuntu.deb'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux / Ubuntu (ARM64) (deb)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Ubuntu-ARM64.deb'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux (AppImage)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Linux.AppImage'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Windows (ARM64)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Windows-ARM64.exe'>Download</a></td>
-  </tr>
-</table>
-
-Download from [Unsloth](https://unsloth.ai/download) or [GitHub Releases](https://github.com/unslothai/unsloth/releases).
-
-Or if you prefer to install manually:
-
-#### macOS, Linux, WSL:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | sh
-```
-
-#### Windows:
-```powershell
-irm https://unsloth.ai/install.ps1 | iex
-```
-#### Docker:
-
-The [Unsloth Docker image](https://hub.docker.com/r/unsloth/unsloth) `unsloth/unsloth` is available on Docker. [Read guide.](https://unsloth.ai/docs/get-started/install/docker)
-
-#### Homebrew:
-```bash
-brew install --cask unsloth
-```
-
-#### Winget (Windows):
-```powershell
-winget install --id UnslothAI.Unsloth -e
-```
-
-#### Community:
-
-- [Discord](https://discord.gg/unsloth)
-- [𝕏 (Twitter)](https://x.com/UnslothAI)
-- [Reddit](https://reddit.com/r/unsloth)
-
-## ⭐ Features
-Unsloth works on **Windows, Linux, WSL** and **macOS**. We support **Multi GPU setups, NVIDIA, AMD, Intel GPUs, CPUs** and the **Vulkan** backend.
-
-### Run & Build with AI
-* Run and train LLMs, MLX, GGUF, diffusion, decision, embedding, audio models: [Qwen3.8](https://unsloth.ai/docs/models/qwen3.8), [GLM-5.3-Flash](https://unsloth.ai/docs/models/glm-5.3-flash), [Kimi K3](https://unsloth.ai/docs/models/kimi-k3), [Qwen-Image-2.1](https://unsloth.ai/docs/models/qwen-image-2.1), MiniMax-H3, [DeepSeek-V4](https://unsloth.ai/docs/models/deepseek-v4), [Gemma 4](https://unsloth.ai/docs/models/gemma-4).
-* **Agents & Tools:** Use local models with [Claude Code](https://unsloth.ai/docs/basics/claude-code), [Codex](https://unsloth.ai/docs/basics/codex), and [MCP](https://unsloth.ai/docs/basics/mcp), including tool calling and code execution.
-* **Search & RAG:** Use private and unlimited web search, deep research, auto-compaction (rolling context window) and RAG.
-* **Image and video:** Run and train [image](https://unsloth.ai/docs/basics/diffusion-image) and video diffusion or multimodal models
-* **Remote & LAN:** Access your local models from any device on [LAN](https://unsloth.ai/docs/basics/lan) or remotely through secure [Cloudflare](https://unsloth.ai/docs/basics/how-to-serve-local-llms-anywhere-secure-remote-access-with-cloudflare-and-unsloth) HTTPS.
-* **Connect:** Serve models through an [OpenAI compatible API](https://unsloth.ai/docs/basics/api). Also connect your ChatGPT/Codex subscription and [cloud providers](https://unsloth.ai/docs/integrations/connections)
-
-
-### Train & Deploy
-* **Fine-tuning:** Train LLMs, diffusion, decision, TTS, and embedding models 2× faster with 70% less VRAM with [no accuracy loss](https://unsloth.ai/blog#training)
-* **Complete support:** Supports [reinforcement learning](https://unsloth.ai/docs/get-started/reinforcement-learning-rl-guide), LoRA, QLoRA, full fine tuning, pretraining, RL, GRPO, DPO, and FP8.
-* **Export & Deploy:** [Export](https://unsloth.ai/docs/new/studio/export) or Deploy models including [GGUF](https://unsloth.ai/docs/basics/inference-and-deployment/saving-to-gguf), NVFP4, FP8 and more formats.
-* **Datasets:** Build datasets from PDFs, CSVs, DOCX files, and more with [Data Recipes](https://unsloth.ai/docs/new/studio/data-recipe).
-* **Debugging:** Settings → Debugging → *Simulated training* drives the whole training flow against a fake trainer on any machine, no GPU or dataset needed — see [docs/simulated-training.md](docs/simulated-training.md).
-
-### Platform scope
-Unsloth Studio is one sidebar over several studios — **Training**, **Merge**, **Scaler**, **Export** — plus the media workspaces (**Images**, **Video**, **Audio**), **Data Recipes**, and the **API** monitor, with a run layer underneath them (jobs, resource arbitration, run manifests). Merging, scaling, MMoE and export are engines inside those studios, not separate headlines.
-
-**CPU is not recommended — use it only if you have no GPU.** On CPU (8 GB+ available RAM) you get **basic merge, slow training, and all recipes**. **A GPU is recommended (8 GB+ VRAM) and gets all features.** Colab covers MMoE and small training runs.
-
-CPU training is limited to the CoRA / QLoRA LoRA recipes on text models: the base loads in fp32 with torch's AdamW, 4-bit and bitsandbytes optimizers are dropped, and runs are far slower than on a GPU. Full fine-tuning, RL, QAT, MMoE and benchmarks still need an accelerator. CPU export covers 16-bit merged models, PEFT adapters and GGUF; 4-bit and compressed-tensor / torchao merges need a GPU.
-
-A CPU merge is **streaming only**: it holds one tensor pair in memory instead of both parents, which is what makes the 8 GB tier real. A full-load merge would not fit and is not offered. The result is written into the folder the Library, Export and Chat scan, so a CPU merge feeds straight into GGUF quantization.
-
-Every stage writes a `run_manifest.json` beside its output — versions, seeds, dataset identity, the layer-LR zone definition, the blend schedule and any policy override — so a model can be reproduced from its folder alone.
-
-## 📚 Repository docs
-These describe this checkout rather than the hosted documentation:
-
-- [docs/README.md](docs/README.md) — what lives where, the surfaces of the Studio, and the checks to run before a change lands.
-- [docs/simulated-training.md](docs/simulated-training.md) — the Debugging simulator: what it bypasses and what it still refuses.
-- [docs/labs.md](docs/labs.md) — the Labs switch, its experiment registry, and the Artifacts and Pipelines studios.
-- [docs/theming.md](docs/theming.md) — palettes, the `#9ceaf0` accent, and the greens that stay greens.
-
-  
-## 🚀 Unsloth Start
-
-[Unsloth Start](https://unsloth.ai/docs/integrations/unsloth-start) connects [Claude Code](https://unsloth.ai/docs/basics/claude-code), [Codex](https://unsloth.ai/docs/basics/codex) and other agents to local models with one command.
-
-```bash
-unsloth start claude --model unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL
-```
-
-| Agent | Command |
-| --- | --- |
-| Claude Code | `unsloth start claude` |
-| OpenAI Codex | `unsloth start codex` |
-| Visual Studio Code | `unsloth start vscode` |
-| DeepSeek Harness | `unsloth start dsh` |
-| OpenCode | `unsloth start opencode` |
-| Hermes Agent | `unsloth start hermes` |
-| Pi | `unsloth start pi` |
-| OpenClaw | `unsloth start openclaw` |
-
-## 📥 Install
-Unsloth can be used in three ways: **[Unsloth Desktop](https://unsloth.ai/download)**, the desktop app; **[Unsloth Studio](https://unsloth.ai/docs/new/studio/)**, the web UI; or **Unsloth Core**, the code based version.
-
-### Unsloth Desktop (recommended)
-
-<table>
-  <tr>
-    <td><b>Platform</b></td>
-    <td><b>Link</b></td>
-  </tr>
-  <tr>
-    <td><b>Windows</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Windows.exe'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>macOS</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-MacOS.dmg'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux / Ubuntu (deb)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Ubuntu.deb'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux / Ubuntu (ARM64) (deb)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Ubuntu-ARM64.deb'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Linux (AppImage)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Linux.AppImage'>Download</a></td>
-  </tr>
-  <tr>
-    <td><b>Windows (ARM64)</b></td>
-    <td><a href='https://github.com/unslothai/unsloth/releases/latest/download/Unsloth-Desktop-Windows-ARM64.exe'>Download</a></td>
-  </tr>
-</table>
-
-### Unsloth Studio (web UI)
-
-#### macOS, Linux, WSL:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | sh
-```
-
-#### Windows:
-```powershell
-irm https://unsloth.ai/install.ps1 | iex
-```
-
-#### Homebrew:
-```bash
-brew install --cask unsloth
-```
-
-#### Docker
-Use our [Docker image](https://hub.docker.com/r/unsloth/unsloth) ```unsloth/unsloth```. On Linux and Mac, set up GPU access once with
-```bash
-curl -fsSL https://raw.githubusercontent.com/unslothai/unsloth/main/docker/install_nvidia_toolkit.sh -o install_nvidia_toolkit.sh && sudo -E bash install_nvidia_toolkit.sh
-```
-For Windows instructions and more information, read our [Unsloth Docker Guide](https://unsloth.ai/docs/get-started/install/docker).
-
-**Linux / WSL (Bash):**
-```bash
-# for a public Cloudflare HTTPS link: use  -e UNSLOTH_STUDIO_SECURE=1  instead of -p 8000:8000, and  -p 127.0.0.1:8888:8888  instead of -p 8888:8888
-docker run -d --name unsloth --gpus all --ipc=host \
-  -p 8000:8000 -p 8888:8888 \
-  -v "$PWD":/workspace/host \
-  -v unsloth-workspace:/workspace \
-  -v "$HOME/.cache/huggingface":/workspace/.cache/huggingface \
-  -v unsloth-studio:/opt/unsloth-studio \
-  unsloth/unsloth && docker logs -f unsloth
-```
-See [Docker docs](https://unsloth.ai/docs/get-started/install/docker) for more information. For notebooks only, use the `unsloth/unsloth:core` tag; all tags and options are on [Docker Hub](https://hub.docker.com/r/unsloth/unsloth).<br>For **AMD** there is a separate image: [`unsloth/unsloth-rocm`](https://hub.docker.com/r/unsloth/unsloth-rocm).
+> **Branch:** `x8-main` is the branch this fork is developed on. `main` mirrors the imported upstream tree.
 
 ---
 
-#### Launch
+## What this fork adds
+
+| Area | What it does |
+| --- | --- |
+| **Scaler, growth** | Any target above the base is allowed — 1.11x and 1.26x included, not just 2x. Ceiling stays base + 3B. Below 2x the plan says the gain is unmeasured instead of refusing. |
+| **Scaler, shrinking** | Drops whole transformer blocks to land near a smaller target (a 28-block 1.7B loses ~50M per block, so five or six blocks is ~1.4B). Influence-ranked, edges protected, at least half the depth kept. |
+| **Fit check** | Sizes a run from the card before anything starts, so an out-of-memory job is caught at plan time. |
+| **Labs engines** | CMT, Scale-before-training, Benchmarks, Artifacts, Pipelines and Cleanup — each backed by tests, behind a single switch. |
+| **Run records** | Every merge, scale, CMT and pipeline output writes `run_manifest.json` and a copy of the license notice beside the checkpoint. |
+| **Licensing** | Additions original to this fork are under [NRC-1](LICENSE-NRC-1.md); inherited code keeps its upstream license. |
+
+### The two Scaler directions
+
+**Grow** inserts blocks, widens the feed-forward, or both. Depth growth is bit-exact at step 0 — the new block contributes exactly zero until training unlocks it — so the checkpoint computes the base function while it waits for continued pretraining. Width growth is within ~1e-5 of the base logits, not bit-exact, because float32 re-associates the widened sum.
+
+**Shrink** removes blocks. That cannot be function-preserving: a removed block is a removed residual contribution. The run reports the drift it measured against the base and hands you a checkpoint that needs a recovery pass. It is the right tool when you have a fine-tune whose behaviour you want at a smaller shape; if you only need training to fit in less VRAM, QLoRA or a smaller base checkpoint is less work. Shrinking is depth-only on purpose — trimming MLP width would reshape every projection with no way to keep the block's function.
+
+Both directions plan from `config.json` alone, so the slider answers before any weights load.
+
+---
+
+## Run it
+
+### Colab (free T4)
+
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_X8_Colab.ipynb)
+
+The notebook clones `x8-main`, installs this checkout editable over any PyPI wheel, verifies the import came from the checkout, and serves the UI through Colab's port proxy.
+
+### Local
+
 ```bash
-unsloth studio
+git clone -b x8-main https://github.com/GoldodemonINC/unsloth_8X.git
+cd unsloth_8X
+
+bash studio/setup.sh --local     # installs this checkout editable, plus prebuilt engines
+unsloth studio -p 8888           # http://127.0.0.1:8888
 ```
 
-#### HTTP Secure Deployment
+`setup.sh --local` is what makes the fork's own code win over a published `unsloth` wheel; run it from the checkout, not from a copied folder. Set `UNSLOTH_SKIP_WHISPER_INSTALL=1` and `UNSLOTH_SKIP_AUDIO_CPP_INSTALL=1` to skip the speech/audio engines when you only need training and merging — that is what the Colab notebook does.
+
+### Development loop
+
+Two terminals, backend first:
+
 ```bash
-unsloth studio --secure
+python studio/backend/run.py --port 8888
 ```
 
-#### Remote HTTPS & LAN Access
-Server-side tools are on by default - so **be careful**! Keep your password safe, or use `--disable-tools` when exposing Unsloth.
-
-**Global HTTPS Access**:
-Creates a free Cloudflare link that serves Unsloth - you can access the link globally (even on your phone!)
 ```bash
-unsloth studio --secure
+cd studio/frontend
+npm install
+npm run dev        # http://127.0.0.1:5173, proxies /api to 127.0.0.1:8888
 ```
-`-H 0.0.0.0` and different ports also work:
+
+The desktop shell (`studio/src-tauri/`) wraps the same UI; the Vite dev server and the desktop app talk to the same backend.
+
+---
+
+## What is in here
+
+| Path | What it is |
+| --- | --- |
+| `unsloth/` | Unsloth Core: PEFT/LoRA kernels, model loaders, patchers, `models/scaling.py` (grow + shrink) |
+| `studio/backend/` | FastAPI server: training worker, merges, Scaler, splitter, export, Labs routes, hardware probe |
+| `studio/frontend/` | React + Vite + Tailwind UI, TypeScript, node's own test runner |
+| `studio/src-tauri/` | Desktop shell hosting the Studio UI |
+| `studio/backend/core/labs/` | The Labs engines: CMT, auto-scale, benchmarks, artifacts, pipelines |
+| `studio/backend/core/advanced/` | Merge, MoE, splitter, Scaler, eval harness, run manifests |
+| `install.sh`, `studio/setup.sh` | Installers: pin the Python stack and prebuilt inference engines |
+| `docs/` | Repository docs (see below) |
+
+### Studio surfaces
+
+The sidebar is the map of the app; rows are gated on the measured hardware verdict.
+
+- **Chat, Projects, Library, Model hub** — run and organize models.
+- **Images, Video, Audio** — media workspaces.
+- **Train** — the wizard: method picker, datasets, fit check, advanced/Scaler section, run preview.
+- **Merge** — CPU streaming merge or GPU full-load merge, two to six parents.
+- **Scaler** — grow or shrink a checkpoint before training it.
+- **Recipes** — Data Recipes for building datasets.
+- **Export** — merged, adapter, GGUF and quantized export.
+- **Labs** — hidden until Settings → Labs is on. Artifacts, Pipelines, Benchmarks, CMT, Scale-before-training, Run manifest, Cleanup.
+- **API** — the OpenAI-compatible server and request monitor.
+
+Merging, scaling and export are engines under the run layer (jobs, resource arbitration, `run_manifest.json`), not separate applications.
+
+---
+
+## Checks
+
+From `studio/frontend/`:
+
 ```bash
-unsloth studio -H 0.0.0.0 -p 8888
+npm run typecheck    # tsc over src and tests
+npm test             # node --test over tests/**/*.test.ts
+npm run i18n:check   # locale overlay parity
+npm run biome:check  # lint + format
 ```
-**LAN Access (home network)**: `Settings > API keys > LAN access`
 
-#### Password management & headless starts
-Exposing Unsloth (`--secure`, `--cloudflare`, or a non-loopback `-H`) asks once at the terminal for a new admin password. Ctrl+C there aborts the launch rather than exposing the auto-generated one; set a password non-interactively instead, or use `-H 127.0.0.1` to stay off the network.
+Backend tests run from `studio/backend/`:
 
-Headless starts:
 ```bash
-UNSLOTH_STUDIO_PASSWORD='your-strong-password' unsloth studio --secure   # via env var
-```
-Reset your password:
-```bash
-unsloth studio reset-password
+python -m pytest tests -q
 ```
 
-#### Developer, Nightly, Uninstall
-To see developer, nightly and uninstallation etc. instructions, see [advanced installation](#-advanced-installation).
+The Scaler's own suites are `tests/test_advanced_scaling.py`,
+`tests/test_advanced_scaling_routes.py` and `tests/test_engine_shrink.py`; the
+last one builds a tiny Llama and performs the block surgery for real.
 
-### Unsloth Core (code-based)
-#### Linux, WSL:
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv unsloth_env --python 3.13
-source unsloth_env/bin/activate
-uv pip install unsloth --torch-backend=auto
-```
-#### Windows:
-```powershell
-winget install -e --id Python.Python.3.13
-winget install --id=astral-sh.uv  -e
-uv venv unsloth_env --python 3.13
-.\unsloth_env\Scripts\activate
-uv pip install torchao
-uv pip install unsloth --torch-backend=auto
-```
-Install torchao first on Windows: `--torch-backend` looks for it only on the PyTorch index, which has no recent Windows torchao, so a one-step install silently resolves an old Unsloth.
+From the repository root: `pre-commit run --all-files` (Ruff and the repo's lint scripts).
 
-#### AMD, Intel, DGX Spark, Blackwell:
-See our [Blackwell guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-blackwell-rtx-50-series-and-unsloth) and [DGX Spark guide](https://unsloth.ai/docs/blog/fine-tuning-llms-with-nvidia-dgx-spark-and-unsloth). <br>
-To install Unsloth on **AMD** and **Intel** GPUs, follow our [AMD Guide](https://unsloth.ai/docs/basics/amd) and [Intel Guide](https://unsloth.ai/docs/get-started/install/intel).
+---
 
-## 🧬 Model expansion (upscale → CPT → eval)
+## Docs
 
-`expand_model`, `cpt_train` and `evaluate_pipeline` are exported from `unsloth`. The pipeline is **expand → CPT → eval**:
+| Doc | Covers |
+| --- | --- |
+| [docs/labs.md](docs/labs.md) | The Labs switch, the experiment registry, Artifacts and Pipelines |
+| [docs/simulated-training.md](docs/simulated-training.md) | The Debugging simulator that runs a job with no hardware behind it |
+| [docs/theming.md](docs/theming.md) | Palettes, accent tokens, changing the UI color |
+| [docs/README.md](docs/README.md) | Repository map and the local CRLF trap |
 
-```python
-from unsloth import FastLanguageModel, assert_function_preserved, cpt_train, expand_model, save_expanded_model
+---
 
-model, tokenizer = FastLanguageModel.from_pretrained("Qwen/Qwen2.5-1.5B", load_in_4bit = False)
-probe = tokenizer("function-preservation probe", return_tensors = "pt").input_ids
-base_logits = model(input_ids = probe).logits.float().clone()   # before growth, in place
+## License
 
-model, report = expand_model(model, target_params = 3.4e9, method = "depth+mlp_width")
-assert_function_preserved(None, model, probe, base_logits = base_logits)
-save_expanded_model(model, tokenizer, "./expanded")
-```
+This repository carries three sets of terms, and they do not overlap:
 
-A full runnable script is [scripts/upscale_cpt_eval.py](scripts/upscale_cpt_eval.py). What it does and does not claim:
+- **Unsloth Core** (`unsloth/`) is **Apache-2.0**, as inherited from upstream.
+- **The Studio application** (`studio/`) is **AGPL-3.0** — see [studio/LICENSE.AGPL-3.0](studio/LICENSE.AGPL-3.0).
+- **Original additions in this fork** — the Labs engines, the trainer surface and the run records — are under **[NRC-1](LICENSE-NRC-1.md)**. Files that carry the `NRC-1` header are the ones covered; the Scaler lives in upstream-licensed files and keeps those terms.
 
-- **Step 0 logits match the base.** Growth is a warm start, verified numerically rather than assumed; the value of the pipeline is the post-CPT eval delta.
-- **Growth ≥ 2x is enforced by default.** Below it the evidence predicts no capability gain, so a 1.7B → 1.9B run is refused unless `force_small_growth=True` (which sets a warning).
-- **The verdict is `vs base only`** unless a same-compute baseline — the base trained for the same tokens or GPU-hours — is supplied. That is the comparison the growth literature is missing; running it is how you produce the evidence instead of assuming it.
-- **Compute is a number in the report**: `gpu_hours`, `tokens_seen` and `peak_mem_gb` for the expanded run, side by side with the baseline when one was run.
-- **Depth is the default axis** (LLaMA Pro style identity blocks, zeroed `o_proj`/`down_proj`), because depth growth has the best evidence; `mlp_width` widens only `gate_proj`/`up_proj`/`down_proj`, which keeps embeddings, attention and the head intact.
+NRC-1 permits private, internal and commercial use, modification, and sharing with attribution. It reserves two things: relaunching the work as a rebranded product with its own name, logo or separate interface, and mass public redistribution of it (or a modified copy) from a company without asking first. Code inherited from upstream, and every model weight, tokenizer or dataset, keeps whatever license came with it.
 
-Refused with a clear error: quantized checkpoints (start from fp16/bf16 — the quantization scales encode the old shapes), PEFT-wrapped models (expand first, adapt after) and MoE checkpoints (packed expert tensors need a dedicated path in v1).
+Produced checkpoints carry a `LICENSE-NRC-1.txt` beside their `run_manifest.json`, so a folder keeps those terms wherever it is copied.
 
-Prior art: [LLaMA Pro](https://arxiv.org/html/2401.02415v1) (block expansion), [Stacking Your Transformers](https://arxiv.org/html/2405.15319v2) (depth growth, NeurIPS 2024), [LEMON](https://arxiv.org/html/2310.07999v1), [LiGO](https://arxiv.org/html/2303.00980v1), [`llm-grow`](https://github.com/jianzhnie/llm-grow) and Apple [`ml-hypercloning`](https://github.com/apple-aiml-research/ml-hypercloning).
+---
 
-## 📒 Free Notebooks
+## Contributing
 
-Train for free with our notebooks.
-Read our [guide](https://unsloth.ai/docs/get-started/fine-tuning-llms-guide). Add dataset, run, then deploy your trained model.
+Issues and pull requests are welcome. Small fixes can go straight to a PR; for anything larger, open an issue with the shape you have in mind first so the approach can be agreed before you spend the time.
 
-| Model | Free Notebooks | Performance | Memory use |
-|-----------|---------|--------|----------|
-| **Unsloth Studio (X8)**      | [▶️ Start for free](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_X8_Colab.ipynb)               | free T4 |  |
-| **Unsloth Studio**      | [▶️ Start for free](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_Colab.ipynb)               |  |  |
-| **Decision model (Qwen3.5-4B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)-Decision.ipynb)               | 1.5x faster | 60% less |
-| **Gemma 4 (E2B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Gemma4_(E2B)-Vision.ipynb)               | 1.5x faster | 50% less |
-| **Qwen3.5 (4B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)_Vision.ipynb)               | 1.5x faster | 60% less |
-| **gpt-oss (20B)**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/gpt-oss-(20B)-Fine-tuning.ipynb)               | 2x faster | 70% less |
-| **Qwen3.5 GSPO**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_5_(4B)_Vision_GRPO.ipynb)               | 2x faster | 70% less |
-| **gpt-oss (20B): GRPO**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/gpt-oss-(20B)-GRPO.ipynb)               | 2x faster | 80% less |
-| **Qwen3: Advanced GRPO**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Qwen3_(4B)-GRPO.ipynb)               | 2x faster | 70% less |
-| **embeddinggemma (300M)**    | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/EmbeddingGemma_(300M).ipynb)               | 2x faster | 20% less |
-| **Llama 3.1 (8B) Alpaca**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.1_(8B)-Alpaca.ipynb)               | 2x faster | 70% less |
-| **Llama 3.2 Conversational**      | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Llama3.2_(1B_and_3B)-Conversational.ipynb)               | 2x faster | 70% less |
-| **Orpheus-TTS (3B)**     | [▶️ Start for free](https://colab.research.google.com/github/unslothai/notebooks/blob/main/nb/Orpheus_(3B)-TTS.ipynb)               | 1.5x faster | 50% less |
+The most self-contained places to start are `studio/backend/core/labs/` (each engine is a module with its own tests), `studio/frontend/src/features/labs/`, and the Scaler's shrink path — width trimming is deliberately unimplemented and is a real piece of work.
 
-- See all our notebooks for: [Kaggle](https://github.com/unslothai/notebooks?tab=readme-ov-file#-kaggle-notebooks), [GRPO](https://unsloth.ai/docs/get-started/unsloth-notebooks#grpo-reasoning-rl-notebooks), [TTS](https://unsloth.ai/docs/get-started/unsloth-notebooks#text-to-speech-tts-notebooks), [embedding](https://unsloth.ai/docs/new/embedding-finetuning) & [Vision](https://unsloth.ai/docs/get-started/unsloth-notebooks#vision-multimodal-notebooks)
-- See [all our models](https://unsloth.ai/docs/get-started/unsloth-model-catalog) and [all our notebooks](https://unsloth.ai/docs/get-started/unsloth-notebooks)
-- See detailed documentation for Unsloth [here](https://unsloth.ai/docs)
-
-## 📥 Advanced Installation
-The below advanced instructions are for Unsloth Studio. For Unsloth Core advanced installation, [view our docs](https://unsloth.ai/docs/get-started/install/pip-install#advanced-pip-installation).
-
-#### Developer / Nightly / Experimental installs: macOS, Linux, WSL:
-The developer install builds from the `main` branch, which is the latest (nightly) source.
-```bash
-git clone https://github.com/unslothai/unsloth
-cd unsloth
-./install.sh --local
-unsloth studio -p 8888
-```
-To install into an isolated location, set `UNSLOTH_STUDIO_HOME`:
-```bash
-UNSLOTH_STUDIO_HOME="$PWD/.studio" ./install.sh --local
-UNSLOTH_STUDIO_HOME="$PWD/.studio" unsloth studio -p 8888
-```
-Then to update:
-```bash
-cd unsloth && git pull
-./install.sh --local
-unsloth studio -p 8888
-```
-
-#### Developer / Nightly / Experimental installs: Windows PowerShell:
-The developer install builds from the `main` branch, which is the latest (nightly) source.
-```powershell
-git clone https://github.com/unslothai/unsloth.git
-cd unsloth
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
-.\install.ps1 --local
-unsloth studio -p 8888
-```
-To install into an isolated location, set `UNSLOTH_STUDIO_HOME`:
-```powershell
-$env:UNSLOTH_STUDIO_HOME="$PWD\.studio"; .\install.ps1 --local
-$env:UNSLOTH_STUDIO_HOME="$PWD\.studio"; unsloth studio -p 8888
-```
-Then to update:
-```powershell
-cd unsloth; git pull
-.\install.ps1 --local
-unsloth studio -p 8888
-```
-
-#### Advanced launch options
-
-Skip PyTorch (GGUF-only mode):
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_NO_TORCH=1 sh
-```
-```powershell
-$env:UNSLOTH_NO_TORCH=1; irm https://unsloth.ai/install.ps1 | iex
-```
-
-Skip the post-install prompt that starts Unsloth (useful for automated installs):
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_SKIP_AUTOSTART=1 sh
-```
-```powershell
-$env:UNSLOTH_SKIP_AUTOSTART=1; irm https://unsloth.ai/install.ps1 | iex
-```
-
-Keep the install-time package cache under the Unsloth Studio directory instead of reusing an existing uv cache. Downloads are slower the first time, and an explicit `UV_CACHE_DIR` still wins over this:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_ISOLATE_UV_CACHE=1 sh
-```
-```powershell
-$env:UNSLOTH_ISOLATE_UV_CACHE=1; irm https://unsloth.ai/install.ps1 | iex
-```
-For a local run the flag is `--isolated-uv-cache`:
-```bash
-./install.sh --local --isolated-uv-cache
-```
-```powershell
-.\install.ps1 --local --isolated-uv-cache
-```
-
-Discard the previous environment immediately when reinstalling, instead of keeping a copy until the new one works. A reinstall normally holds both at once, so it needs room for two; this needs room for one, at the cost of not being able to undo a failed install:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_INSTALL_NO_ROLLBACK=1 sh
-```
-```powershell
-$env:UNSLOTH_INSTALL_NO_ROLLBACK=1; irm https://unsloth.ai/install.ps1 | iex
-```
-For a local run the flag is `--no-rollback`:
-```bash
-./install.sh --local --no-rollback
-```
-```powershell
-.\install.ps1 --local --no-rollback
-```
-
-Pinning the Python version:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_PYTHON=3.12 sh
-```
-```powershell
-$env:UNSLOTH_PYTHON='3.12'; irm https://unsloth.ai/install.ps1 | iex
-```
-
-Install to a custom location with `UNSLOTH_STUDIO_HOME`:
-```bash
-curl -fsSL https://unsloth.ai/install.sh | UNSLOTH_STUDIO_HOME=/abs/path sh
-```
-```powershell
-$env:UNSLOTH_STUDIO_HOME='C:\path'; irm https://unsloth.ai/install.ps1 | iex
-```
-
-Point the frontend build at a corporate npm mirror/proxy with `UNSLOTH_NPM_REGISTRY`:
-```bash
-UNSLOTH_NPM_REGISTRY=https://artifactory.example.com/api/npm/npm/ ./install.sh --local
-```
-```powershell
-$env:UNSLOTH_NPM_REGISTRY='https://artifactory.example.com/api/npm/npm/'; .\install.ps1 --local
-```
-
-Cap Unsloth's native CPU thread pools on high-core hosts: `UNSLOTH_CPU_THREADS=8 unsloth studio -p 8888`.
-
-#### Vulkan, custom llama.cpp backends:
-
-You can force the backend during installation: 
-```bash
-export UNSLOTH_LLAMA_CPP_BACKEND=vulkan   # or cpu, cuda, rocm, auto
-curl -fsSL https://unsloth.ai/install.sh | sh
-```
-```powershell
-$env:UNSLOTH_LLAMA_CPP_BACKEND="vulkan"   # or cpu, cuda, rocm, auto
-irm https://unsloth.ai/install.ps1 | iex
-```
-
-#### audio.cpp audio engine:
-
-Setup also installs [audio.cpp](https://github.com/0xShug0/audio.cpp) (prebuilt by [unslothai/audio.cpp](https://github.com/unslothai/audio.cpp)), which runs the audio.cpp speech, music and speech-to-text models on the Audio page, in Voice settings and behind `/v1/audio/*`. It is optional and never blocks setup:
-- `UNSLOTH_SKIP_AUDIO_CPP_INSTALL=1` skips it.
-- `UNSLOTH_AUDIO_CPP_ACCELERATOR=cpu` (or `cuda`, `vulkan`, `metal`) picks the bundle instead of auto-detecting.
-- `AUDIOCPP_SERVER_PATH=/path/to/audiocpp_server` uses your own build.
-
-#### Uninstall
-
-**MacOS, WSL, Linux:** `curl -fsSL https://raw.githubusercontent.com/unslothai/unsloth/main/scripts/uninstall.sh | sh`
-
-**Windows (PowerShell):** `irm https://raw.githubusercontent.com/unslothai/unsloth/main/scripts/uninstall.ps1 | iex`
-
-For more info, [see our docs](https://unsloth.ai/docs/new/studio/install#uninstall).
-
-#### Deleting model files
-
-You can delete old model files either from the bin icon in model search or by removing the relevant cached model folder from the default Hugging Face cache directory. By default, HF uses:
-
-**MacOS, Linux, WSL:** `~/.cache/huggingface/hub/`
-
-**Windows:** `%USERPROFILE%\.cache\huggingface\hub\`
-
-## 💚 Community and Links
-| Type                                                                                                                                      | Links                                                                          |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| <img width="16" src="https://cdn.prod.website-files.com/6257adef93867e50d84d30e2/66e3d80db9971f10a9757c99_Symbol.svg" />  **Discord**                       | [Join Discord server](https://discord.com/invite/unsloth)                          |
-| <img width="15" src="https://redditinc.com/hs-fs/hubfs/Reddit%20Inc/Brand/Reddit_Logo.png" />  **r/unsloth Reddit**                       | [Join Reddit community](https://reddit.com/r/unsloth)                          |
-| 📚 **Documentation & Wiki**                                                                                                               | [Read Our Docs](https://unsloth.ai/docs)                                       |
-| <img width="13" src="https://upload.wikimedia.org/wikipedia/commons/0/09/X_(formerly_Twitter)_logo_late_2025.svg" />  **Twitter (aka X)** | [Follow us on X](https://twitter.com/unslothai)                                |
-| 🔮 **Our Models**                                                                                                                         | [Unsloth Catalog](https://unsloth.ai/docs/get-started/unsloth-model-catalog)   |
-| ✍️ **Blog**                                                                                                                               | [Read our Blogs](https://unsloth.ai/blog)                                      |
-
-### Citation
-
-You can cite the Unsloth repo as follows:
-```bibtex
-@software{unsloth,
-  author = {Daniel Han, Michael Han and Unsloth team},
-  title = {Unsloth},
-  url = {https://github.com/unslothai/unsloth},
-  year = {2023}
-}
-```
-If you trained a model with 🦥Unsloth, you can use this cool sticker!   <img src="https://raw.githubusercontent.com/unslothai/unsloth/main/images/made%20with%20unsloth.png" width="200" align="center" />
-
-### License
-Unsloth uses a dual-licensing model of Apache 2.0 and AGPL-3.0. The core Unsloth package remains licensed under **[Apache 2.0](https://github.com/unslothai/unsloth?tab=Apache-2.0-1-ov-file)**, while certain optional components, such as the Unsloth Studio UI are licensed under the open-source license **[AGPL-3.0](https://github.com/unslothai/unsloth?tab=AGPL-3.0-2-ov-file)**.
-
-This structure helps support ongoing Unsloth development while keeping the project open source and enabling the broader ecosystem to continue growing.
-
-### NRC-1
-Additions original to this fork — the Labs engines, the trainer surface and the produced run records — are offered under **[NRC-1](LICENSE-NRC-1.md)**, a light source-available license. It permits private and internal commercial use, modification and sharing with attribution, and reserves two things only: relaunching the work as a rebranded product, and mass public redistribution of it from a company. It does not relicense anything inherited from upstream or any weight, tokenizer or dataset that came from another source. Every merge, scale and pipeline output writes `LICENSE-NRC-1.txt` beside its `run_manifest.json` so a folder keeps those terms wherever it is copied.
-
-### Thank You to
-- The [llama.cpp library](https://github.com/ggml-org/llama.cpp) that lets users run and save models with Unsloth
-- The Hugging Face team and their libraries: [transformers](https://github.com/huggingface/transformers) and [TRL](https://github.com/huggingface/trl)
-- The Pytorch and [Torch AO](https://github.com/unslothai/unsloth/pull/3391) team for their contributions
-- NVIDIA for their [NeMo DataDesigner](https://github.com/NVIDIA-NeMo/DataDesigner) library and their contributions
-- And of course for every single person who has contributed or has used Unsloth!
+If a suite looks mysteriously red on Windows, check the line endings before changing the test: `.gitattributes` asks for LF under `studio/frontend/`, but `core.autocrlf=true` checks files out as CRLF and several tests pin exact source text. [docs/README.md](docs/README.md) has the details.

@@ -37,8 +37,8 @@ grows by 2x or more, but a 1.1x or 1.26x step is a legitimate experiment. The
 plan says so in its notes instead of blocking the slider.
 
 The other direction is :func:`shrink_model`, which drops whole decoder blocks to
-land near a smaller parameter target (a 28-block 1.7B model loses ~60M per block,
-so five blocks is ~1.4B). It cannot be function-preserving - a removed block is a
+land near a smaller parameter target (a 28-block 1.7B model loses ~50M per block,
+so five or six blocks is ~1.4B). It cannot be function-preserving - a removed block is a
 removed residual contribution - so the report says the checkpoint needs recovery
 training. Blocks are chosen by block influence when calibration tokens are given,
 by an output-projection proxy otherwise, and the first and last are protected.
