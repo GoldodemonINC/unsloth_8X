@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright 2023-present Daniel Han-Chen & the Unsloth team. All rights reserved.
 
-"""Model expansion ("upscaling") for continued pretraining.
+"""Model expansion ("upscaling") and depth shrinking for continued pretraining.
 
 The pipeline is **expand -> CPT -> eval**, and only the last step decides whether
 any of it was worth the compute:
@@ -36,6 +36,13 @@ Growth below 2x is *unmeasured*, not refused: every study that reports a gain
 grows by 2x or more, but a 1.1x or 1.26x step is a legitimate experiment. The
 plan says so in its notes instead of blocking the slider.
 
+The other direction is :func:`shrink_model`, which drops whole decoder blocks to
+land near a smaller parameter target (a 28-block 1.7B model loses ~60M per block,
+so five blocks is ~1.4B). It cannot be function-preserving - a removed block is a
+removed residual contribution - so the report says the checkpoint needs recovery
+training. Blocks are chosen by block influence when calibration tokens are given,
+by an output-projection proxy otherwise, and the first and last are protected.
+
 Refused outright: quantized checkpoints (start from the fp16/bf16 original; the
 scales encode the old matrix shapes), PEFT-wrapped models (expand first, adapt
 after) and MoE checkpoints (packed expert tensors and ``moe_intermediate_size``
@@ -59,7 +66,9 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 __all__ = [
     "GROWTH_FLOOR",
+    "SHRINK_FLOOR",
     "expand_model",
+    "shrink_model",
     "save_expanded_model",
     "assert_function_preserved",
     "refresh_shard_index",
@@ -73,6 +82,11 @@ __all__ = [
 # The only growth that is refused outright is none at all. Below 2x the literature
 # has not measured a capability gain, which is a reason to say so, not to forbid it.
 GROWTH_FLOOR = 1.0
+
+# Shrinking keeps at least this fraction of the decoder blocks. Past it the
+# embeddings and a handful of blocks are most of the parameters, and a smaller
+# base checkpoint is the better starting point rather than a mutilated one.
+SHRINK_FLOOR = 0.5
 
 # Dense decoder-only families whose blocks are `self_attn.{q,k,v,o}_proj` plus
 # `mlp.{gate,up,down}_proj`. The structural probe below is the real gate; this list
@@ -213,36 +227,46 @@ def _check_block_layout(block: Any, *, method: str) -> None:
                 )
 
 
-def _guard_expandable(model: Any) -> Any:
-    """Refuse the three inputs that would produce a broken or silently wrong result."""
+# The same guards apply to both directions; only the wording differs.
+_GUARD_WORDS = {
+    "expand": ("expand", "expand_model", "Expansion", "expansion"),
+    "shrink": ("shrink", "shrink_model", "Shrinking", "shrinking"),
+}
+
+
+def _guard_dense_model(model: Any, *, operation: str = "expand") -> Any:
+    """Refuse the inputs that would produce a broken or silently wrong result."""
+    verb, caller, capital, noun = _GUARD_WORDS.get(operation, _GUARD_WORDS["expand"])
     config = getattr(model, "config", None)
     if config is None:
-        raise ValueError("expand_model needs a model with a config (a HF transformer).")
+        raise ValueError(f"{caller} needs a model with a config (a HF transformer).")
 
     quantization = getattr(config, "quantization_config", None)
     loaded_low_precision = bool(
         getattr(model, "is_loaded_in_4bit", False) or getattr(model, "is_loaded_in_8bit", False)
     )
     if quantization is not None or loaded_low_precision:
-        raise ValueError("Cannot expand a quantized model; load the fp16/bf16 original first.")
+        raise ValueError(
+            f"Cannot {verb} a quantized model; load the fp16/bf16 original first."
+        )
 
     if hasattr(model, "peft_config") or hasattr(model, "peft_type"):
         raise ValueError(
-            "expand_model must run on the plain HF model, not a PEFT/LoRA-wrapped one: the "
-            "adapter was trained against the old shapes. Expand first, then adapt."
+            f"{caller} must run on the plain HF model, not a PEFT/LoRA-wrapped one: the "
+            f"adapter was trained against the old shapes. {verb.capitalize()} first, then adapt."
         )
 
     model_type = str(getattr(config, "model_type", "") or "")
     if any(hasattr(config, key) for key in _MOE_CONFIG_KEYS) or "moe" in model_type.lower():
         raise ValueError(
-            "MoE expansion not supported in v1: expert MLPs are packed tensors with their own "
-            "width keys (moe_intermediate_size), and widening them without widening the router "
+            f"MoE {noun} not supported in v1: expert MLPs are packed tensors with their own "
+            "width keys (moe_intermediate_size), and changing them without changing the router "
             "changes what the router scores. Use a dense source checkpoint."
         )
 
     if model_type and model_type not in _SUPPORTED_MODEL_TYPES:
         raise ValueError(
-            f"Expansion is not implemented for model_type={model_type!r}; supported dense "
+            f"{capital} is not implemented for model_type={model_type!r}; supported dense "
             f"families are {sorted(_SUPPORTED_MODEL_TYPES)}."
         )
     return config
@@ -500,7 +524,7 @@ def expand_model(
     if target_params is None and num_new_layers is None and mlp_width_target is None:
         raise ValueError("Give at least one of target_params, num_new_layers or mlp_width_target.")
 
-    config = _guard_expandable(model)
+    config = _guard_dense_model(model)
     _, _, layers = _layers_owner(model)
     _check_block_layout(layers[0], method = method)
 
@@ -587,6 +611,279 @@ def expand_model(
 
     # cpt_train reads these to give the new blocks a higher learning rate.
     model._unsloth_new_layer_indices = list(report.get("inserted_at") or [])
+    model._unsloth_scaling_report = report
+    return model, report
+
+
+# ---------------------------------------------------------------------------
+# Depth shrinking
+# ---------------------------------------------------------------------------
+
+# How the blocks to drop are chosen. "importance" ranks them by how little they
+# change the residual stream; the others exist so a reviewer can reproduce a
+# structural prune without a calibration pass.
+_DROP_STRATEGIES = ("importance", "even", "tail", "explicit")
+
+
+def _output_projection_scores(layers: Sequence[Any]) -> list[float]:
+    """How strongly each block writes into the residual stream, from its weights.
+
+    A proxy for influence that needs no data: of all the block's parameters, the
+    two that reach the residual stream are ``o_proj`` and ``down_proj``. RMS
+    rather than Frobenius keeps blocks with different widths comparable.
+    """
+    scores: list[float] = []
+    for block in layers:
+        total = 0.0
+        terms = 0
+        for leaf in ("o_proj", "down_proj"):
+            module = _find_linear(block, leaf)
+            if module is None:
+                continue
+            weight = module.weight.detach().float()
+            total += float(weight.pow(2).mean().item())
+            terms += 1
+        scores.append(math.sqrt(total / max(1, terms)))
+    return scores
+
+
+def _block_influence_scores(
+    model: Any, layers: Sequence[Any], calibration_input_ids: Any
+) -> list[float]:
+    """``1 - cos(block input, block output)`` per block, averaged over tokens.
+
+    The block-influence measure from the pruning literature: a block that barely
+    rotates the residual stream can be dropped with the least damage. Costs one
+    forward pass over the calibration batch and holds every block's input and
+    output until that pass ends, so keep the batch modest.
+    """
+    import torch
+
+    captured: list[list[Any]] = [[] for _ in layers]
+    handles = []
+    for index, block in enumerate(layers):
+        def hook(module, args, output, store = captured[index]):
+            hidden_in = args[0] if args else None
+            hidden_out = output[0] if isinstance(output, tuple) else output
+            if hidden_in is not None and hidden_out is not None:
+                store.append((hidden_in.detach(), hidden_out.detach()))
+
+        handles.append(block.register_forward_hook(hook))
+
+    was_training = model.training
+    model.eval()
+    try:
+        ids = calibration_input_ids
+        if ids.dim() == 1:
+            ids = ids.unsqueeze(0)
+        with torch.no_grad():
+            model(input_ids = ids)
+    finally:
+        for handle in handles:
+            handle.remove()
+        model.train(was_training)
+
+    scores: list[float] = []
+    for store in captured:
+        if not store:
+            scores.append(0.0)
+            continue
+        hidden_in, hidden_out = store[0]
+        cosine = torch.nn.functional.cosine_similarity(
+            hidden_in.float(), hidden_out.float(), dim = -1
+        )
+        scores.append(float((1.0 - cosine).mean().item()))
+    return scores
+
+
+def _depth_removals(
+    num_layers: int,
+    num_remove: int,
+    strategy: str,
+    layer_indices: Optional[Sequence[int]],
+    scores: Sequence[float],
+    *,
+    protect_edges: bool,
+) -> tuple[list[int], list[int]]:
+    """Which block indices to drop, and which were off limits."""
+    if num_remove < 1:
+        raise ValueError("num_layers_to_remove must be at least 1.")
+    if strategy not in _DROP_STRATEGIES:
+        raise ValueError(f"drop_strategy must be one of {_DROP_STRATEGIES}, got {strategy!r}.")
+
+    protected = sorted({0, num_layers - 1}) if protect_edges and num_layers > 2 else []
+    candidates = [index for index in range(num_layers) if index not in protected]
+    if len(candidates) < num_remove:
+        raise ValueError(
+            f"Only {len(candidates)} blocks are eligible once the first and last are "
+            f"protected, but {num_remove} removals were asked for."
+        )
+
+    if strategy == "explicit":
+        positions = sorted({int(index) for index in layer_indices or []})
+        if len(positions) != num_remove:
+            raise ValueError(
+                f"layer_indices has {len(positions)} distinct entries but num_layers_to_remove "
+                f"is {num_remove}; pass one index per dropped block."
+            )
+        outside = [index for index in positions if index not in candidates]
+        if outside:
+            raise ValueError(
+                f"layer_indices {outside} cannot be dropped: indices run 0..{num_layers - 1} "
+                f"and the first/last block is protected (protected: {protected})."
+            )
+        return positions, protected
+
+    if strategy == "tail":
+        return sorted(candidates[-num_remove:]), protected
+
+    if strategy == "even":
+        if num_remove == 1:
+            return [candidates[len(candidates) // 2]], protected
+        picked: list[int] = []
+        for step in range(num_remove):
+            position = round(step * (len(candidates) - 1) / (num_remove - 1))
+            index = candidates[position]
+            if index not in picked:
+                picked.append(index)
+        for index in candidates:
+            if len(picked) == num_remove:
+                break
+            if index not in picked:
+                picked.append(index)
+        return sorted(picked[:num_remove]), protected
+
+    # "importance": the blocks that change the residual stream least go first.
+    ranked = sorted(candidates, key = lambda index: (float(scores[index]), index))
+    return sorted(ranked[:num_remove]), protected
+
+
+def shrink_model(
+    model: Any,
+    target_params: Optional[float] = None,
+    num_layers_to_remove: Optional[int] = None,
+    drop_strategy: str = "importance",
+    layer_indices: Optional[Sequence[int]] = None,
+    calibration_input_ids: Any = None,
+    protect_edges: bool = True,
+) -> tuple[Any, dict[str, Any]]:
+    """Drop whole decoder blocks from ``model`` in place and report what changed.
+
+    Removing a block removes its residual contribution, so unlike :func:`expand_model`
+    this does **not** preserve the function: the returned model computes something
+    related but worse, and the report says so. Recovery is a continued-pretraining
+    pass over the data the model is meant to serve - the same one the Scaler's
+    growth path needs to unlock capacity.
+
+    ``calibration_input_ids`` switches the default strategy from the weight proxy
+    to measured block influence. Pass the tokenizer's ids for a short, representative
+    text; without them the ranking is deterministic and free.
+    """
+    import torch.nn as nn
+
+    if target_params is None and num_layers_to_remove is None:
+        raise ValueError("Give target_params or num_layers_to_remove.")
+
+    config = _guard_dense_model(model, operation = "shrink")
+    parent, attribute, layers = _layers_owner(model)
+    _check_block_layout(layers[0], method = "depth")
+
+    num_layers = len(layers)
+    base_params = _parameter_count(model)
+    per_layer = [_parameter_count(block) for block in layers]
+    average = sum(per_layer) / max(1, num_layers)
+    keep_floor = max(2, int(math.ceil(num_layers * SHRINK_FLOOR)))
+    max_remove = num_layers - keep_floor
+    if max_remove < 1:
+        raise ValueError(
+            f"Shrinking keeps at least {SHRINK_FLOOR:.0%} of the blocks, and a {num_layers}-block "
+            "model has no room to drop one."
+        )
+
+    if num_layers_to_remove is None:
+        gap = base_params - float(target_params)
+        if gap <= 0:
+            raise ValueError(
+                f"Target {target_params:.0f} is not smaller than this checkpoint's "
+                f"{base_params} parameters; shrinking needs a lower target."
+            )
+        num_remove = max(1, int(round(gap / max(1.0, average))))
+    else:
+        num_remove = int(num_layers_to_remove)
+
+    if num_remove > max_remove:
+        raise ValueError(
+            f"Dropping {num_remove} of {num_layers} blocks leaves {num_layers - num_remove}, "
+            f"below the {SHRINK_FLOOR:.0%} floor (at most {max_remove} can go). Start from a "
+            "smaller checkpoint instead: the embeddings dominate past this point."
+        )
+
+    if drop_strategy == "explicit":
+        scores = [0.0] * num_layers
+        scored_by = "explicit"
+    elif drop_strategy == "importance" and calibration_input_ids is not None:
+        scores = _block_influence_scores(model, layers, calibration_input_ids)
+        scored_by = "block_influence"
+    else:
+        scores = _output_projection_scores(layers)
+        scored_by = "output_projection"
+
+    removals, protected = _depth_removals(
+        num_layers,
+        num_remove,
+        drop_strategy,
+        layer_indices,
+        scores,
+        protect_edges = protect_edges,
+    )
+    dropped = set(removals)
+
+    kept = [block for index, block in enumerate(layers) if index not in dropped]
+    setattr(parent, attribute, nn.ModuleList(kept))
+
+    # Every reader sizes its KV cache from these two, and the attention modules
+    # index that cache by layer_idx: a gap in the numbering writes to the wrong
+    # slot from the first generated token.
+    renumbered = 0
+    for new_index, block in enumerate(kept):
+        for holder in (block, getattr(block, "self_attn", None)):
+            if holder is not None and hasattr(holder, "layer_idx"):
+                setattr(holder, "layer_idx", new_index)
+                renumbered += 1
+
+    for target_config in (config, getattr(config, "text_config", None)):
+        if target_config is None:
+            continue
+        if hasattr(target_config, "num_hidden_layers"):
+            target_config.num_hidden_layers = len(kept)
+        layer_types = getattr(target_config, "layer_types", None)
+        if isinstance(layer_types, list) and len(layer_types) == num_layers:
+            target_config.layer_types = [
+                entry for index, entry in enumerate(layer_types) if index not in dropped
+            ]
+
+    final_params = _parameter_count(model)
+    report: dict[str, Any] = {
+        "base_params": base_params,
+        "final_params": final_params,
+        "removed_params": base_params - final_params,
+        "removed_layers": removals,
+        "current_num_layers": num_layers,
+        "new_num_layers": len(kept),
+        "keep_floor": SHRINK_FLOOR,
+        "params_per_layer": int(round(average)),
+        "shrink_factor": final_params / max(1, base_params),
+        "scored_by": scored_by,
+        "importance": [round(float(score), 6) for score in scores],
+        "protected_layers": protected,
+        "renumbered_layer_indices": renumbered,
+        "function_preserved": False,
+        "warning": (
+            "Removing blocks changes the function: this checkpoint is a starting point for "
+            "recovery training, not a drop-in replacement for the base model."
+        ),
+    }
+    model._unsloth_new_layer_indices = []
     model._unsloth_scaling_report = report
     return model, report
 
