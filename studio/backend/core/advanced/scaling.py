@@ -57,6 +57,16 @@ METHOD_LABELS = {
     "depth+mlp_width": "Depth + MLP width (split the growth)",
 }
 
+# Shrinking keeps at least this fraction of the decoder blocks; below it the
+# embeddings dominate and a smaller base checkpoint is the better start.
+SHRINK_FLOOR = 0.5
+
+SHRINK_METHODS = ("depth",)
+
+SHRINK_METHOD_LABELS = {
+    "depth": "Depth (drop whole transformer blocks)",
+}
+
 # Mirrors ``unsloth.models.scaling._SUPPORTED_MODEL_TYPES``; a test keeps the two
 # equal without importing torch into the planning path.
 SUPPORTED_MODEL_TYPES = frozenset(
@@ -92,6 +102,18 @@ MOE_CONFIG_KEYS = (
 _PROBE_TEXT = (
     "Unsloth Scaler function-preservation probe: the expanded model must reproduce "
     "the base model's logits at step 0."
+)
+
+# Calibration text for ranking blocks by how little they change the residual
+# stream. Generic on purpose: the ranking only needs representative activations,
+# and a built-in sample keeps the run free of a dataset dependency.
+_SHRINK_CALIBRATION = (
+    "The quick brown fox jumps over the lazy dog. A transformer block reads the residual "
+    "stream, attends to the tokens before it, and writes a correction back into that "
+    "stream. Removing one block removes one correction: the model still runs, but it has "
+    "lost a step of computation, and rescaling the remaining weights cannot restore what "
+    "that step was doing. Continued pretraining on the data the model is meant to serve "
+    "is what lets the surviving blocks take over the work."
 )
 
 
@@ -262,9 +284,12 @@ def _refusals(
     source: str,
     config: Mapping[str, Any],
     base_params: Optional[int],
+    *,
+    operation: str = "expand",
 ) -> list[dict[str, Any]]:
     """Every reason a run would be refused, in the order the engine checks them."""
     found: list[dict[str, Any]] = []
+    shrinking = operation == "shrink"
 
     if config.get("quantization_config") is not None or config.get("quantization_config_dict_json"):
         found.append(
@@ -299,8 +324,9 @@ def _refusals(
         found.append(
             _refusal(
                 "unsupported_family",
-                f"Expansion is not implemented for model_type={model_type!r}. Supported dense "
-                f"families: {', '.join(sorted(SUPPORTED_MODEL_TYPES))}.",
+                f"{'Shrinking' if shrinking else 'Expansion'} is not implemented for "
+                f"model_type={model_type!r}. Supported dense families: "
+                f"{', '.join(sorted(SUPPORTED_MODEL_TYPES))}.",
             )
         )
 
@@ -308,8 +334,9 @@ def _refusals(
         found.append(
             _refusal(
                 "unknown_size",
-                "config.json does not name a hidden size and layer count, so the parameter "
-                "count cannot be read. Expansion needs those to target a size.",
+                f"config.json does not name a hidden size and layer count, so the parameter "
+                f"count cannot be read. {'Shrinking' if shrinking else 'Expansion'} needs those "
+                "to target a size.",
             )
         )
     return found
@@ -376,12 +403,209 @@ def _format_params(value: float) -> str:
     return f"{int(value)}"
 
 
+def _shrink_projection(
+    config: Mapping[str, Any],
+    *,
+    base_params: int,
+    target_params: float,
+) -> dict[str, Any]:
+    """How many blocks the run will drop to land near ``target_params``."""
+    hidden = _int(config.get("hidden_size")) or _int(config.get("n_embd")) or 0
+    layers = _int(config.get("num_hidden_layers")) or _int(config.get("n_layer")) or 0
+    intermediate = (
+        _int(config.get("intermediate_size"))
+        or _int(config.get("ffn_dim"))
+        or (_int(config.get("n_inner")) or 4 * hidden if hidden else 0)
+    )
+    per_layer = _per_layer_params(config, hidden, intermediate) if hidden else 0
+    keep_floor = max(2, int(math.ceil(layers * SHRINK_FLOOR))) if layers else 0
+    max_remove = max(0, layers - keep_floor)
+    gap = max(0.0, float(base_params) - float(target_params))
+    removed = max(1, int(round(gap / max(1, per_layer)))) if per_layer else 0
+    removed = min(removed, max_remove)
+    projected = base_params - removed * per_layer
+    return {
+        "projected_params": int(projected),
+        "removed_params": int(removed * per_layer),
+        "shrink_factor": float(projected) / max(1, base_params),
+        "removed_layers": int(removed),
+        "new_num_layers": int(layers - removed),
+        "current_num_layers": int(layers),
+        "params_per_layer": int(per_layer),
+        "max_removable_layers": int(max_remove),
+        "keep_floor_layers": int(keep_floor),
+        "estimated": True,
+    }
+
+
+def _shrink_plan(
+    label: str,
+    source: str,
+    config: Mapping[str, Any],
+    base_params: Optional[int],
+    *,
+    target_params: Optional[float],
+    method: str,
+    token: Optional[str],
+) -> dict[str, Any]:
+    """A plan whose target is smaller than the checkpoint: drop whole blocks."""
+    if method != "depth":
+        raise ValueError(
+            "Shrinking only drops whole blocks, so method must be 'depth'; width trimming "
+            "would leave every projection with a new shape and no way to keep its function."
+        )
+
+    refusals = _refusals(source, config, base_params, operation = "shrink")
+    blocking = [item for item in refusals if item["blocks"]]
+
+    available, engine_error = engine_available()
+    if not available:
+        refusals = refusals + [
+            _refusal(
+                "engine_unavailable",
+                f"Plans work, but the shrinking engine cannot load here: {engine_error}",
+            )
+        ]
+
+    hidden = _int(config.get("hidden_size")) or _int(config.get("n_embd")) or 0
+    layers = _int(config.get("num_hidden_layers")) or _int(config.get("n_layer")) or 0
+    intermediate = (
+        _int(config.get("intermediate_size"))
+        or _int(config.get("ffn_dim"))
+        or (_int(config.get("n_inner")) or 4 * hidden if hidden else 0)
+    )
+    per_layer = _per_layer_params(config, hidden, intermediate) if hidden else 0
+    keep_floor = max(2, int(math.ceil(layers * SHRINK_FLOOR))) if layers else 0
+    max_remove = max(0, layers - keep_floor)
+
+    min_params = int(base_params or 0)
+    max_params = int(base_params or 0)
+    default_target = int(base_params or 0)
+    target = float(target_params or 0.0)
+    projection: Optional[dict[str, Any]] = None
+    below_floor = False
+    too_large = False
+
+    if base_params and layers:
+        # Removing one block is the smallest shrink; removing every allowed block is the floor.
+        max_params = int(base_params - per_layer)
+        min_params = int(base_params - max_remove * per_layer)
+        default_removals = max(1, min(max_remove, int(round(0.1 * layers))))
+        default_target = int(base_params - default_removals * per_layer)
+
+        if max_remove < 1:
+            refusals = refusals + [
+                _refusal(
+                    "no_room",
+                    f"A {layers}-block model cannot lose a block and still keep "
+                    f"{SHRINK_FLOOR:.0%} of its depth. Start from a smaller checkpoint.",
+                )
+            ]
+        else:
+            if target_params is None:
+                target = float(default_target)
+            # Clamp only for the projection; an out-of-range request still keeps its refusal.
+            target = float(max(min_params, min(max_params, target)))
+            projection = _shrink_projection(
+                config, base_params = int(base_params), target_params = target
+            )
+
+    if base_params and layers and target_params is not None:
+        if float(target_params) >= float(base_params):
+            too_large = True
+            refusals = refusals + [
+                _refusal(
+                    "not_smaller",
+                    f"{_format_params(float(target_params))} is not smaller than this "
+                    f"checkpoint's {_format_params(base_params)}. Use the growth direction for "
+                    "a larger target.",
+                    blocks = False,
+                )
+            ]
+        elif max_remove >= 1 and float(target_params) > max_params:
+            too_large = True
+            refusals = refusals + [
+                _refusal(
+                    "not_smaller",
+                    f"The smallest shrink drops one block (~{_format_params(per_layer)}), to "
+                    f"{_format_params(max_params)}. Ask for that or lower.",
+                    blocks = False,
+                )
+            ]
+        elif max_remove >= 1 and float(target_params) < min_params:
+            below_floor = True
+            refusals = refusals + [
+                _refusal(
+                    "below_shrink_floor",
+                    f"Shrinking keeps at least {SHRINK_FLOOR:.0%} of the blocks, which is "
+                    f"{keep_floor} of {layers} here - about {_format_params(min_params)}. Below "
+                    "that the embeddings dominate; start from a smaller checkpoint instead.",
+                    blocks = False,
+                )
+            ]
+
+    blocked_reason = blocking[0]["message"] if blocking else None
+    if blocked_reason is None:
+        first_soft = next(
+            (item for item in refusals if not item["blocks"]), None
+        )
+        blocked_reason = first_soft["message"] if first_soft else None
+
+    notes = [
+        "Parameter counts are read from config.json and are analytic; the run reports the "
+        "measured count after the blocks are dropped.",
+        "Dropping blocks does not preserve the function. The output is a starting point for "
+        "recovery training, not a drop-in replacement for the base checkpoint.",
+        "The first and last blocks are protected, and at least "
+        f"{SHRINK_FLOOR:.0%} of the depth is kept.",
+    ]
+
+    return {
+        "source": label,
+        "direction": "shrink",
+        "spec": {
+            "architecture": str(config.get("model_type") or config.get("architecture") or "unknown"),
+            "hidden_size": _int(config.get("hidden_size")),
+            "num_layers": _int(config.get("num_hidden_layers") or config.get("n_layer")),
+            "intermediate_size": _int(config.get("intermediate_size")),
+            "vocab_size": _int(config.get("vocab_size")),
+        },
+        "base_params": int(base_params or 0),
+        "min_params": min_params,
+        "floor_params": min_params,
+        "max_params": max_params,
+        "cap_added_params": CAP_ADDED_PARAMS,
+        "growth_floor": GROWTH_FLOOR,
+        "shrink_floor": SHRINK_FLOOR,
+        "target_params": int(target),
+        "default_target_params": int(default_target),
+        "min_added_params": int(min_params - (base_params or 0)),
+        "max_added_params": int(max_params - (base_params or 0)),
+        "added_params": int(target) - int(base_params or 0),
+        "default_added_params": int(default_target) - int(base_params or 0),
+        "floor_added_params": int(min_params - (base_params or 0)),
+        "step_params": max(1, int(per_layer)),
+        "method": "depth",
+        "method_label": SHRINK_METHOD_LABELS["depth"],
+        "methods": [{"id": key, "label": SHRINK_METHOD_LABELS[key]} for key in SHRINK_METHODS],
+        "projection": projection,
+        "target_below_floor": below_floor,
+        "refusals": refusals,
+        "blocked": bool(blocking),
+        "blocked_reason": blocked_reason,
+        "runnable": not blocking and not below_floor and not too_large,
+        "engine": {"available": available, "error": engine_error},
+        "notes": notes,
+    }
+
+
 def plan(
     source: str,
     *,
     target_params: Optional[float] = None,
     added_params: Optional[float] = None,
     method: str = "depth",
+    direction: Optional[str] = None,
     token: Optional[str] = None,
 ) -> dict[str, Any]:
     """The slider's range, the growth floor, and every refusal reason. Reads config.json only.
@@ -389,14 +613,41 @@ def plan(
     The slider speaks in *added* parameters (0 to 3B), because that is the quantity the
     control actually sets; ``target_params`` is still accepted for callers that think in
     absolute sizes.
+
+    ``direction`` is inferred from the target when omitted: a target below the base
+    checkpoint is a shrink, anything else is growth.
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}.")
     if target_params is not None and added_params is not None:
         raise ValueError("Give target_params or added_params, not both.")
+    if direction not in (None, "grow", "shrink"):
+        raise ValueError(f"direction must be 'grow', 'shrink' or None, got {direction!r}.")
 
     label, config = merge.read_model_config(source, token = token)
     base_params = _base_params(config)
+
+    shrinking = direction == "shrink" or (
+        direction is None
+        and target_params is not None
+        and base_params is not None
+        and float(target_params) < float(base_params)
+    )
+    if shrinking:
+        if added_params is not None:
+            raise ValueError(
+                "Shrinking is planned in absolute parameters; give target_params, not added_params."
+            )
+        return _shrink_plan(
+            label,
+            source,
+            config,
+            base_params,
+            target_params = target_params,
+            method = method,
+            token = token,
+        )
+
     cap = (base_params or 0) + CAP_ADDED_PARAMS
     floor_params = int(math.ceil((base_params or 0) * GROWTH_FLOOR))
     min_params = int(base_params or 0)
@@ -460,6 +711,7 @@ def plan(
 
     return {
         "source": label,
+        "direction": "grow",
         "spec": {
             "architecture": str(config.get("model_type") or config.get("architecture") or "unknown"),
             "hidden_size": _int(config.get("hidden_size")),
@@ -538,6 +790,133 @@ def _load_tokenizer(path: str) -> Any:
         return None
 
 
+def _run_shrink(
+    source: str,
+    *,
+    output_dir: str,
+    target_params: float,
+    drop_strategy: str = "importance",
+    token: Optional[str] = None,
+    progress: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> dict[str, Any]:
+    """Drop blocks from ``source`` and save the smaller checkpoint in ``output_dir``.
+
+    Unlike growth there is no function to preserve: the saved model is a warm start
+    for recovery training, and the result reports the drift it measured so nobody
+    mistakes it for a drop-in replacement.
+    """
+
+    def stage(name: str, message: str, **extra: Any) -> None:
+        if progress is not None:
+            progress({"stage": name, "message": message, **extra})
+
+    report = plan(source, target_params = target_params, direction = "shrink", token = token)
+    if not report["runnable"]:
+        raise ValueError(report.get("blocked_reason") or "This checkpoint cannot be shrunk.")
+
+    stage("resolving", "Resolving the checkpoint...")
+    local = merge.resolve_checkpoint_source(source, token = token)
+
+    engine = _scaling_module()
+    import torch  # noqa: PLC0415 - planning must stay importable without torch
+
+    stage("loading", "Loading the base checkpoint...")
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    tokenizer = _load_tokenizer(local)
+    model = _load_model(local, torch)
+    device = next(model.parameters()).device
+    ids = _probe_ids(tokenizer, torch, report["spec"]["vocab_size"], device)
+
+    calibration = None
+    if tokenizer is not None:
+        try:
+            encoded = tokenizer(
+                _SHRINK_CALIBRATION, return_tensors = "pt", truncation = True, max_length = 256
+            )
+            calibration = encoded["input_ids"].to(device)
+        except Exception:  # noqa: BLE001 - the weight proxy is a valid fallback
+            calibration = None
+
+    model.eval()
+    with torch.no_grad():
+        base_logits = model(input_ids = ids).logits.float().clone()
+
+    projection = report["projection"] or {}
+    stage(
+        "shrinking",
+        f"Dropping {projection.get('removed_layers', '?')} of "
+        f"{projection.get('current_num_layers', '?')} blocks...",
+    )
+    started = time.monotonic()
+    model, shrink = engine.shrink_model(
+        model,
+        target_params = float(report["target_params"]),
+        drop_strategy = drop_strategy,
+        calibration_input_ids = calibration,
+    )
+
+    stage("measuring", "Measuring how far the smaller model drifts from the base...")
+    with torch.no_grad():
+        shrunk_logits = model(input_ids = ids).logits.float()
+    drift = float((base_logits - shrunk_logits).abs().max().item())
+    scale = float(base_logits.abs().max().item())
+
+    stage("saving", "Saving and reloading the smaller checkpoint...")
+    saved = engine.save_expanded_model(
+        model,
+        tokenizer,
+        output_dir,
+        sample_input_ids = ids,
+    )
+
+    elapsed = time.monotonic() - started
+    peak_gb = (
+        float(torch.cuda.max_memory_allocated()) / 1e9 if torch.cuda.is_available() else 0.0
+    )
+
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    result = {
+        "output_dir": str(saved.get("output_dir") or output_dir),
+        "source": report["source"],
+        "direction": "shrink",
+        "method": "depth",
+        "base_params": int(shrink["base_params"]),
+        "final_params": int(shrink["final_params"]),
+        "added_params": int(shrink["final_params"]) - int(shrink["base_params"]),
+        "removed_params": int(shrink["removed_params"]),
+        "removed_layers": shrink["removed_layers"],
+        "new_num_layers": shrink["new_num_layers"],
+        "growth_factor": float(shrink["shrink_factor"]),
+        "shrink_factor": float(shrink["shrink_factor"]),
+        "new_intermediate_size": None,
+        "scored_by": shrink["scored_by"],
+        "step0_max_logit_diff": drift,
+        "relative_drift": drift / max(1e-6, scale),
+        "function_preserved": False,
+        "recovery_required": True,
+        "verified": bool(saved.get("verified")),
+        "reload_max_logit_diff": saved.get("max_logit_diff"),
+        "peak_mem_gb": peak_gb,
+        "elapsed_seconds": round(elapsed, 1),
+        "refusals": report["refusals"],
+        "notes": report["notes"],
+        "plan": report,
+    }
+    stage(
+        "completed",
+        f"Shrunk to {_format_params(result['final_params'])} "
+        f"({result['shrink_factor']:.2f}x); recovery training is the next step.",
+        done = 1,
+        total = 1,
+    )
+    return result
+
+
 def run(
     source: str,
     *,
@@ -546,15 +925,16 @@ def run(
     method: str = "depth",
     insert_strategy: str = "even",
     force_small_growth: bool = False,
+    drop_strategy: str = "importance",
     token: Optional[str] = None,
     progress: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
-    """Expand ``source`` to ``target_params`` and save a verified checkpoint in ``output_dir``.
+    """Grow or shrink ``source`` to ``target_params`` and save a checkpoint in ``output_dir``.
 
-    ``force_small_growth`` is the same opt-in the engine exposes: a CMT run adds
-    capacity sized by its datasets, which is routinely below the 2x research
-    floor. The run records that it bypassed the floor instead of pretending the
-    target was in the evidenced range.
+    A target below the base checkpoint dispatches to :func:`_run_shrink`; anything
+    larger is depth/width expansion, which is function-preserving and needs CPT to
+    unlock the new capacity. ``force_small_growth`` is still accepted for the CMT
+    path, which adds capacity sized by its datasets.
     """
 
     def stage(name: str, message: str, **extra: Any) -> None:
@@ -562,6 +942,15 @@ def run(
             progress({"stage": name, "message": message, **extra})
 
     report = plan(source, target_params = target_params, method = method, token = token)
+    if report.get("direction") == "shrink":
+        return _run_shrink(
+            source,
+            output_dir = output_dir,
+            target_params = float(report["target_params"]),
+            drop_strategy = drop_strategy,
+            token = token,
+            progress = progress,
+        )
     if report["blocked"] or (not report["runnable"] and not force_small_growth):
         raise ValueError(report["blocked_reason"] or "This checkpoint cannot be expanded.")
     if report["target_below_floor"] and force_small_growth:
