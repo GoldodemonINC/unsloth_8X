@@ -234,14 +234,17 @@ export interface SplitPlanResponse {
 export interface ScalerRefusal {
   code: string;
   message: string;
-  /** False only for the "slider is under the 2x floor" note on an otherwise valid plan. */
+  /** False for a note about the requested target (under the shrink floor, not smaller), not the checkpoint. */
   blocks: boolean;
 }
 
 export type ScalerMethod = "depth" | "mlp_width" | "depth+mlp_width";
+/** Which way the parameter count moves. Inferred from the target when omitted. */
+export type ScalerDirection = "grow" | "shrink";
 
 export interface ScalerPlan {
   source: string;
+  direction: ScalerDirection;
   spec: {
     architecture: string;
     hidden_size: number | null;
@@ -251,14 +254,16 @@ export interface ScalerPlan {
   };
   /** Estimator count from config.json; the run reports the measured one. */
   base_params: number;
-  /** Slider minimum: the checkpoint as it is. */
+  /** Slider minimum: for growth the checkpoint as it is; for shrinking the depth floor. */
   min_params: number;
-  /** Slider's amber line: 2x the base, below which growth is refused. */
+  /** Growth floor in parameters. At 1x it equals the base, so no band is drawn. */
   floor_params: number;
   /** Slider maximum: base + 3B. */
   max_params: number;
   cap_added_params: number;
   growth_floor: number;
+  /** Present on shrink plans: the fraction of blocks that must survive. */
+  shrink_floor?: number;
   target_params: number;
   default_target_params: number;
   /** The slider's own quantity: parameters added on top of the checkpoint. */
@@ -266,7 +271,7 @@ export interface ScalerPlan {
   min_added_params: number;
   max_added_params: number;
   default_added_params: number;
-  /** Adding less than this is under the growth floor, and is refused. */
+  /** Distance from the base to the growth floor; 0 while the floor is 1x. */
   floor_added_params: number;
   step_params: number;
   method: ScalerMethod;
@@ -274,13 +279,19 @@ export interface ScalerPlan {
   methods: Array<{ id: ScalerMethod; label: string }>;
   projection: {
     projected_params: number;
-    added_params: number;
-    growth_factor: number;
+    added_params?: number;
+    growth_factor?: number;
     new_num_layers: number;
-    new_intermediate_size: number;
+    new_intermediate_size?: number;
     current_num_layers: number;
-    current_intermediate_size: number;
+    current_intermediate_size?: number;
     params_per_layer: number;
+    /** Shrink plans only. */
+    removed_layers?: number;
+    removed_params?: number;
+    shrink_factor?: number;
+    max_removable_layers?: number;
+    keep_floor_layers?: number;
   } | null;
   target_below_floor: boolean;
   refusals: ScalerRefusal[];
@@ -296,6 +307,7 @@ export interface ScalerPlan {
 export interface ScalerResult {
   output_dir: string;
   source: string;
+  direction?: ScalerDirection;
   method: ScalerMethod;
   base_params: number;
   final_params: number;
@@ -309,6 +321,14 @@ export interface ScalerResult {
   peak_mem_gb: number;
   elapsed_seconds: number;
   notes: string[];
+  /** Shrink results: the blocks that were dropped, and the factor they landed on. */
+  removed_layers?: number[];
+  removed_params?: number;
+  shrink_factor?: number;
+  scored_by?: "block_influence" | "output_projection" | "explicit";
+  function_preserved?: boolean;
+  /** True for a shrink: the checkpoint needs recovery training before it is useful. */
+  recovery_required?: boolean;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -494,13 +514,15 @@ export function runSplit(body: {
   return request("/split/run", { method: "POST", body: JSON.stringify(body) });
 }
 
-/** The Slider's range, the growth floor, and every refusal reason. Reads config.json only. */
+/** The Scaler's range, its floor, and every refusal reason. Reads config.json only. */
 export function planScaler(body: {
   source: string;
-  /** Parameters to add. The target size is base + this. */
+  /** Parameters to add. The target size is base + this. Growth only. */
   added_params?: number | null;
+  /** Absolute size. Shrinking needs this, because the target is below the base. */
   target_params?: number | null;
   method?: ScalerMethod;
+  direction?: ScalerDirection;
   hf_token?: string | null;
 }): Promise<ScalerPlan> {
   return request("/scale/plan", { method: "POST", body: JSON.stringify(body) });
@@ -508,10 +530,13 @@ export function planScaler(body: {
 
 export function runScaler(body: {
   source: string;
-  added_params: number;
+  added_params?: number;
+  target_params?: number;
   method: ScalerMethod;
+  direction?: ScalerDirection;
   output_dir?: string | null;
   insert_strategy?: "even" | "middle" | "tail";
+  drop_strategy?: "importance" | "even" | "tail";
   hf_token?: string | null;
 }): Promise<AdvancedJob> {
   return request("/scale/run", { method: "POST", body: JSON.stringify(body) });

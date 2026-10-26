@@ -27,6 +27,7 @@ import {
   planScaler,
   runScaler,
   type AdvancedJob,
+  type ScalerDirection,
   type ScalerMethod,
   type ScalerPlan,
   type ScalerResult,
@@ -52,9 +53,12 @@ export function ScalerPanel({
   onUseCheckpoint?: (path: string) => void;
 }) {
   const [source, setSource] = useState(defaultSource);
+  const [direction, setDirection] = useState<ScalerDirection>("grow");
   const [method, setMethod] = useState<ScalerMethod>("depth");
-  // The slider's quantity: parameters added on top of the checkpoint's own count.
+  // The growth slider's quantity: parameters added on top of the checkpoint's own count.
   const [added, setAdded] = useState<number | null>(null);
+  // Shrinking speaks in absolute size, because the target is below the base.
+  const [target, setTarget] = useState<number | null>(null);
   const [plan, setPlan] = useState<ScalerPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -87,11 +91,29 @@ export function ScalerPanel({
     let cancelled = false;
     setPlanning(true);
     const timer = setTimeout(() => {
-      planScaler({ source: trimmed, method, added_params: added })
+      planScaler(
+        direction === "shrink"
+          ? {
+              source: trimmed,
+              method: "depth",
+              direction,
+              target_params: target,
+            }
+          : { source: trimmed, method, direction, added_params: added },
+      )
         .then((result) => {
           if (cancelled) return;
           setPlan(result);
           setPlanError(null);
+          if (result.direction === "shrink") {
+            setTarget((current) => {
+              if (current == null) return result.default_target_params;
+              if (current < result.min_params) return result.min_params;
+              if (current > result.max_params) return result.max_params;
+              return current;
+            });
+            return;
+          }
           setAdded((current) => {
             if (current == null) return result.default_added_params;
             if (current < result.min_added_params) return result.min_added_params;
@@ -112,22 +134,34 @@ export function ScalerPanel({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [source, method, added]);
+  }, [source, method, added, direction, target]);
 
   const start = async () => {
     setRunError(null);
     setAdopted(false);
-    if (!plan || added == null) {
+    const shrinkTarget =
+      direction === "shrink" ? (target ?? plan?.default_target_params ?? null) : null;
+    if (!plan || (direction === "grow" && added == null) || shrinkTarget == null) {
       setRunError("Plan a checkpoint first.");
       return;
     }
     setRunning(true);
     try {
-      const created = await runScaler({
-        source: plan.source,
-        added_params: added,
-        method,
-      });
+      const created = await runScaler(
+        shrinkTarget != null
+          ? {
+              source: plan.source,
+              target_params: shrinkTarget,
+              method: "depth",
+              direction,
+            }
+          : {
+              source: plan.source,
+              added_params: added as number,
+              method,
+              direction,
+            },
+      );
       setJob(created);
       const finished = await waitForJob(created.job_id, setJob);
       setJob(finished);
@@ -142,6 +176,7 @@ export function ScalerPanel({
     job?.status === "completed" && job.result
       ? (job.result as unknown as ScalerResult)
       : null;
+  const shrink = plan?.direction === "shrink";
   const floorPercent = plan
     ? Math.min(
         100,
@@ -158,6 +193,19 @@ export function ScalerPanel({
   const growthPreview = plan
     ? targetPreview / Math.max(1, plan.base_params)
     : 1;
+  // Shrink mode's slider quantity is the absolute target, and it steps one block.
+  const targetValue = shrink ? (target ?? plan?.default_target_params ?? 0) : 0;
+  const paramsPerLayer = plan?.projection?.params_per_layer ?? 0;
+  const removedPreview =
+    shrink && plan && paramsPerLayer
+      ? Math.max(
+          0,
+          Math.min(
+            plan.projection?.max_removable_layers ?? 0,
+            Math.round((plan.base_params - targetValue) / paramsPerLayer),
+          ),
+        )
+      : 0;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -170,9 +218,9 @@ export function ScalerPanel({
               Scaler
             </p>
             <p className="text-ui-11 leading-ui-15 text-muted-foreground/85">
-              Grow the checkpoint before training it. At step 0 the expanded
-              model computes exactly what the base does; the new capacity is
-              unlocked by the continued pretraining that follows.
+              Change the parameter count before training. Growth starts
+              function-preserving and is unlocked by continued pretraining;
+              shrinking drops whole blocks and needs that training to recover.
             </p>
           </div>
         </div>
@@ -181,6 +229,31 @@ export function ScalerPanel({
             {params(plan.base_params)} base
           </Badge>
         ) : null}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1.5">
+        {(["grow", "shrink"] as const).map((mode) => (
+          <Button
+            key={mode}
+            size="sm"
+            variant={direction === mode ? "default" : "outline"}
+            disabled={running}
+            onClick={() => {
+              setDirection(mode);
+              setAdded(null);
+              setTarget(null);
+              setJob(null);
+              setAdopted(false);
+            }}
+          >
+            {mode === "grow" ? "Grow" : "Shrink"}
+          </Button>
+        ))}
+        <span className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
+          {direction === "grow"
+            ? "adds capacity; the new blocks start inert"
+            : "drops blocks; needs recovery training"}
+        </span>
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -211,78 +284,112 @@ export function ScalerPanel({
             <div className="flex flex-col gap-2">
               <div className="flex items-baseline justify-between gap-3">
                 <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
-                  Added parameters
+                  {shrink ? "Target size" : "Added parameters"}
                 </span>
                 <span className="font-mono text-ui-13 text-foreground">
-                  +{params(addedValue)}
-                  <span className="ml-2 font-normal text-muted-foreground">
-                    {params(plan.base_params)} → {params(targetPreview)} (
-                    {growthPreview.toFixed(2)}x)
-                  </span>
+                  {shrink ? (
+                    <>
+                      {params(plan.base_params)} → {params(targetValue)} (
+                      {(targetValue / Math.max(1, plan.base_params)).toFixed(2)}x)
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        −{removedPreview} blocks
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      +{params(addedValue)}
+                      <span className="ml-2 font-normal text-muted-foreground">
+                        {params(plan.base_params)} → {params(targetPreview)} (
+                        {growthPreview.toFixed(2)}x)
+                      </span>
+                    </>
+                  )}
                 </span>
               </div>
 
-              {/* The refused zone, drawn under the Radix track: 0 added up to the floor. */}
+              {/* The refused band only exists when a floor above 1x is configured. */}
               <div className="relative py-1">
-                <div
-                  aria-hidden={true}
-                  className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-4xl bg-[rgb(0_0_0_/_0.1)] dark:bg-[rgb(0_0_0_/_0.12)]"
-                >
-                  <div
-                    className="h-full bg-amber-500/50"
-                    style={{ width: `${floorPercent}%` }}
-                  />
-                </div>
-                <div
-                  aria-hidden={true}
-                  className="pointer-events-none absolute top-1/2 h-4 w-px -translate-y-1/2 bg-amber-600 dark:bg-amber-400"
-                  style={{ left: `${floorPercent}%` }}
-                />
+                {!shrink && plan.floor_added_params > 0 ? (
+                  <>
+                    <div
+                      aria-hidden={true}
+                      className="pointer-events-none absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-4xl bg-[rgb(0_0_0_/_0.1)] dark:bg-[rgb(0_0_0_/_0.12)]"
+                    >
+                      <div
+                        className="h-full bg-amber-500/50"
+                        style={{ width: `${floorPercent}%` }}
+                      />
+                    </div>
+                    <div
+                      aria-hidden={true}
+                      className="pointer-events-none absolute top-1/2 h-4 w-px -translate-y-1/2 bg-amber-600 dark:bg-amber-400"
+                      style={{ left: `${floorPercent}%` }}
+                    />
+                  </>
+                ) : null}
                 <div className="relative [&_[data-slot=slider-track]]:bg-transparent">
-                  <Slider
-                    value={[addedValue]}
-                    min={plan.min_added_params}
-                    max={plan.max_added_params}
-                    step={plan.step_params}
-                    disabled={plan.blocked || running}
-                    onValueChange={([value]) => setAdded(value)}
-                    thumbValueText={(value) =>
-                      `plus ${params(value)} parameters, ${(
-                        (plan.base_params + value) /
-                        Math.max(1, plan.base_params)
-                      ).toFixed(2)}x the base`
-                    }
-                    aria-label="Parameters to add"
-                  />
+                  {shrink ? (
+                    <Slider
+                      value={[targetValue]}
+                      min={plan.min_params}
+                      max={plan.max_params}
+                      step={plan.projection?.params_per_layer ?? plan.step_params}
+                      disabled={plan.blocked || running}
+                      onValueChange={([value]) => setTarget(value)}
+                      thumbValueText={(value) =>
+                        `${params(value)}, ${(
+                          value / Math.max(1, plan.base_params)
+                        ).toFixed(2)}x the base`
+                      }
+                      aria-label="Target parameters"
+                    />
+                  ) : (
+                    <Slider
+                      value={[addedValue]}
+                      min={plan.min_added_params}
+                      max={plan.max_added_params}
+                      step={plan.step_params}
+                      disabled={plan.blocked || running}
+                      onValueChange={([value]) => setAdded(value)}
+                      thumbValueText={(value) =>
+                        `plus ${params(value)} parameters, ${(
+                          (plan.base_params + value) /
+                          Math.max(1, plan.base_params)
+                        ).toFixed(2)}x the base`
+                      }
+                      aria-label="Parameters to add"
+                    />
+                  )}
                 </div>
                 <div className="mt-1 flex items-center justify-between text-ui-10p5 text-muted-foreground/70">
-                  <span className="font-mono">+0</span>
-                  <span
-                    className="absolute -translate-x-1/2 font-mono text-amber-700 dark:text-amber-400"
-                    style={{ left: `${floorPercent}%` }}
-                  >
-                    {plan.growth_floor}x floor
+                  <span className="font-mono">
+                    {shrink ? params(plan.min_params) : "+0"}
                   </span>
                   <span className="font-mono">
-                    +{params(plan.max_added_params)}
+                    {shrink
+                      ? params(plan.max_params)
+                      : `+${params(plan.max_added_params)}`}
                   </span>
                 </div>
               </div>
               <p className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-                Slider adds 0 to {params(plan.max_added_params)} parameters on top
-                of the checkpoint. Adding less than{" "}
-                {params(plan.floor_added_params)} (below {plan.growth_floor}x) is
-                refused: no growth study reports a gain there, and the run costs
-                as much as a real one.
+                {shrink
+                  ? `Drops whole transformer blocks. The first and last are protected, and at least ${Math.round(
+                      (plan.shrink_floor ?? 0.5) * 100,
+                    )}% of the depth survives; the output needs recovery training.`
+                  : `Slider adds 0 to ${params(
+                      plan.max_added_params,
+                    )} parameters. Any growth above the base is allowed; below 2x the literature has no measured gain, so a small step is an experiment.`}
               </p>
             </div>
 
             <label className="flex flex-col gap-1.5">
               <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
-                Growth axis
+                {shrink ? "Axis" : "Growth axis"}
               </span>
               <Select
-                value={method}
+                value={shrink ? "depth" : method}
+                disabled={shrink}
                 onValueChange={(value) => {
                   setMethod(value as ScalerMethod);
                   setAdded(null);
@@ -300,8 +407,9 @@ export function ScalerPanel({
                 </SelectContent>
               </Select>
               <span className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
-                Depth is the best-evidenced axis; width only widens the
-                feed-forward, so every other shape stays loadable.
+                {shrink
+                  ? "Shrinking only drops whole blocks: width trimming would reshape every projection with no way to keep its function."
+                  : "Depth is the best-evidenced axis; width only widens the feed-forward, so every other shape stays loadable."}
               </span>
             </label>
           </div>
@@ -318,10 +426,12 @@ export function ScalerPanel({
               </div>
               <div>
                 <p className="text-ui-10p5 uppercase tracking-[0.06em] text-muted-foreground/70">
-                  Added
+                  {shrink ? "Removed" : "Added"}
                 </p>
                 <p className="font-mono text-ui-14 text-foreground">
-                  +{params(plan.projection.added_params)}
+                  {shrink
+                    ? `−${params(plan.projection.removed_params ?? 0)}`
+                    : `+${params(plan.projection.added_params ?? 0)}`}
                 </p>
               </div>
               <div>
@@ -335,11 +445,12 @@ export function ScalerPanel({
               </div>
               <div>
                 <p className="text-ui-10p5 uppercase tracking-[0.06em] text-muted-foreground/70">
-                  MLP width
+                  {shrink ? "Params / block" : "MLP width"}
                 </p>
                 <p className="font-mono text-ui-14 text-foreground">
-                  {plan.projection.current_intermediate_size} →{" "}
-                  {plan.projection.new_intermediate_size}
+                  {shrink
+                    ? params(plan.projection.params_per_layer)
+                    : `${plan.projection.current_intermediate_size} → ${plan.projection.new_intermediate_size}`}
                 </p>
               </div>
             </div>
@@ -383,7 +494,7 @@ export function ScalerPanel({
               ) : (
                 <HugeiconsIcon icon={PlayIcon} className="size-3.5" />
               )}
-              Expand checkpoint
+              {shrink ? "Shrink checkpoint" : "Expand checkpoint"}
             </Button>
             {planning ? (
               <span className="flex items-center gap-2 text-ui-11 text-muted-foreground">
@@ -407,15 +518,29 @@ export function ScalerPanel({
           {result ? (
             <div className="flex flex-col gap-2 rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 text-ui-11 leading-ui-16">
               <p className="font-medium text-foreground">
-                Expanded to {params(result.final_params)} (
-                {result.growth_factor.toFixed(2)}x)
+                {result.recovery_required
+                  ? `Shrunk to ${params(result.final_params)} (${(
+                      result.shrink_factor ?? result.growth_factor
+                    ).toFixed(2)}x)`
+                  : `Expanded to ${params(result.final_params)} (${result.growth_factor.toFixed(2)}x)`}
               </p>
               <p className="font-mono break-all text-muted-foreground">
                 {result.output_dir}
               </p>
               <p className="text-muted-foreground">
-                Function preserved at step 0: max |delta logit|{" "}
-                {result.step0_max_logit_diff.toExponential(1)}
+                {result.recovery_required
+                  ? `${result.removed_layers?.length ?? 0} blocks dropped (${
+                      result.removed_layers?.join(", ") || "—"
+                    }), ranked by ${
+                      result.scored_by === "block_influence"
+                        ? "measured block influence"
+                        : "output-projection weight"
+                    }. Drift from the base: max |delta logit| ${result.step0_max_logit_diff.toExponential(
+                      1,
+                    )}.`
+                  : `Function preserved at step 0: max |delta logit| ${result.step0_max_logit_diff.toExponential(
+                      1,
+                    )}`}
                 {result.reload_max_logit_diff != null
                   ? ` (${result.reload_max_logit_diff.toExponential(1)} after reload)`
                   : ""}
@@ -426,6 +551,12 @@ export function ScalerPanel({
                   ? ` · ${result.elapsed_seconds.toFixed(0)}s`
                   : ""}
               </p>
+              {result.recovery_required ? (
+                <p className="text-amber-700 dark:text-amber-400">
+                  Not a drop-in replacement: run continued pretraining or a
+                  fine-tune on this checkpoint before using it.
+                </p>
+              ) : null}
               {onUseCheckpoint ? (
                 <div className="flex items-center gap-2">
                   <Button
