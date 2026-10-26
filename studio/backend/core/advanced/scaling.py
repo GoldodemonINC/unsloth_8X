@@ -19,8 +19,10 @@ PEFT, MoE, unsupported family, growth floor). Duplicating them is the point: the
 UI has to render a reason *before* the run, and a test asserts this module's copy
 of the supported-family set still equals the engine's.
 
-Growth floor: every growth study that reports a gain grows by at least 2x, so a
-target between ``base`` and ``2 * base`` is refused unless the caller opts in.
+Growth floor: every growth study that *reports* a gain grows by at least 2x, but
+that is evidence about where a gain was measured, not a reason to refuse a
+smaller step. The floor is therefore 1x - any target above the base is allowed -
+and the plan says so plainly instead of hiding the unmeasured range.
 """
 
 from __future__ import annotations
@@ -40,9 +42,9 @@ from . import merge
 # fp16, and one 3B-wide step is already the largest single run this UI can plan.
 CAP_ADDED_PARAMS = 3_000_000_000
 
-# Below 2x, a growth run costs the same compute as a real one and does not
-# reliably recover, so it is refused rather than warned about.
-GROWTH_FLOOR = 2.0
+# Growth must add something, and that is the whole floor: below 2x the literature
+# has not measured a gain, which the plan reports as a note rather than a refusal.
+GROWTH_FLOOR = 1.0
 
 # ``unsloth.models.scaling`` aligns widened MLP channels to this multiple.
 WIDTH_ALIGNMENT = 64
@@ -256,7 +258,11 @@ def _refusal(code: str, message: str, *, blocks: bool = True) -> dict[str, Any]:
     return {"code": code, "message": message, "blocks": blocks}
 
 
-def _refusals(source: str, config: Mapping[str, Any], base_params: Optional[int], cap: int) -> list[dict[str, Any]]:
+def _refusals(
+    source: str,
+    config: Mapping[str, Any],
+    base_params: Optional[int],
+) -> list[dict[str, Any]]:
     """Every reason a run would be refused, in the order the engine checks them."""
     found: list[dict[str, Any]] = []
 
@@ -304,16 +310,6 @@ def _refusals(source: str, config: Mapping[str, Any], base_params: Optional[int]
                 "unknown_size",
                 "config.json does not name a hidden size and layer count, so the parameter "
                 "count cannot be read. Expansion needs those to target a size.",
-            )
-        )
-    elif 2 * base_params > cap:
-        found.append(
-            _refusal(
-                "floor_above_cap",
-                f"This checkpoint has ~{_format_params(base_params)}, and {GROWTH_FLOOR:g}x is "
-                f"~{_format_params(int(base_params * GROWTH_FLOOR))} - past the "
-                f"{_format_params(cap)} ceiling (base + {_format_params(CAP_ADDED_PARAMS)}). "
-                "Growth below 2x is refused, so no target in this range is valid.",
             )
         )
     return found
@@ -405,11 +401,15 @@ def plan(
     floor_params = int(math.ceil((base_params or 0) * GROWTH_FLOOR))
     min_params = int(base_params or 0)
 
-    refusals = _refusals(source, config, base_params, cap)
+    refusals = _refusals(source, config, base_params)
     blocking = [item for item in refusals if item["blocks"]]
 
-    # The default target is the floor: the smallest growth this tool will run.
-    default_target = min(max(min_params, floor_params), cap) if base_params else min_params
+    # With the floor at 1x, defaulting to it would plan a no-op: ask for 10% instead.
+    default_target = (
+        min(max(min_params + max(1, int(0.1 * min_params)), floor_params), cap)
+        if base_params
+        else min_params
+    )
     if added_params is not None and base_params:
         target = float(base_params) + float(added_params)
     elif target_params:
@@ -424,15 +424,15 @@ def plan(
         else None
     )
 
-    below_floor = bool(base_params) and target < floor_params
+    # The floor is 1x, so the only impossible growth is none at all.
+    below_floor = bool(base_params) and target <= min_params
     if below_floor:
         refusals = refusals + [
             _refusal(
-                "below_floor",
-                f"{_format_params(target)} is {target / max(1, base_params):.2f}x this checkpoint. "
-                f"Growth below {GROWTH_FLOOR:g}x is refused: no growth study reports a capability "
-                f"gain below that, and the run costs the same as a real one. Move the slider to "
-                f"{_format_params(floor_params)} or higher.",
+                "no_growth",
+                f"{_format_params(target)} is not larger than this checkpoint's "
+                f"{_format_params(min_params)}. Add at least one parameter, or plan a shrink "
+                "with a target below the base.",
             )
         ]
 
@@ -447,13 +447,15 @@ def plan(
 
     blocked_reason = blocking[0]["message"] if blocking else None
     if blocked_reason is None and below_floor:
-        blocked_reason = next(item["message"] for item in refusals if item["code"] == "below_floor")
+        blocked_reason = next(item["message"] for item in refusals if item["code"] == "no_growth")
 
     notes = [
         "Parameter counts are read from config.json and are analytic; the run reports the "
         "measured count after expansion.",
         "Depth growth is bit-exact at step 0. Width growth is not: widening down_proj makes "
         "float32 re-associate the sum, so the logits move by ~1e-5 of their own scale.",
+        "Any growth above the base is allowed. Below 2x no study reports a measured gain, so "
+        "a small step is a real experiment rather than a safe bet.",
     ]
 
     return {

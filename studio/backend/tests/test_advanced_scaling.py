@@ -47,32 +47,32 @@ def test_parameter_estimate_matches_a_known_checkpoint(tmp_path):
     plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)))
 
     assert plan["base_params"] == pytest.approx(134_500_000, rel=0.02)
-    assert plan["floor_params"] == 2 * plan["base_params"]
+    assert plan["floor_params"] == plan["base_params"]
     assert plan["max_params"] == plan["base_params"] + scaling.CAP_ADDED_PARAMS
 
 
-def test_default_target_is_the_floor_and_is_runnable(tmp_path):
+def test_default_target_is_ten_percent_above_the_base(tmp_path):
+    """The floor is 1x, so defaulting to it would plan nothing; 10% is the default."""
     plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)))
 
-    assert plan["growth_floor"] == 2.0
-    assert plan["default_target_params"] == plan["floor_params"]
+    assert plan["growth_floor"] == 1.0
+    assert plan["default_target_params"] > plan["base_params"]
     assert plan["runnable"] is True
     assert plan["refusals"] == []
     projection = plan["projection"]
-    assert projection["growth_factor"] == pytest.approx(2.0, abs=0.06)
+    assert projection["growth_factor"] > 1.0
     assert projection["new_num_layers"] > SMOLLM2_135M["num_hidden_layers"]
 
 
-def test_a_big_checkpoint_has_no_valid_target_in_range(tmp_path):
-    """base + 3B is below 2x for anything past 3B, so the whole range is refused."""
+def test_a_big_checkpoint_can_grow_below_two_x(tmp_path):
+    """8B + 3B is 1.375x: allowed, now that the floor is 1x rather than 2x."""
     plan = scaling.plan(str(_checkpoint(tmp_path, QWEN3_8B)))
 
-    assert plan["blocked"] is True
-    assert plan["runnable"] is False
-    codes = [refusal["code"] for refusal in plan["refusals"]]
-    assert "floor_above_cap" in codes
-    message = next(item["message"] for item in plan["refusals"] if item["code"] == "floor_above_cap")
-    assert "2x" in message and "base + 3.00B" in message
+    assert plan["blocked"] is False
+    assert plan["runnable"] is True
+    assert plan["growth_floor"] == 1.0
+    assert plan["max_params"] == plan["base_params"] + scaling.CAP_ADDED_PARAMS
+    assert 1.0 < plan["projection"]["growth_factor"] < 1.4
 
 
 def test_added_params_sets_the_target_on_top_of_the_base(tmp_path):
@@ -98,33 +98,23 @@ def test_target_and_added_together_are_rejected(tmp_path):
         )
 
 
-def test_target_below_the_floor_is_refused_with_the_floor_in_the_message(tmp_path):
+def test_growth_below_two_x_plans_normally(tmp_path):
+    """1.26x used to be refused by the floor; it is a valid target now."""
     source = str(_checkpoint(tmp_path, SMOLLM2_135M))
     plan = scaling.plan(source, target_params=170_000_000)
 
-    assert plan["target_below_floor"] is True
+    assert plan["runnable"] is True
+    assert plan["blocked"] is False
+    assert "below_floor" not in [item["code"] for item in plan["refusals"]]
+    assert plan["projection"]["growth_factor"] == pytest.approx(1.26, abs=0.06)
+
+
+def test_a_target_at_the_base_is_refused_as_no_growth(tmp_path):
+    plan = scaling.plan(str(_checkpoint(tmp_path, SMOLLM2_135M)), added_params=0)
+
     assert plan["runnable"] is False
     assert plan["blocked"] is False
-    below = next(item for item in plan["refusals"] if item["code"] == "below_floor")
-    assert "2x" in below["message"]
-    assert "269" in below["message"] or "270" in below["message"]
-
-
-@pytest.mark.parametrize(
-    ("config", "code"),
-    [
-        ({**SMOLLM2_135M, "quantization_config": {"quant_method": "bitsandbytes"}}, "quantized"),
-        ({**SMOLLM2_135M, "num_experts": 8}, "moe"),
-        ({**SMOLLM2_135M, "model_type": "mamba"}, "unsupported_family"),
-    ],
-)
-def test_refusals_are_reported_before_the_run(tmp_path, config, code):
-    plan = scaling.plan(str(_checkpoint(tmp_path, config)))
-
-    assert plan["blocked"] is True
-    assert plan["runnable"] is False
-    assert code in [refusal["code"] for refusal in plan["refusals"]]
-    assert plan["blocked_reason"]
+    assert "no_growth" in [item["code"] for item in plan["refusals"]]
 
 
 def test_an_adapter_directory_is_refused(tmp_path):

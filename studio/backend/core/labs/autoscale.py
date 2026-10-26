@@ -177,7 +177,9 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
             "growth_factor": float(projection.get("growth_factor") or 0.0),
             "params_per_layer": per_layer,
             "new_layers": new_layers,
-            "floor_bypassed": bool(scaled.get("target_below_floor")),
+            # Below 2x is allowed now, but still outside the measured range: the flag
+            # survives so the plan can say the growth is an experiment.
+            "floor_bypassed": float(projection.get("growth_factor") or 0.0) < 2.0,
             "growth_floor": scaled.get("growth_floor"),
             "notes": list(scaled.get("notes") or []),
         },

@@ -32,9 +32,9 @@ Two knobs grow the model:
   contribution through ``down_proj`` starts at zero, so the MLP output is
   unchanged at step 0.
 
-Growth below 2x is refused by default (``force_small_growth=True`` overrides with
-a warning): every growth study that reports a gain grows by 2x or more, and a 12%
-increase measured against the same training budget is usually a loss.
+Growth below 2x is *unmeasured*, not refused: every study that reports a gain
+grows by 2x or more, but a 1.1x or 1.26x step is a legitimate experiment. The
+plan says so in its notes instead of blocking the slider.
 
 Refused outright: quantized checkpoints (start from the fp16/bf16 original; the
 scales encode the old matrix shapes), PEFT-wrapped models (expand first, adapt
@@ -70,9 +70,9 @@ __all__ = [
     "heldout_perplexity_suite",
 ]
 
-# Below this factor the literature reports no capability gain, so it is a refusal
-# rather than a warning: a 1.7B -> 1.9B run costs a GPU-hour and buys noise.
-GROWTH_FLOOR = 2.0
+# The only growth that is refused outright is none at all. Below 2x the literature
+# has not measured a capability gain, which is a reason to say so, not to forbid it.
+GROWTH_FLOOR = 1.0
 
 # Dense decoder-only families whose blocks are `self_attn.{q,k,v,o}_proj` plus
 # `mlp.{gate,up,down}_proj`. The structural probe below is the real gate; this list
@@ -574,14 +574,15 @@ def expand_model(
 
     if growth < GROWTH_FLOOR:
         message = (
-            f"Growth factor is {growth:.2f}x, below the {GROWTH_FLOOR:g}x floor: no growth study "
-            "reports a capability gain below that, and this run costs the same compute as a real "
-            "one. Ask for more parameters, or pass force_small_growth=True."
+            f"Growth factor is {growth:.2f}x: this expansion added no parameters. Ask for a "
+            "larger target, or pass force_small_growth=True to keep the model unchanged."
         )
         if not force_small_growth:
             raise ValueError(message)
+    elif growth < 2.0:
         report["warning"] = (
-            f"growth {growth:.2f}x is below the evidenced range; capability gain unlikely"
+            f"growth {growth:.2f}x is below the 2x range where gains have been measured; "
+            "a real experiment rather than a safe bet"
         )
 
     # cpt_train reads these to give the new blocks a higher learning rate.
