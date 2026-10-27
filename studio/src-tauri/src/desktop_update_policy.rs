@@ -1,10 +1,11 @@
 use serde::Serialize;
 use std::collections::HashMap;
 
-const DESKTOP_RELEASE_PAGE_BASE_URL: &str = "https://github.com/unslothai/unsloth/releases/tag/";
+const DESKTOP_RELEASE_PAGE_BASE_URL: &str =
+    "https://github.com/GoldodemonINC/unsloth_8X/releases/tag/";
 const DESKTOP_RELEASE_TAG_PREFIX: &str = "v";
 const DESKTOP_UPDATER_MANIFEST_URL: &str =
-    "https://github.com/unslothai/unsloth/releases/latest/download/latest.json";
+    "https://github.com/GoldodemonINC/unsloth_8X/releases/latest/download/latest.json";
 
 #[allow(dead_code)]
 #[derive(Debug, Serialize)]
@@ -121,7 +122,7 @@ fn validate_channel_metadata(
     }
 
     let expected_prefix = format!(
-        "https://github.com/unslothai/unsloth/releases/download/v{normalized_version}/"
+        "https://github.com/GoldodemonINC/unsloth_8X/releases/download/v{normalized_version}/"
     );
     for (platform, entry) in &metadata.platforms {
         if entry.url.trim().is_empty() {
@@ -448,11 +449,11 @@ mod tests {
     fn updater_policy_uses_normal_release_discovery_and_links() {
         assert_eq!(
             super::DESKTOP_UPDATER_MANIFEST_URL,
-            "https://github.com/unslothai/unsloth/releases/latest/download/latest.json"
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/latest/download/latest.json"
         );
         assert_eq!(super::DESKTOP_RELEASE_TAG_PREFIX, "v");
         let metadata = metadata_with_url(
-            "https://github.com/unslothai/unsloth/releases/download/v0.1.528-beta/app.AppImage",
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/download/v0.1.528-beta/app.AppImage",
         );
         assert!(super::validate_channel_metadata(&metadata, "0.1.528-beta").is_ok());
     }
@@ -460,10 +461,10 @@ mod tests {
     #[test]
     fn updater_policy_rejects_moving_legacy_mismatched_and_foreign_asset_urls() {
         for url in [
-            "https://github.com/unslothai/unsloth/releases/latest/download/app.AppImage",
-            "https://github.com/unslothai/unsloth/releases/download/desktop-latest/app.AppImage",
-            "https://github.com/unslothai/unsloth/releases/download/desktop-v0.1.528-beta/app.AppImage",
-            "https://github.com/unslothai/unsloth/releases/download/v0.1.529-beta/app.AppImage",
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/latest/download/app.AppImage",
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/download/desktop-latest/app.AppImage",
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/download/desktop-v0.1.528-beta/app.AppImage",
+            "https://github.com/GoldodemonINC/unsloth_8X/releases/download/v0.1.529-beta/app.AppImage",
             "https://github.com/example/unsloth/releases/download/v0.1.528-beta/app.AppImage",
         ] {
             let metadata = metadata_with_url(url);

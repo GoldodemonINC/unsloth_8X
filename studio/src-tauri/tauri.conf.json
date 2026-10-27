@@ -41,9 +41,9 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFBQzA4RjczODM0RjE1QjcKUldTM0ZVK0RjNC9BR2t4R0RVaFR5cTkyUlRVQ1FwaGV0Nk04eWNwWXBhZnlzalJydllmZm1QTS8K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEyMzNEQjUzMDYwRTEzRTQKUldUa0V3NEdVOXN6RWduZTJsY0poRTNVcnhqL3lBNEhaM3V3cDFPdEFVUHlJTmRQYU5pcHp1N0kK",
       "endpoints": [
-        "https://github.com/unslothai/unsloth/releases/latest/download/latest.json"
+        "https://github.com/GoldodemonINC/unsloth_8X/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
