@@ -6,7 +6,7 @@ name = "unsloth-studio"
 # that ships. tauri.conf.json declares no version of its own, which is why the
 # app version comes from this field rather than from there. The stale CalVer
 # below is also the wrong shape: release builds always write SemVer, e.g. 0.1.52-beta.
-version = "2026.4.8"
+version = "2026.4.9"
 description = "Unsloth Desktop App"
 authors = ["Unsloth AI"]
 edition = "2021"
