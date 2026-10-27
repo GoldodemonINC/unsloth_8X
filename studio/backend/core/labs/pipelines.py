@@ -25,7 +25,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from core.advanced import eval_harness, nrc_license
+from core.advanced import eval_harness, nrc_license, repair
 from core.advanced.scaling import (
     CAP_ADDED_PARAMS,
     GROWTH_FLOOR,
@@ -67,6 +67,25 @@ _DEFAULT_TRAIN = {"steps": 60, "batch_size": 1, "sequence_length": 2048}
 
 class PipelineError(ValueError):
     """A pipeline that cannot be validated at all (as opposed to a blocked stage)."""
+
+
+PRESET_IDS = (repair.PRESET_ID,)
+
+
+def build_preset(preset_id: str, source: str, base: str, **options: Any) -> dict[str, Any]:
+    """Build a named preset chain.
+
+    Presets live next to the planner rather than in the UI so the chain the app
+    offers and the chain the backend prices are the same object.
+    """
+    if preset_id != repair.PRESET_ID:
+        raise PipelineError(
+            f"Unknown preset {preset_id!r}; expected one of {', '.join(PRESET_IDS)}."
+        )
+    try:
+        return repair.build_repair_spec(source, base, **options)
+    except repair.RepairError as error:
+        raise PipelineError(str(error)) from error
 
 
 def _format_bytes(value: float) -> str:
@@ -435,8 +454,17 @@ def preflight(spec: Mapping[str, Any]) -> dict[str, Any]:
             "size below is a lower bound. Download it first for an exact plan."
         )
 
+    gate = spec.get("gate")
+    if gate is not None:
+        if not isinstance(gate, Mapping):
+            raise PipelineError("A pipeline gate must be an object.")
+        if "metric" not in gate or "minimum" not in gate:
+            raise PipelineError("A pipeline gate needs a metric and a minimum.")
+
     return {
         "source": source,
+        "preset": spec.get("preset"),
+        "gate": dict(gate) if isinstance(gate, Mapping) else None,
         "stages": stages,
         "final_params": current,
         "total_output_bytes": total_output,

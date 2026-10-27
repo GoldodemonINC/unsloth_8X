@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from auth import policy
 from auth.authentication import get_current_subject
 from core import labs
+from core.advanced import repair
 from core.labs import artifacts, autoscale, benchmarks, cmt, housekeeping, pipelines
 
 router = APIRouter()
@@ -63,6 +64,21 @@ class PipelineSaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     spec: dict[str, Any]
+
+
+class RepairPresetRequest(BaseModel):
+    """The shrink repair preset: a shrunken checkpoint and its base."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: str
+    base: str
+    suites: list[str] = Field(default_factory = lambda: ["mmlu"])
+    tolerance: float = 0.02
+    steps: int = 120
+    batch_size: int = 1
+    sequence_length: int = 2048
+    learning_rate: float = 5e-5
 
 
 class BenchmarkRunRequest(BaseModel):
@@ -208,6 +224,34 @@ def plan_pipeline(request: PipelinePlanRequest) -> dict[str, Any]:
     _gate("pipelines")
     try:
         return pipelines.preflight(request.spec)
+    except Exception as error:  # noqa: BLE001
+        raise _translate(error) from error
+
+
+@router.get("/pipelines/presets")
+def pipeline_presets() -> dict[str, Any]:
+    """Preset chains the planner can build without the UI hard-coding them."""
+    _gate("pipelines")
+    return {"presets": [repair.describe_preset()]}
+
+
+@router.post("/pipelines/preset")
+def plan_preset(request: RepairPresetRequest) -> dict[str, Any]:
+    """Build the shrink repair chain and price it. Starts nothing."""
+    _gate("pipelines")
+    try:
+        spec = pipelines.build_preset(
+            repair.PRESET_ID,
+            request.source,
+            request.base,
+            suites = request.suites,
+            tolerance = request.tolerance,
+            steps = request.steps,
+            batch_size = request.batch_size,
+            sequence_length = request.sequence_length,
+            learning_rate = request.learning_rate,
+        )
+        return {"spec": spec, "plan": pipelines.preflight(spec)}
     except Exception as error:  # noqa: BLE001
         raise _translate(error) from error
 
