@@ -17,6 +17,7 @@ curriculum   Alternating curriculum co-training scheduler.
 layer_lr     Layer-wise learning-rate zone resolution and param groups.
 blending     Dynamic multi-dataset blending and ratio scheduling.
 eval_harness Post-run evaluation plans, deltas, and reports.
+eval_tasks   File-backed custom evaluation tasks rendered as lm-eval configs.
 splitter     VRAM/RAM-aware safetensors checkpoint splitting.
 """
 
@@ -31,5 +32,6 @@ __all__ = [
     "layer_lr",
     "blending",
     "eval_harness",
+    "eval_tasks",
     "splitter",
 ]

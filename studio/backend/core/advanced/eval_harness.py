@@ -20,7 +20,10 @@ import math
 import shutil
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from . import eval_tasks
 
 # Registry keys match lm-eval task names where one exists.
 SUITES: dict[str, dict[str, Any]] = {
@@ -135,10 +138,14 @@ def build_eval_plan(
     eval_dataset: str | None = None,
     limit: int | None = None,
     batch_size: int = 8,
+    tasks_dir: str | Path | None = None,
 ) -> EvalPlan:
     if not suites:
         raise ValueError("Select at least one benchmark suite.")
-    unknown = [suite for suite in suites if suite not in SUITES]
+    # A custom task is a suite too: it is validated the same way and scored by
+    # the same lm-eval path, so the plan does not need a second code path.
+    known = set(SUITES) | eval_tasks.known_suite_ids(tasks_dir)
+    unknown = [suite for suite in suites if suite not in known]
     if unknown:
         raise ValueError(f"Unknown benchmark suites: {', '.join(unknown)}.")
     if batch_size <= 0:
@@ -178,9 +185,16 @@ def build_lm_eval_command(
     limit: int | None = None,
     batch_size: int = 8,
     output_dir: str | None = None,
+    task_name: str | None = None,
+    include_path: str | None = None,
 ) -> list[str]:
-    """Command line for one suite; kept separate so it is testable."""
-    if suite not in SUITES:
+    """Command line for one suite; kept separate so it is testable.
+
+    ``task_name``/``include_path`` carry a custom task: the task is run by name
+    from the generated include directory, so lm-eval loads the same task schema
+    it uses for its own suites.
+    """
+    if task_name is None and suite not in SUITES:
         raise ValueError(f"Unknown suite {suite!r}.")
     command = [
         "lm_eval",
@@ -189,10 +203,12 @@ def build_lm_eval_command(
         "--model_args",
         f"pretrained={model}",
         "--tasks",
-        suite,
+        task_name or suite,
         "--batch_size",
         str(batch_size),
     ]
+    if include_path:
+        command.extend(["--include_path", str(include_path)])
     if limit is not None:
         command.extend(["--limit", str(limit)])
     if output_dir:

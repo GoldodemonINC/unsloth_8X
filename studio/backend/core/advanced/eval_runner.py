@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import eval_harness as harness
+from . import eval_tasks
 
 # Preference order when one task reports several metrics.
 _METRIC_PREFERENCE = (
@@ -70,7 +71,12 @@ def _default_limit(suite: str, requested: int | None) -> int | None:
         return requested
     # A post-run check must finish in minutes, not hours. Keep the limit
     # conservative for the heavy suites unless the user opted into a full run.
-    return None if suite == "custom" else 200
+    # A custom task is deliberately unlimited: it is the user's own set, usually
+    # small, and scoring 200 of 2000 samples would report a task score that the
+    # task did not earn.
+    if suite == "custom" or suite.startswith(eval_tasks.SUITE_PREFIX):
+        return None
+    return 200
 
 
 def run_suite(
@@ -82,6 +88,7 @@ def run_suite(
     output_dir: str | Path,
     timeout: int = 3600,
     on_status: Callable[[str], None] | None = None,
+    tasks_dir: str | Path | None = None,
 ) -> dict[str, float]:
     """Run one suite and return its parsed scores."""
     if not harness.harness_available()["available"]:
@@ -92,12 +99,23 @@ def run_suite(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     effective_limit = _default_limit(suite, limit)
+    task = eval_tasks.resolve_suite(suite, tasks_dir)
+    task_name = None
+    include_path = None
+    if task is not None:
+        # A custom task is materialised beside this run's results: the scored
+        # samples are the validated ones, not whatever the file says now.
+        written = eval_tasks.write_task_files(task, out_dir / "tasks")
+        task_name = task.lm_eval_name
+        include_path = str(Path(written["config"]).parent)
     command = harness.build_lm_eval_command(
         suite,
         model,
         limit=effective_limit,
         batch_size=batch_size,
         output_dir=str(out_dir / f"{suite}.json"),
+        task_name=task_name,
+        include_path=include_path,
     )
     if on_status:
         on_status(f"Evaluating {suite} on {model} (limit={effective_limit})…")
@@ -123,6 +141,7 @@ def run_plan(
     output_dir: str | Path,
     timeout: int = 3600,
     on_status: Callable[[str], None] | None = None,
+    tasks_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Score baseline and candidate for every suite in the plan, then compare.
 
@@ -149,6 +168,7 @@ def run_plan(
                         output_dir=Path(scratch) / suite / ("baseline" if model == plan.baseline_model else "candidate"),
                         timeout=timeout,
                         on_status=on_status,
+                        tasks_dir=tasks_dir,
                     )
                     sink.update(scores)
                 except Exception as error:  # noqa: BLE001 - reported, not swallowed
