@@ -1083,10 +1083,10 @@ export function ExportPage() {
 
         <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
           <div className="flex flex-col gap-0.5">
-            <h1 className="text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
+            <h1 className="page-title-halo text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
               Export Model
             </h1>
-            <p className="text-sm text-muted-foreground">
+            <p className="page-title-halo text-sm text-muted-foreground">
               Export fine-tuned or base models for deployment
             </p>
           </div>

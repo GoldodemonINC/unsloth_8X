@@ -313,6 +313,10 @@ def _inspect(entry: Mapping[str, Any]) -> dict[str, Any]:
             "text_column": entry.get("text_column"),
             "eval_fraction": float(entry.get("eval_fraction") or 0.0),
             "bytes": 0,
+            # Not a measured dataset: the zeroes below are placeholders, not counts.
+            # Every surface reads `measured`, so no caller has to re-derive it from
+            # a zero that a genuinely empty file could also produce.
+            "measured": False,
             "rows": 0,
             "eval_rows": 0,
             "train_rows": 0,
@@ -358,6 +362,7 @@ def _inspect(entry: Mapping[str, Any]) -> dict[str, Any]:
         "text_column": entry.get("text_column"),
         "eval_fraction": eval_fraction,
         "bytes": size,
+        "measured": True,
         "rows": rows,
         "eval_rows": eval_rows,
         "train_rows": train_rows,
@@ -496,6 +501,8 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
         for entry in datasets
     )
     total_eval_rows = sum(entry["eval_rows"] for entry in datasets)
+    # The only count of what this plan could actually measure; `_inspect` decides it.
+    measured_datasets = sum(1 for entry in datasets if entry["measured"])
 
     suggested_from_tokens = _added_from_tokens(total_tokens)
     suggested_from_rows = _added_from_rows(total_rows)
@@ -536,12 +543,21 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
             f"(one block at this width is ~{_format_params(per_layer)}), not {_format_params(added)}. "
             "Plan for the larger number."
         )
-    if total_train_tokens < 1_000_000_000:
+    # Hub datasets have no measured rows at plan time, so their tokens are unknown
+    # rather than zero. Judging either warning on that zero told a user with two
+    # 10% splits and two Hub datasets that their training data was empty.
+    measured_train_tokens = sum(
+        int(round(entry["tokens_estimate"] * max(0.0, 1.0 - entry["eval_fraction"])))
+        for entry in datasets
+        if entry["measured"]
+    )
+    if measured_datasets and measured_train_tokens < 1_000_000_000:
         warnings.append(
-            f"{_format_params(total_train_tokens)} training tokens is far below the ~194B-token "
-            "recovery datapoint the expansion module cites; a gain here is unproven, not promised."
+            f"{_format_params(measured_train_tokens)} training tokens is far below the "
+            "~194B-token recovery datapoint the expansion module cites; a gain here is "
+            "unproven, not promised."
         )
-    if total_eval_rows == 0:
+    if all(float(entry.get("eval_fraction") or 0.0) <= 0.0 for entry in datasets):
         warnings.append(
             "No dataset has a held-out split, so CMT cannot report a per-dataset delta. "
             "Set an eval fraction on at least one dataset."
@@ -585,6 +601,10 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
         "datasets": datasets,
         "totals": {
             "datasets": len(datasets),
+            # `rows` and friends are subtotals over the measured datasets alone.
+            # A caller that shows them has to say so unless nothing is missing.
+            "measured_datasets": measured_datasets,
+            "unmeasured_datasets": len(datasets) - measured_datasets,
             "rows": total_rows,
             "train_rows": sum(max(0, entry["train_rows"]) for entry in datasets),
             "eval_rows": total_eval_rows,

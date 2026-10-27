@@ -4249,6 +4249,7 @@ export const it = {
     reset: "Ripristina",
   },
   library: {
+    description: "File, contenuti multimediali, chat e modelli messi a punto, tutti in un unico posto.",
     tabs: {
       ariaLabel: "Sezioni della Libreria",
       suggested: "Suggeriti",

@@ -9,11 +9,11 @@ import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import {
   Alert02Icon,
+  ArrowDown01Icon,
+  ArrowUp01Icon,
   Cancel01Icon,
   Delete02Icon,
   PlusSignIcon,
-  Refresh01Icon,
-  Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
@@ -33,6 +33,7 @@ import {
   planPipeline,
   savePipeline,
 } from "../api";
+import { LabsPanel } from "./labs-panel";
 
 type NumericKey = "factor" | "steps" | "batch_size" | "sequence_length";
 
@@ -232,7 +233,12 @@ export function PipelinesPanel(): ReactElement {
   };
 
   return (
-    <div className="flex flex-col gap-4">
+    <LabsPanel
+      title={t("labs.tab.pipelines")}
+      description={t("labs.pipelines.planOnly")}
+      onRefresh={refreshSaved}
+      refreshing={savedLoading}
+    >
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label={t("labs.pipelines.source")}>
           <input
@@ -444,7 +450,7 @@ export function PipelinesPanel(): ReactElement {
                   disabled={index === 0}
                   onClick={() => move(index, -1)}
                 >
-                  ↑
+                  <HugeiconsIcon icon={ArrowUp01Icon} strokeWidth={1.75} />
                 </Button>
                 <Button
                   size="icon-xs"
@@ -453,7 +459,7 @@ export function PipelinesPanel(): ReactElement {
                   disabled={index === stages.length - 1}
                   onClick={() => move(index, 1)}
                 >
-                  ↓
+                  <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={1.75} />
                 </Button>
                 <Button
                   size="icon-xs"
@@ -495,9 +501,6 @@ export function PipelinesPanel(): ReactElement {
         >
           {t("labs.pipelines.save")}
         </Button>
-        <span className="text-ui-10 text-muted-foreground">
-          {t("labs.pipelines.planOnly")}
-        </span>
       </div>
 
       {error ? (
@@ -621,18 +624,6 @@ export function PipelinesPanel(): ReactElement {
           <p className="text-ui-11 font-medium text-foreground">
             {t("labs.pipelines.savedPlans")}
           </p>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            className="ml-auto"
-            aria-label={t("labs.refresh")}
-            onClick={refreshSaved}
-          >
-            <HugeiconsIcon
-              icon={savedLoading ? Tick02Icon : Refresh01Icon}
-              strokeWidth={1.75}
-            />
-          </Button>
         </div>
         {saved.length === 0 ? (
           <p className="text-ui-11 text-muted-foreground">
@@ -656,7 +647,7 @@ export function PipelinesPanel(): ReactElement {
                     variant="outline"
                     className="h-5 border-destructive/40 px-1.5 text-ui-10 text-destructive"
                   >
-                    blocked
+                    {t("labs.pipelines.blocked")}
                   </Badge>
                 ) : null}
                 <div className="ml-auto flex items-center gap-1">
@@ -682,6 +673,6 @@ export function PipelinesPanel(): ReactElement {
           </ul>
         )}
       </div>
-    </div>
+    </LabsPanel>
   );
 }

@@ -4185,6 +4185,7 @@ export const hi = {
     reset: "रीसेट करें",
   },
   library: {
+    description: "फ़ाइलें, मीडिया, चैट और फ़ाइन-ट्यून किए गए मॉडल, सब एक ही जगह।",
     tabs: {
       ariaLabel: "लाइब्रेरी के सेक्शन",
       suggested: "सुझाए गए",

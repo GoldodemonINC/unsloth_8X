@@ -222,6 +222,30 @@ export async function pickNativeChatImport(): Promise<NativeChatImport | null> {
   return invoke<NativeChatImport | null>("pick_native_chat_import");
 }
 
+/** What a path field's Browse button asks the OS for. */
+export interface LocalPathPick {
+  kind: "file" | "folder";
+  /** File filters, lower case and without dots. Ignored for folders. */
+  extensions?: string[];
+  title?: string;
+}
+
+/**
+ * The OS dialog behind every local-path field. Cancelling, and the web build
+ * (which has no filesystem), both return null so the field keeps its value.
+ */
+export async function pickLocalPath(
+  options: LocalPathPick,
+): Promise<string | null> {
+  if (!isTauri) return null;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string | null>("pick_local_path", {
+    kind: options.kind,
+    extensions: options.extensions ?? null,
+    title: options.title ?? null,
+  });
+}
+
 export async function pickNativeTrainingConfig(): Promise<NativeImportedTextFile | null> {
   if (!isTauri) {
     return null;

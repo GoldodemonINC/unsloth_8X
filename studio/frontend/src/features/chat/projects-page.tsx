@@ -570,7 +570,7 @@ export function ProjectsPage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-5xl 4xl:max-w-6xl px-6 pb-10 pt-8 max-sm:px-4 font-heading sm:px-10">
+    <main className="mx-auto w-full max-w-[calc(1180px*var(--ui-space-scale,1))] px-5 pb-20 pt-8 max-sm:px-4 font-heading sm:px-9">
       <GuidedTour {...tour.tourProps} />
       {/* Global import file input */}
       <input
@@ -588,9 +588,14 @@ export function ProjectsPage() {
         }}
       />
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
-          Projects
-        </h1>
+        <div className="flex min-w-0 flex-col gap-0.5">
+          <h1 className="page-title-halo text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
+            Projects
+          </h1>
+          <p className="page-title-halo text-sm text-muted-foreground">
+            {t("library.chats.empty.projectsDescription")}
+          </p>
+        </div>
         {/* The Updated column orders the list, so search takes the room a sort control had.
             Below sm the group wraps to its own row: beside the heading the two buttons left the
             field narrower than its own padding. */}

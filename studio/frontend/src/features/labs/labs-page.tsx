@@ -4,11 +4,10 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { PillTabs } from "@/features/model-picker";
 import { useSettingsDialogStore } from "@/features/settings";
 import { type TranslationKey, useT } from "@/i18n";
 import { TestTubeOutlineIcon } from "@/lib/hugeicons-derived";
-import { cn } from "@/lib/utils";
-import { Tick02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactElement, useEffect, useState } from "react";
 import { ArtifactsPanel } from "./components/artifacts-panel";
@@ -48,7 +47,11 @@ export function LabsPage(): ReactElement {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background">
-      <div className="mx-auto flex w-full max-w-[calc(1180px*var(--ui-space-scale,1))] flex-col gap-6 px-5 pb-20 pt-8 max-sm:px-4 sm:px-9">
+      {/* The panels below size their rows with container queries named
+          train-card, so this column is that container. Without it every one of
+          those rules is dead and each dataset row stacks into five full-width
+          fields. */}
+      <div className="@container/train-card mx-auto flex w-full max-w-[calc(1180px*var(--ui-space-scale,1))] flex-col gap-6 px-5 pb-20 pt-8 max-sm:px-4 sm:px-9">
         <header className="font-heading flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="page-title-halo text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34">
@@ -108,31 +111,18 @@ export function LabsPage(): ReactElement {
 
         {enabled ? (
           <>
-            <div className="flex flex-wrap items-center gap-1.5">
-              {TABS.map(([id, key]) => (
-                <button
-                  key={id}
-                  type="button"
-                  aria-pressed={tab === id}
-                  onClick={() => setTab(id)}
-                  className={cn(
-                    "relative inline-flex h-8 items-center gap-2 rounded-full px-3.5 text-ui-12 font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
-                    tab === id
-                      ? "bg-primary/10 text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {tab === id ? (
-                    <HugeiconsIcon
-                      icon={Tick02Icon}
-                      strokeWidth={2}
-                      className="size-3.5"
-                    />
-                  ) : null}
-                  {t(key)}
-                </button>
-              ))}
-            </div>
+            {/* Narrow columns must not squeeze the tab labels into
+                "Benchm…": a tab keeps its natural width and the strip scrolls
+                when five of them cannot fit side by side. */}
+            <PillTabs
+              ariaLabel={t("labs.title")}
+              value={tab}
+              onValueChange={(next) => setTab(next as StudioTab)}
+              compact={true}
+              fit={true}
+              className="max-w-full overflow-x-auto [&>button[role=tab]]:shrink-0"
+              tabs={TABS.map(([id, key]) => ({ value: id, label: t(key) }))}
+            />
 
             {tab === "artifacts" ? (
               <LabsFeatureGate feature="artifacts">

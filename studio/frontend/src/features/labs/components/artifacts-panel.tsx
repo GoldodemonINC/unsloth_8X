@@ -13,7 +13,6 @@ import {
   Alert02Icon,
   ArrowRight01Icon,
   ArrowUpRight01Icon,
-  Refresh01Icon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -27,6 +26,7 @@ import {
 } from "../api";
 import { useLabsHandoffStore } from "../handoff";
 import { useLabsFeature } from "../store";
+import { LabsPanel } from "./labs-panel";
 
 const ACTION_LABEL: Record<ArtifactAction["id"], TranslationKey> = {
   "continue-training": "labs.action.continue",
@@ -128,27 +128,16 @@ export function ArtifactsPanel(): ReactElement {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-ui-11 text-muted-foreground">
-          {t("labs.artifacts.count", { count: String(records.length) })}
-        </p>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="ml-auto"
-          disabled={loading}
-          onClick={() => void load()}
-        >
-          {loading ? (
-            <Spinner />
-          ) : (
-            <HugeiconsIcon icon={Refresh01Icon} strokeWidth={1.75} />
-          )}
-          {t("labs.refresh")}
-        </Button>
-      </div>
-
+    <LabsPanel
+      title={t("labs.tab.artifacts")}
+      description={
+        records.length > 0
+          ? `${t("labs.artifacts.count", { count: String(records.length) })} · ${t("labs.artifacts.selectHint")}`
+          : t("labs.artifacts.empty")
+      }
+      onRefresh={() => void load()}
+      refreshing={loading}
+    >
       {error ? (
         <p className="flex items-start gap-2 text-ui-11 text-destructive">
           <HugeiconsIcon
@@ -175,7 +164,14 @@ export function ArtifactsPanel(): ReactElement {
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div
+          className={cn(
+            "gap-4",
+            // The detail column exists only once there is something to describe;
+            // an empty dashed pane taught the header to repeat itself.
+            selected && "grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]",
+          )}
+        >
           <ul className="flex flex-col gap-2">
             {records.map((record) => {
               const active = selected?.path === record.path;
@@ -193,7 +189,10 @@ export function ArtifactsPanel(): ReactElement {
                     )}
                   >
                     <span className="flex min-w-0 items-center gap-2">
-                      <span className="min-w-0 truncate text-sm font-medium text-foreground">
+                      {/* Wraps rather than truncates: a checkpoint name is the
+                          one thing this row exists to show, and at the
+                          narrowest card it has ~120px. */}
+                      <span className="min-w-0 text-sm font-medium break-words text-foreground">
                         {record.name}
                       </span>
                       <span className="ml-auto shrink-0 font-mono text-ui-10 text-muted-foreground">
@@ -244,8 +243,8 @@ export function ArtifactsPanel(): ReactElement {
             })}
           </ul>
 
-          <div className="flex min-w-0 flex-col gap-3">
-            {selected ? (
+          {selected ? (
+            <div className="flex min-w-0 flex-col gap-3">
               <>
                 <div className="flex min-w-0 flex-col gap-1 rounded-2xl border border-border/60 p-4">
                   <div className="flex min-w-0 items-center gap-2">
@@ -409,12 +408,8 @@ export function ArtifactsPanel(): ReactElement {
                   </p>
                 ) : null}
               </>
-            ) : (
-              <p className="rounded-2xl border border-dashed border-border/60 p-6 text-ui-11 text-muted-foreground">
-                {t("labs.artifacts.selectHint")}
-              </p>
-            )}
-          </div>
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -423,6 +418,6 @@ export function ArtifactsPanel(): ReactElement {
           {t("labs.artifacts.root")}: {root}
         </p>
       ) : null}
-    </div>
+    </LabsPanel>
   );
 }

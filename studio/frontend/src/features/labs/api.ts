@@ -60,11 +60,7 @@ export interface ArtifactList {
 }
 
 export type PipelineKind =
-  | "merge"
-  | "scale"
-  | "train"
-  | "quantize"
-  | "benchmark";
+  "merge" | "scale" | "train" | "quantize" | "benchmark";
 
 export interface PipelineStageSpec {
   kind: PipelineKind;
@@ -305,9 +301,7 @@ export async function loadBenchmarks(
   return body.records;
 }
 
-export async function runBenchmark(
-  body: BenchmarkRunBody,
-): Promise<LabsJob> {
+export async function runBenchmark(body: BenchmarkRunBody): Promise<LabsJob> {
   const response = await authFetch(`${BASE}/benchmarks/run`, {
     ...jsonRequest(body, "POST"),
   });
@@ -401,6 +395,13 @@ export async function deleteHousekeeping(
 
 export interface CmtDataset {
   path: string;
+  repo_id?: string | null;
+  /**
+   * Whether the plan actually measured this dataset. False for a Hub dataset,
+   * whose rows and tokens stay placeholders until the run downloads it. Never
+   * infer this from a zero: an empty local file measures as zero rows too.
+   */
+  measured: boolean;
   name: string;
   text_column: string | null;
   eval_fraction: number;
@@ -419,6 +420,9 @@ export interface CmtPlan {
   datasets: CmtDataset[];
   totals: {
     datasets: number;
+    /** The figures below are subtotals over the measured datasets only. */
+    measured_datasets: number;
+    unmeasured_datasets: number;
     rows: number;
     train_rows: number;
     eval_rows: number;
@@ -479,7 +483,11 @@ export interface CmtPlan {
 }
 
 export interface CmtDatasetSpec {
+  /** A local file. Empty when the entry names a Hub dataset instead. */
   path: string;
+  repo_id?: string;
+  subset?: string | null;
+  split?: string | null;
   name?: string;
   text_column?: string | null;
   eval_fraction?: number;

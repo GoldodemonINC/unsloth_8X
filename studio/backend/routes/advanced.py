@@ -1187,6 +1187,15 @@ def run_moe(request: MoeRunRequest) -> dict[str, Any]:
             "status": tokenizer.status,
             "warnings": list(tokenizer.warnings),
         }
+        # A standard merge ends with the structural gate, which asks whether the
+        # folder loads as a model. This run wrote a router bundle and left the
+        # experts in their sources, so that question has no answer here. Saying so
+        # in the result keeps the completion honest instead of silently verdictless.
+        result["gate_note"] = (
+            "This run wrote a router bundle, not a checkpoint: the experts stay in their "
+            "source checkpoints, so there is no single folder for the structural check to "
+            "load. Train the router, then judge the fused model where it runs."
+        )
         result["run_manifest"] = _stage_manifest(
             "moe",
             str(output),

@@ -356,7 +356,7 @@ export function LibraryToolbar({
 }) {
   const t = useT();
   return (
-      <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {filterMode !== "none" && (
           <FilterMenu
             filters={filters}

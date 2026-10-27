@@ -13,7 +13,6 @@ import {
 } from "react";
 import { RAISED_SURFACE } from "../surface";
 
-const GAP_PX = 16;
 const FADE_PX = 48;
 const DRAG_SLOP_PX = 4;
 
@@ -21,6 +20,8 @@ export interface HeaderTab {
   key: string;
   label: string;
 }
+
+export type HeaderTabs = { items: HeaderTab[]; active: string; onChange: (key: string) => void };
 
 function fadeMask(left: boolean, right: boolean): string | undefined {
   if (!left && !right) return undefined;
@@ -33,12 +34,10 @@ function TabStrip({
   tabs,
   active,
   onChange,
-  reserve,
 }: {
   tabs: HeaderTab[];
   active: string;
   onChange: (key: string) => void;
-  reserve: number;
 }) {
   const t = useT();
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -76,7 +75,7 @@ function TabStrip({
     else if (right > scroller.scrollLeft + scroller.clientWidth) {
       scroller.scrollLeft = right - scroller.clientWidth + FADE_PX;
     }
-  }, [active, reserve]);
+  }, [active]);
 
   function onPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
     dragged.current = false;
@@ -135,7 +134,7 @@ function TabStrip({
       onClickCapture={onClickCapture}
       // Important: index.css's unlayered `* { scrollbar-width: thin }` outranks any utility.
       className="-mx-2 -mb-3 -mt-1 overflow-x-auto px-2 pb-3 pt-1 [scrollbar-width:none]! [&::-webkit-scrollbar]:hidden!"
-      style={{ marginRight: reserve || undefined, maskImage: mask, WebkitMaskImage: mask }}
+      style={{ maskImage: mask, WebkitMaskImage: mask }}
     >
       <nav ref={listRef} className="flex w-max gap-1" aria-label={t("library.tabs.ariaLabel")}>
         {tabs.map((tab) => (
@@ -159,46 +158,42 @@ function TabStrip({
 
 export function LibraryHeader({
   title,
-  controls,
+  description,
+  trail,
+  toolbar,
   tabs,
 }: {
   title: ReactNode;
-  controls: ReactNode;
-  tabs: { items: HeaderTab[]; active: string; onChange: (key: string) => void } | null;
+  description?: ReactNode;
+  /** Navigation that belongs under the title, e.g. an open folder's ancestors. */
+  trail?: ReactNode;
+  toolbar?: ReactNode;
+  tabs?: HeaderTabs;
 }) {
-  const controlsRef = useRef<HTMLDivElement>(null);
   const titleRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
-  const [controlsWidth, setControlsWidth] = useState(0);
-  const [covered, setCovered] = useState(false);
   const [stuck, setStuck] = useState(false);
 
   useEffect(() => {
-    const controlsNode = controlsRef.current;
     const row = rowRef.current;
     const titleNode = titleRef.current;
-    if (!controlsNode || !row || !titleNode) return;
+    if (!row || !titleNode) return;
     let frame = 0;
     const update = () => {
       frame = 0;
-      setControlsWidth(controlsNode.getBoundingClientRect().width);
-      const top = row.getBoundingClientRect().top;
-      setCovered(top < controlsNode.getBoundingClientRect().bottom);
-      // Stuck once the title scrolls on past the row's margin.
-      const gap = top - titleNode.getBoundingClientRect().bottom;
+      // Stuck once the title block scrolls on past the row's margin.
+      const gap =
+        row.getBoundingClientRect().top - titleNode.getBoundingClientRect().bottom;
       setStuck(gap > Number.parseFloat(getComputedStyle(row).marginTop) + 1);
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(update);
     };
-    const observer = new ResizeObserver(schedule);
-    observer.observe(controlsNode);
     document.addEventListener("scroll", schedule, { capture: true, passive: true });
     window.addEventListener("resize", schedule);
     schedule();
     return () => {
       cancelAnimationFrame(frame);
-      observer.disconnect();
       document.removeEventListener("scroll", schedule, { capture: true });
       window.removeEventListener("resize", schedule);
     };
@@ -206,38 +201,39 @@ export function LibraryHeader({
 
   return (
     <>
-      {/* No height of its own: the controls hang from it over the title row, then stick level with
-          the tabs, whose row is as tall as they are plus its padding. */}
-      <div className="@container pointer-events-none sticky top-4 z-30 flex h-0 justify-end">
-        <div ref={controlsRef} className="pointer-events-auto">
-          {controls}
-        </div>
-      </div>
+      {/* The page's own title block, as every other Studio page has it: the title, and its muted
+          description under it. Nothing floats over it. */}
       <div
         ref={titleRef}
-        className="flex h-9 min-w-0 items-center"
-        style={{ paddingRight: controlsWidth + GAP_PX }}
+        className={cn(
+          "font-heading flex min-w-0 flex-col gap-0.5",
+          // With no tab row under it, the title block carries the separation the row would have.
+          tabs ? undefined : "mb-6",
+        )}
       >
         {title}
+        {description ? (
+          <p className="page-title-halo text-sm text-muted-foreground">
+            {description}
+          </p>
+        ) : null}
+        {trail ? (
+          <div className="page-title-halo text-sm text-muted-foreground">{trail}</div>
+        ) : null}
       </div>
-      <div
-        ref={rowRef}
-        data-stuck={stuck || undefined}
-        className="library-header-row sticky top-0 z-20 -mx-6 mt-2 bg-background px-6 py-4 transition-shadow sm:-mx-10 sm:px-10"
-      >
-        {tabs ? (
-          <div className="pl-3">
-            <TabStrip
-              tabs={tabs.items}
-              active={tabs.active}
-              onChange={tabs.onChange}
-              reserve={covered ? controlsWidth + GAP_PX : 0}
-            />
-          </div>
-        ) : (
-          <div className="h-9" />
-        )}
-      </div>
+      {/* No tabs, no row: an empty sticky band would push the toolbar down for nothing. */}
+      {tabs ? (
+        <div
+          ref={rowRef}
+          data-stuck={stuck || undefined}
+          className="library-header-row sticky top-0 z-20 -mx-4 mt-2 bg-background px-4 py-4 transition-shadow sm:-mx-9 sm:px-9"
+        >
+          <TabStrip tabs={tabs.items} active={tabs.active} onChange={tabs.onChange} />
+        </div>
+      ) : null}
+      {/* The controls take their own row in the body, under the tabs, and this row is their
+          container: their search field narrows with it (cqw rather than the window). */}
+      {toolbar ? <div className="@container min-w-0">{toolbar}</div> : null}
     </>
   );
 }

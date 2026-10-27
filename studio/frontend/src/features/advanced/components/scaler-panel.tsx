@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Spinner } from "@/components/ui/spinner";
+import { hfApiToken, useHfTokenStore } from "@/features/hub";
 import { cn } from "@/lib/utils";
 import {
   Alert02Icon,
@@ -66,6 +67,8 @@ export function ScalerPanel({
   const [runError, setRunError] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [adopted, setAdopted] = useState(false);
+  // Gated and private checkpoints 401 without it; the plan is a Hub read too.
+  const accessToken = hfApiToken(useHfTokenStore((state) => state.token));
 
   // Follow the page's selection until the user types their own source.
   const previousDefault = useRef(defaultSource);
@@ -94,16 +97,15 @@ export function ScalerPanel({
     let cancelled = false;
     setPlanning(true);
     const timer = setTimeout(() => {
-      planScaler(
-        direction === "shrink"
-          ? {
-              source: trimmed,
-              method,
-              direction,
-              target_params: target,
-            }
-          : { source: trimmed, method, direction, added_params: added },
-      )
+      planScaler({
+        source: trimmed,
+        method,
+        direction,
+        ...(direction === "shrink"
+          ? { target_params: target }
+          : { added_params: added }),
+        hf_token: accessToken,
+      })
         .then((result) => {
           if (cancelled) return;
           setPlan(result);
@@ -137,15 +139,24 @@ export function ScalerPanel({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [source, method, added, direction, target]);
+  }, [source, method, added, direction, target, accessToken]);
 
   const start = async () => {
     setRunError(null);
     setAdopted(false);
     const shrinkTarget =
       direction === "shrink" ? (target ?? plan?.default_target_params ?? null) : null;
-    if (!plan || (direction === "grow" && added == null) || shrinkTarget == null) {
+    // Grow has no shrinkTarget by construction, so requiring one here rejected
+    // every grow run with "choose a checkpoint" while the plan was already on screen.
+    if (!plan) {
       setRunError("Choose a checkpoint first.");
+      return;
+    }
+    if (
+      (direction === "grow" && added == null) ||
+      (direction === "shrink" && shrinkTarget == null)
+    ) {
+      setRunError("Set the target size before running.");
       return;
     }
     setRunning(true);
@@ -159,12 +170,14 @@ export function ScalerPanel({
               // response ahead of the select.
               method: plan.method,
               direction,
+              hf_token: accessToken,
             }
           : {
               source: plan.source,
               added_params: added as number,
               method: plan.method,
               direction,
+              hf_token: accessToken,
             },
       );
       setJob(created);

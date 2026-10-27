@@ -4205,6 +4205,7 @@ export const ru = {
     reset: "Сбросить",
   },
   library: {
+    description: "Файлы, медиа, чаты и дообученные модели — всё в одном месте.",
     tabs: {
       ariaLabel: "Разделы библиотеки",
       suggested: "Рекомендуемое",

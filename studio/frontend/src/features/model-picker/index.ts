@@ -2,6 +2,10 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 export { ModelSelector } from "./components/model-selector";
+export {
+  PillTabs,
+  type PillTab,
+} from "./components/model-selector/pill-tabs";
 export { FolderBrowser } from "./components/model-selector/folder-browser";
 export { invalidateLlamaFlagCatalog } from "./api/llama-flags";
 export { ModelRowMenu } from "./components/model-selector/model-row-menu";

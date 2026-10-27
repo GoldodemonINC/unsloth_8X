@@ -390,7 +390,7 @@ export function ChatsToolbar({
 }) {
   const t = useT();
   return (
-    <div className="flex min-w-0 items-center gap-2">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
       {filters && <FilterMenu filters={filters} onChange={onFiltersChange} facets={facets} />}
       {sort}
       {VIEW_OPTIONS.map(({ value, label, icon }) => (

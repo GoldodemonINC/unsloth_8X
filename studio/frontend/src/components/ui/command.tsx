@@ -54,10 +54,9 @@ function CommandDialog({
 }) {
   return (
     <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
+      {/* Inside the content, not beside it: a header outside the dialog renders on
+          every page while the dialog is closed, so the label lands in the
+          accessibility tree twice per route with nothing on screen to explain it. */}
       <DialogContent
         className={cn(
           "rounded-4xl! max-sm:rounded-none! top-1/3 translate-y-0 overflow-hidden p-0",
@@ -67,6 +66,10 @@ function CommandDialog({
         showCloseButton={showCloseButton}
         onCloseAutoFocus={onCloseAutoFocus}
       >
+        <DialogHeader className="sr-only">
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
         {children}
       </DialogContent>
     </Dialog>

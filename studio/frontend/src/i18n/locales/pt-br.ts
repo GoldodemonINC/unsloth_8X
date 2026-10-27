@@ -4207,6 +4207,7 @@ export const ptBR = {
     reset: "Redefinir",
   },
   library: {
+    description: "Arquivos, mídia, chats e modelos ajustados, tudo em um só lugar.",
     tabs: {
       ariaLabel: "Seções da Biblioteca",
       suggested: "Sugestões",

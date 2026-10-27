@@ -4259,6 +4259,7 @@ export const fr = {
     reset: "Réinitialiser",
   },
   library: {
+    description: "Fichiers, médias, chats et modèles affinés, au même endroit.",
     tabs: {
       ariaLabel: "Sections de la Bibliothèque",
       suggested: "Suggestions",

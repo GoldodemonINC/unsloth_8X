@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: NRC-2
 // Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
+import { PathInput } from "@/components/path-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -17,7 +18,6 @@ import {
   Alert02Icon,
   Delete02Icon,
   PlayIcon,
-  Refresh01Icon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -36,6 +36,7 @@ import {
   loadBenchmarks,
   runBenchmark,
 } from "../api";
+import { LABS_PATH_INPUT_CLASS, LabsPanel } from "./labs-panel";
 
 const NOISE = 0.015;
 const INPUT_CLASS =
@@ -87,8 +88,9 @@ async function waitForJob(
 export function BenchmarksPanel(): ReactElement {
   const t = useT();
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [capabilities, setCapabilities] =
-    useState<AdvancedCapabilities | null>(null);
+  const [capabilities, setCapabilities] = useState<AdvancedCapabilities | null>(
+    null,
+  );
   const [records, setRecords] = useState<BenchmarkRecord[]>([]);
   const [baseline, setBaseline] = useState("");
   const [customBaseline, setCustomBaseline] = useState("");
@@ -239,205 +241,188 @@ export function BenchmarksPanel(): ReactElement {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <section className="elevated-card flex flex-col gap-4 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="text-ui-14 font-semibold text-foreground">
-              {t("labs.benchmarks.title")}
-            </h2>
-            <p className="mt-1 max-w-3xl text-ui-11 leading-relaxed text-muted-foreground">
-              {t("labs.benchmarks.description")}
-            </p>
+    <LabsPanel
+      title={t("labs.benchmarks.title")}
+      description={t("labs.benchmarks.description")}
+      onRefresh={() => void refreshRecords()}
+      refreshing={loading}
+    >
+      {loading ? (
+        <div className="flex items-center gap-2 text-ui-11 text-muted-foreground">
+          <Spinner />
+          {t("labs.loading")}
+        </div>
+      ) : null}
+
+      {capabilities && !capabilities.eval_harness.available ? (
+        <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-ui-11 text-amber-700 dark:text-amber-300">
+          <div className="flex min-w-0 items-start gap-2">
+            <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-3.5" />
+            <span>
+              {t("labs.benchmarks.harnessMissing")}{" "}
+              <code className="font-mono">
+                {capabilities.eval_harness.install_hint}
+              </code>
+              . {t("labs.benchmarks.harnessInstallHint")}
+            </span>
           </div>
           <Button
             size="sm"
-            variant="ghost"
-            onClick={() => void refreshRecords()}
+            variant="outline"
+            disabled={installing}
+            onClick={() => void installHarness()}
           >
-            <HugeiconsIcon icon={Refresh01Icon} className="size-3.5" />
-            {t("labs.refresh")}
+            {installing ? <Spinner /> : null}
+            {installing
+              ? t("labs.benchmarks.installingHarness")
+              : t("labs.benchmarks.installHarness")}
           </Button>
         </div>
+      ) : null}
 
-        {loading ? (
-          <div className="flex items-center gap-2 text-ui-11 text-muted-foreground">
-            <Spinner />
-            {t("labs.loading")}
-          </div>
-        ) : null}
+      <div className="grid gap-4 @2xl/train-card:grid-cols-2">
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.benchmarks.baseline")}
+          </span>
+          <select
+            className={INPUT_CLASS}
+            value={baseline}
+            onChange={(event) => setBaseline(event.target.value)}
+          >
+            <option value="">{t("labs.benchmarks.pickBaseline")}</option>
+            {artifacts.map((artifact) => (
+              <option key={artifact.path} value={artifact.path}>
+                {artifact.name}
+              </option>
+            ))}
+          </select>
+          <PathInput
+            value={customBaseline}
+            onChange={setCustomBaseline}
+            placeholder={t("labs.benchmarks.baselinePlaceholder")}
+            kind="folder"
+            title="Choose the baseline checkpoint"
+            className={LABS_PATH_INPUT_CLASS}
+            inputClassName={INPUT_CLASS}
+          />
+          <span className="text-ui-10 text-muted-foreground/70">
+            {t("labs.benchmarks.baselineHint")}
+          </span>
+        </label>
 
-        {capabilities && !capabilities.eval_harness.available ? (
-          <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-ui-11 text-amber-700 dark:text-amber-300">
-            <div className="flex min-w-0 items-start gap-2">
-              <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-3.5" />
-              <span>
-                {t("labs.benchmarks.harnessMissing")}{" "}
-                <code className="font-mono">
-                  {capabilities.eval_harness.install_hint}
-                </code>
-                . {t("labs.benchmarks.harnessInstallHint")}
-              </span>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={installing}
-              onClick={() => void installHarness()}
-            >
-              {installing ? <Spinner /> : null}
-              {installing
-                ? t("labs.benchmarks.installingHarness")
-                : t("labs.benchmarks.installHarness")}
-            </Button>
-          </div>
-        ) : null}
-
-        <div className="grid gap-4 @2xl/train-card:grid-cols-2">
-          <label className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.benchmarks.baseline")}
-            </span>
-            <select
-              className={INPUT_CLASS}
-              value={baseline}
-              onChange={(event) => setBaseline(event.target.value)}
-            >
-              <option value="">{t("labs.benchmarks.pickBaseline")}</option>
-              {artifacts.map((artifact) => (
-                <option key={artifact.path} value={artifact.path}>
-                  {artifact.name}
-                </option>
-              ))}
-            </select>
-            <input
-              className={INPUT_CLASS}
-              placeholder={t("labs.benchmarks.baselinePlaceholder")}
-              value={customBaseline}
-              onChange={(event) => setCustomBaseline(event.target.value)}
-            />
-            <span className="text-ui-10 text-muted-foreground/70">
-              {t("labs.benchmarks.baselineHint")}
-            </span>
-          </label>
-
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.benchmarks.candidates")}
-            </span>
-            {artifacts.length === 0 ? (
-              <p className="text-ui-11 text-muted-foreground">
-                {t("labs.artifacts.empty")}
-              </p>
-            ) : (
-              <div className="max-h-44 overflow-auto rounded-lg border border-border/70 bg-background/40 p-2">
-                {artifacts.map((artifact) => {
-                  const checked = selected.includes(artifact.path);
-                  return (
-                    <label
-                      key={artifact.path}
-                      className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-ui-11 text-foreground hover:bg-muted/40"
-                    >
-                      <input
-                        type="checkbox"
-                        className="size-3.5 accent-primary"
-                        checked={checked}
-                        onChange={() =>
-                          setSelected((current) =>
-                            checked
-                              ? current.filter((path) => path !== artifact.path)
-                              : [...current, artifact.path],
-                          )
-                        }
-                      />
-                      <span className="truncate">{artifact.name}</span>
-                      <span className="ml-auto shrink-0 text-ui-10 text-muted-foreground">
-                        {artifact.params
-                          ? `${(artifact.params / 1e6).toFixed(0)}M`
-                          : ""}
-                      </span>
-                    </label>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.benchmarks.suites")}
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {suiteOptions.map((suite) => {
-                const on = suites.includes(suite.id);
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.benchmarks.candidates")}
+          </span>
+          {artifacts.length === 0 ? (
+            <p className="text-ui-11 text-muted-foreground">
+              {t("labs.artifacts.empty")}
+            </p>
+          ) : (
+            <div className="max-h-44 overflow-auto rounded-lg border border-border/70 bg-background/40 p-2">
+              {artifacts.map((artifact) => {
+                const checked = selected.includes(artifact.path);
                 return (
-                  <button
-                    key={suite.id}
-                    type="button"
-                    aria-pressed={on}
-                    title={suite.description}
-                    onClick={() => toggleSuite(suite.id)}
-                    className={cn(
-                      "rounded-full border px-2.5 py-1 text-ui-11 transition-colors",
-                      on
-                        ? "border-border bg-muted text-foreground"
-                        : "border-border/60 text-muted-foreground hover:text-foreground",
-                    )}
+                  <label
+                    key={artifact.path}
+                    className="flex cursor-pointer items-center gap-2 rounded-md px-1.5 py-1 text-ui-11 text-foreground hover:bg-muted/40"
                   >
-                    {suite.label}
-                  </button>
+                    <input
+                      type="checkbox"
+                      className="size-3.5 accent-primary"
+                      checked={checked}
+                      onChange={() =>
+                        setSelected((current) =>
+                          checked
+                            ? current.filter((path) => path !== artifact.path)
+                            : [...current, artifact.path],
+                        )
+                      }
+                    />
+                    <span className="min-w-0 break-words">{artifact.name}</span>
+                    <span className="ml-auto shrink-0 text-ui-10 text-muted-foreground">
+                      {artifact.params
+                        ? `${(artifact.params / 1e6).toFixed(0)}M`
+                        : ""}
+                    </span>
+                  </label>
                 );
               })}
             </div>
+          )}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-4">
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.benchmarks.suites")}
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {suiteOptions.map((suite) => {
+              const on = suites.includes(suite.id);
+              return (
+                <button
+                  key={suite.id}
+                  type="button"
+                  aria-pressed={on}
+                  title={suite.description}
+                  onClick={() => toggleSuite(suite.id)}
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-ui-11 transition-colors",
+                    on
+                      ? "border-border bg-muted text-foreground"
+                      : "border-border/60 text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {suite.label}
+                </button>
+              );
+            })}
           </div>
-
-          <label className="flex w-28 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.benchmarks.limit")}
-            </span>
-            <input
-              className={INPUT_CLASS}
-              inputMode="numeric"
-              value={limit}
-              onChange={(event) => setLimit(event.target.value)}
-              placeholder={t("labs.benchmarks.limitPlaceholder")}
-            />
-          </label>
-
-          <Button
-            size="sm"
-            disabled={!canRun}
-            onClick={() => void run()}
-            className="mb-0.5"
-          >
-            {running ? (
-              <Spinner />
-            ) : (
-              <HugeiconsIcon icon={PlayIcon} className="size-3.5" />
-            )}
-            {running
-              ? t("labs.benchmarks.running")
-              : t("labs.benchmarks.run")}
-          </Button>
         </div>
 
-        {status ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-ui-11 text-muted-foreground">
-            <Spinner />
-            {status}
-          </div>
-        ) : null}
-        {error ? (
-          <p className="text-ui-11 text-destructive">{error}</p>
-        ) : null}
-        <p className="text-ui-10 leading-relaxed text-muted-foreground/70">
-          {t("labs.benchmarks.noise")}
-        </p>
-      </section>
+        <label className="flex w-28 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.benchmarks.limit")}
+          </span>
+          <input
+            className={INPUT_CLASS}
+            inputMode="numeric"
+            value={limit}
+            onChange={(event) => setLimit(event.target.value)}
+            placeholder={t("labs.benchmarks.limitPlaceholder")}
+          />
+        </label>
 
-      <section className="elevated-card flex flex-col gap-3 p-5">
+        <Button
+          size="sm"
+          disabled={!canRun}
+          onClick={() => void run()}
+          className="mb-0.5"
+        >
+          {running ? (
+            <Spinner />
+          ) : (
+            <HugeiconsIcon icon={PlayIcon} className="size-3.5" />
+          )}
+          {running ? t("labs.benchmarks.running") : t("labs.benchmarks.run")}
+        </Button>
+      </div>
+
+      {status ? (
+        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-ui-11 text-muted-foreground">
+          <Spinner />
+          {status}
+        </div>
+      ) : null}
+      {error ? <p className="text-ui-11 text-destructive">{error}</p> : null}
+      <p className="text-ui-10 leading-relaxed text-muted-foreground/70">
+        {t("labs.benchmarks.noise")}
+      </p>
+
+      <div className="flex flex-col gap-3 rounded-xl border border-border/70 p-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-ui-13 font-semibold text-foreground">
             {t("labs.benchmarks.history")}
@@ -574,7 +559,7 @@ export function BenchmarksPanel(): ReactElement {
             {t("labs.benchmarks.stored")}
           </p>
         ) : null}
-      </section>
-    </div>
+      </div>
+    </LabsPanel>
   );
 }

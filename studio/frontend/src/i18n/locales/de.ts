@@ -4248,6 +4248,7 @@ export const de = {
     reset: "Zurücksetzen",
   },
   library: {
+    description: "Dateien, Medien, Chats und feinabgestimmte Modelle an einem Ort.",
     tabs: {
       ariaLabel: "Bereiche der Bibliothek",
       suggested: "Vorschläge",

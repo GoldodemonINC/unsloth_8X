@@ -4163,6 +4163,7 @@ export const ko = {
     reset: "재설정",
   },
   library: {
+    description: "파일, 미디어, 채팅, 파인튜닝한 모델을 한곳에 모아 둡니다.",
     tabs: {
       ariaLabel: "라이브러리 섹션",
       suggested: "추천",

@@ -4291,6 +4291,7 @@ export const he = {
     reset: "איפוס",
   },
   library: {
+    description: "קבצים, מדיה, צ׳אטים ומודלים מכווננים — הכול במקום אחד.",
     tabs: {
       ariaLabel: "מדורי הספרייה",
       suggested: "מוצעים",

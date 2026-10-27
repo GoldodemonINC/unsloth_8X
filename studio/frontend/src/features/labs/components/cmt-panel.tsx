@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: NRC-2
 // Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
+import { PathInput } from "@/components/path-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -15,16 +16,10 @@ import {
   Delete02Icon,
   PlusSignIcon,
   PlayIcon,
-  Refresh01Icon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import {
-  type ReactElement,
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
+import { type ReactElement, useCallback, useEffect, useState } from "react";
 import {
   type CmtPlan,
   type CmtSpec,
@@ -32,9 +27,26 @@ import {
   planCmt,
   runCmt,
 } from "../api";
+import { LABS_PATH_INPUT_CLASS, LabsPanel } from "./labs-panel";
 
 const INPUT_CLASS =
   "h-8 min-w-0 rounded-lg border border-border bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+const HUB_DATASET_ID =
+  /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * One field takes either: a local dataset file, or `owner/name` on the Hub.
+ * Anything that names a file on disk (a separator, a drive, a leading `~` or
+ * `.`, or a dataset extension) stays a path, so `data/train.jsonl` is never
+ * mistaken for a Hub repo.
+ */
+function isHubDataset(value: string): boolean {
+  const text = value.trim();
+  if (!HUB_DATASET_ID.test(text)) return false;
+  if (/[\\:~]/.test(text) || text.startsWith(".")) return false;
+  return !/\.(jsonl|json|parquet|csv|txt)$/i.test(text);
+}
 
 interface DatasetRow {
   id: string;
@@ -160,7 +172,8 @@ export function CmtPanel(): ReactElement {
     const datasets = rows
       .filter((row) => row.path.trim() !== "")
       .map((row) => ({
-        path: row.path.trim(),
+        path: isHubDataset(row.path) ? "" : row.path.trim(),
+        ...(isHubDataset(row.path) ? { repo_id: row.path.trim() } : {}),
         name: row.name.trim() || undefined,
         text_column: row.textColumn.trim() || null,
         eval_fraction: Math.max(
@@ -239,22 +252,208 @@ export function CmtPanel(): ReactElement {
   };
 
   return (
-    <div className="flex flex-col gap-4">
-      <section className="elevated-card flex flex-col gap-4 p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-ui-14 font-semibold text-foreground">
-                {t("labs.cmt.title")}
-              </h2>
-              <Badge variant="outline" className="text-ui-9">
-                {t("labs.experimental")}
-              </Badge>
-            </div>
-            <p className="mt-1 max-w-3xl text-ui-11 leading-relaxed text-muted-foreground">
-              {t("labs.cmt.description")}
-            </p>
+    <LabsPanel
+      title={t("labs.cmt.title")}
+      description={t("labs.cmt.description")}
+    >
+      <div className="grid gap-3 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.cmt.source")}
+          </span>
+          {/* Stacked below the panel's two-column layout, the field must keep
+              the full row: the desktop build's Browse button is a sibling
+              (~60px) and would otherwise leave ~110px of typing room. */}
+          <PathInput
+            value={source}
+            onChange={(value) => {
+              setSource(value);
+              setPlan(null);
+            }}
+            placeholder={t("labs.cmt.sourcePlaceholder")}
+            kind="folder"
+            title="Choose the base checkpoint"
+            className={LABS_PATH_INPUT_CLASS}
+            inputClassName={INPUT_CLASS}
+          />
+          <span className="text-ui-10 text-muted-foreground/70">
+            {t("labs.cmt.sourceHint")}
+          </span>
+        </label>
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.cmt.mode")}
+          </span>
+          <div className="flex gap-1.5">
+            {(
+              [
+                ["cpt", t("labs.cmt.modeCpt")],
+                ["finetune", t("labs.cmt.modeFinetune")],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={mode === value}
+                onClick={() => {
+                  setMode(value);
+                  setPlan(null);
+                }}
+                className={cn(
+                  "rounded-full border px-3 py-1 text-ui-11 transition-colors",
+                  mode === value
+                    ? "border-border bg-muted text-foreground"
+                    : "border-border/60 text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          <span className="text-ui-10 text-muted-foreground/70">
+            {mode === "cpt"
+              ? t("labs.cmt.modeCptHint")
+              : t("labs.cmt.modeFinetuneHint")}
+          </span>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
+            {t("labs.cmt.datasets")}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setRows((current) => [...current, newRow()])}
+            disabled={rows.length >= 8}
+          >
+            <HugeiconsIcon icon={PlusSignIcon} className="size-3.5" />
+            {t("labs.cmt.addDataset")}
+          </Button>
+        </div>
+        <div className="flex flex-col gap-2">
+          {rows.map((row, index) => (
+            <div
+              key={row.id}
+              className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-2.5 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_5rem_7rem_2rem]"
+            >
+              <PathInput
+                value={row.path}
+                onChange={(value) => updateRow(row.id, { path: value })}
+                placeholder={t("labs.cmt.datasetPath", {
+                  index: index + 1,
+                })}
+                kind="file"
+                extensions={["jsonl", "json", "parquet", "csv", "txt"]}
+                title="Choose a dataset file"
+                className={LABS_PATH_INPUT_CLASS}
+                inputClassName={INPUT_CLASS}
+              />
+              <input
+                className={INPUT_CLASS}
+                value={row.name}
+                onChange={(event) =>
+                  updateRow(row.id, { name: event.target.value })
+                }
+                placeholder={t("labs.cmt.datasetName")}
+              />
+              <label className="flex items-center gap-1">
+                <input
+                  className={cn(INPUT_CLASS, "w-full")}
+                  inputMode="decimal"
+                  value={row.evalPercent}
+                  onChange={(event) =>
+                    updateRow(row.id, { evalPercent: event.target.value })
+                  }
+                  aria-label={t("labs.cmt.evalPercent")}
+                />
+                <span className="text-ui-10 text-muted-foreground">%</span>
+              </label>
+              <input
+                className={INPUT_CLASS}
+                value={row.textColumn}
+                onChange={(event) =>
+                  updateRow(row.id, { textColumn: event.target.value })
+                }
+                placeholder={t("labs.cmt.textColumn")}
+              />
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                className="justify-self-end"
+                aria-label={t("labs.cmt.removeDataset")}
+                disabled={rows.length <= 1}
+                onClick={() =>
+                  setRows((current) =>
+                    current.filter((item) => item.id !== row.id),
+                  )
+                }
+              >
+                <HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+        <p className="text-ui-10 text-muted-foreground/70">
+          {t("labs.cmt.datasetHint")}
+        </p>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-3 @3xl/train-card:grid-cols-6">
+        {(
+          [
+            [t("labs.cmt.added"), added, setAdded, "4.6M"],
+            [t("labs.cmt.steps"), steps, setSteps, "100"],
+            [t("labs.cmt.batch"), batch, setBatch, "1"],
+            [t("labs.cmt.accum"), accum, setAccum, "8"],
+            [t("labs.cmt.sequence"), sequence, setSequence, "2048"],
+            [t("labs.cmt.lr"), learningRate, setLearningRate, "0.0002"],
+          ] as const
+        ).map(([label, value, setter, placeholder]) => (
+          <label key={label} className="flex min-w-0 flex-col gap-1">
+            <span className="text-ui-10 text-muted-foreground">{label}</span>
+            <input
+              className={INPUT_CLASS}
+              inputMode="decimal"
+              value={value}
+              onChange={(event) => {
+                setter(event.target.value);
+                setPlan(null);
+              }}
+              placeholder={placeholder}
+            />
+          </label>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void makePlan()}
+          disabled={planning || running}
+        >
+          {planning ? (
+            <Spinner />
+          ) : (
+            <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" />
+          )}
+          {planning ? t("labs.cmt.planning") : t("labs.cmt.plan")}
+        </Button>
+        <Button
+          size="sm"
+          onClick={() => void start()}
+          disabled={!plan?.runnable || running || planning}
+        >
+          {running ? (
+            <Spinner />
+          ) : (
+            <HugeiconsIcon icon={PlayIcon} className="size-3.5" />
+          )}
+          {running ? t("labs.cmt.running") : t("labs.cmt.run")}
+        </Button>
+        {plan || result || error ? (
           <Button
             size="sm"
             variant="ghost"
@@ -264,219 +463,28 @@ export function CmtPanel(): ReactElement {
               setError(null);
             }}
           >
-            <HugeiconsIcon icon={Refresh01Icon} className="size-3.5" />
             {t("labs.cmt.reset")}
           </Button>
-        </div>
-
-        <div className="grid gap-3 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-          <label className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.cmt.source")}
-            </span>
-            <input
-              className={INPUT_CLASS}
-              value={source}
-              onChange={(event) => {
-                setSource(event.target.value);
-                setPlan(null);
-              }}
-              placeholder={t("labs.cmt.sourcePlaceholder")}
-            />
-            <span className="text-ui-10 text-muted-foreground/70">
-              {t("labs.cmt.sourceHint")}
-            </span>
-          </label>
-          <div className="flex min-w-0 flex-col gap-1.5">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.cmt.mode")}
-            </span>
-            <div className="flex gap-1.5">
-              {(
-                [
-                  ["cpt", t("labs.cmt.modeCpt")],
-                  ["finetune", t("labs.cmt.modeFinetune")],
-                ] as const
-              ).map(([value, label]) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={mode === value}
-                  onClick={() => {
-                    setMode(value);
-                    setPlan(null);
-                  }}
-                  className={cn(
-                    "rounded-full border px-3 py-1 text-ui-11 transition-colors",
-                    mode === value
-                      ? "border-border bg-muted text-foreground"
-                      : "border-border/60 text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <span className="text-ui-10 text-muted-foreground/70">
-              {mode === "cpt"
-                ? t("labs.cmt.modeCptHint")
-                : t("labs.cmt.modeFinetuneHint")}
-            </span>
-          </div>
-        </div>
-
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
-              {t("labs.cmt.datasets")}
-            </span>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setRows((current) => [...current, newRow()])}
-              disabled={rows.length >= 8}
-            >
-              <HugeiconsIcon icon={PlusSignIcon} className="size-3.5" />
-              {t("labs.cmt.addDataset")}
-            </Button>
-          </div>
-          <div className="flex flex-col gap-2">
-            {rows.map((row, index) => (
-              <div
-                key={row.id}
-                className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-2.5 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_5rem_5rem_2rem]"
-              >
-                <input
-                  className={INPUT_CLASS}
-                  value={row.path}
-                  onChange={(event) =>
-                    updateRow(row.id, { path: event.target.value })
-                  }
-                  placeholder={t("labs.cmt.datasetPath", {
-                    index: index + 1,
-                  })}
-                />
-                <input
-                  className={INPUT_CLASS}
-                  value={row.name}
-                  onChange={(event) =>
-                    updateRow(row.id, { name: event.target.value })
-                  }
-                  placeholder={t("labs.cmt.datasetName")}
-                />
-                <label className="flex items-center gap-1">
-                  <input
-                    className={cn(INPUT_CLASS, "w-full")}
-                    inputMode="decimal"
-                    value={row.evalPercent}
-                    onChange={(event) =>
-                      updateRow(row.id, { evalPercent: event.target.value })
-                    }
-                    aria-label={t("labs.cmt.evalPercent")}
-                  />
-                  <span className="text-ui-10 text-muted-foreground">%</span>
-                </label>
-                <input
-                  className={INPUT_CLASS}
-                  value={row.textColumn}
-                  onChange={(event) =>
-                    updateRow(row.id, { textColumn: event.target.value })
-                  }
-                  placeholder={t("labs.cmt.textColumn")}
-                />
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  aria-label={t("labs.cmt.removeDataset")}
-                  disabled={rows.length <= 2}
-                  onClick={() =>
-                    setRows((current) =>
-                      current.filter((item) => item.id !== row.id),
-                    )
-                  }
-                >
-                  <HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
-                </Button>
-              </div>
-            ))}
-          </div>
-          <p className="text-ui-10 text-muted-foreground/70">
-            {t("labs.cmt.datasetHint")}
-          </p>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-3 @3xl/train-card:grid-cols-6">
-          {(
-            [
-              [t("labs.cmt.added"), added, setAdded, "4.6M"],
-              [t("labs.cmt.steps"), steps, setSteps, "100"],
-              [t("labs.cmt.batch"), batch, setBatch, "1"],
-              [t("labs.cmt.accum"), accum, setAccum, "8"],
-              [t("labs.cmt.sequence"), sequence, setSequence, "2048"],
-              [t("labs.cmt.lr"), learningRate, setLearningRate, "0.0002"],
-            ] as const
-          ).map(([label, value, setter, placeholder]) => (
-            <label key={label} className="flex min-w-0 flex-col gap-1">
-              <span className="text-ui-10 text-muted-foreground">{label}</span>
-              <input
-                className={INPUT_CLASS}
-                inputMode="decimal"
-                value={value}
-                onChange={(event) => {
-                  setter(event.target.value);
-                  setPlan(null);
-                }}
-                placeholder={placeholder}
-              />
-            </label>
-          ))}
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void makePlan()}
-            disabled={planning || running}
-          >
-            {planning ? (
-              <Spinner />
-            ) : (
-              <HugeiconsIcon icon={ArrowDown01Icon} className="size-3.5" />
-            )}
-            {planning ? t("labs.cmt.planning") : t("labs.cmt.plan")}
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => void start()}
-            disabled={!plan?.runnable || running || planning}
-          >
-            {running ? (
-              <Spinner />
-            ) : (
-              <HugeiconsIcon icon={PlayIcon} className="size-3.5" />
-            )}
-            {running ? t("labs.cmt.running") : t("labs.cmt.run")}
-          </Button>
-          <span className="text-ui-10 text-muted-foreground/70">
-            {t("labs.cmt.oneJob")}
-          </span>
-        </div>
-
-        {status ? (
-          <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-ui-11 text-muted-foreground">
-            <Spinner />
-            {status}
-          </div>
         ) : null}
-        {error ? (
-          <p className="whitespace-pre-wrap text-ui-11 text-destructive">
-            {error}
-          </p>
-        ) : null}
-      </section>
+        <span className="text-ui-10 text-muted-foreground/70">
+          {t("labs.cmt.oneJob")}
+        </span>
+      </div>
+
+      {status ? (
+        <div className="flex items-center gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-ui-11 text-muted-foreground">
+          <Spinner />
+          {status}
+        </div>
+      ) : null}
+      {error ? (
+        <p className="whitespace-pre-wrap text-ui-11 text-destructive">
+          {error}
+        </p>
+      ) : null}
 
       {plan ? (
-        <section className="elevated-card flex flex-col gap-3 p-5">
+        <div className="flex flex-col gap-3 rounded-xl border border-border/70 p-4">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-ui-13 font-semibold text-foreground">
               {t("labs.cmt.planTitle")}
@@ -489,9 +497,7 @@ export function CmtPanel(): ReactElement {
                   : "border-destructive/30 bg-destructive/10 text-destructive",
               )}
             >
-              {plan.runnable
-                ? t("labs.cmt.runnable")
-                : t("labs.cmt.blocked")}
+              {plan.runnable ? t("labs.cmt.runnable") : t("labs.cmt.blocked")}
             </Badge>
             {plan.expansion.floor_bypassed ? (
               <Badge variant="outline" className="text-ui-9">
@@ -508,10 +514,7 @@ export function CmtPanel(): ReactElement {
 
           <div className="grid gap-2 sm:grid-cols-2 @3xl/train-card:grid-cols-4">
             {[
-              [
-                t("labs.cmt.baseParams"),
-                params(plan.expansion.base_params),
-              ],
+              [t("labs.cmt.baseParams"), params(plan.expansion.base_params)],
               [t("labs.cmt.addedParams"), plan.expansion.added_label],
               [t("labs.cmt.targetParams"), plan.expansion.target_label],
               [
@@ -559,26 +562,32 @@ export function CmtPanel(): ReactElement {
               <tbody>
                 {plan.datasets.map((dataset) => (
                   <tr
-                    key={dataset.path}
+                    key={dataset.repo_id || dataset.path}
                     className="border-t border-border/50"
                   >
                     <td className="max-w-[22rem] truncate px-3 py-1.5">
                       <span className="text-foreground">{dataset.name}</span>
                       <span className="ml-2 font-mono text-ui-9 text-muted-foreground">
-                        {dataset.path}
+                        {dataset.repo_id || dataset.path}
                       </span>
                     </td>
+                    {/* An unmeasured dataset has placeholder zeroes, not counts; the
+                        dash keeps the row from reading as a measured empty file. */}
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {dataset.rows.toLocaleString()}
+                      {dataset.measured ? dataset.rows.toLocaleString() : "—"}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {dataset.train_rows.toLocaleString()}
+                      {dataset.measured
+                        ? dataset.train_rows.toLocaleString()
+                        : "—"}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {dataset.eval_rows.toLocaleString()}
+                      {dataset.measured
+                        ? dataset.eval_rows.toLocaleString()
+                        : "—"}
                     </td>
                     <td className="px-3 py-1.5 text-right font-mono">
-                      {params(dataset.tokens_estimate)}
+                      {dataset.measured ? params(dataset.tokens_estimate) : "—"}
                     </td>
                   </tr>
                 ))}
@@ -587,12 +596,19 @@ export function CmtPanel(): ReactElement {
           </div>
 
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-ui-10 text-muted-foreground">
+            {/* Both are derived from measured rows, so neither is offered when
+                nothing was measured: the step count would be a bare fallback. */}
             <span>
-              {t("labs.cmt.tokensTotal")}: {params(plan.totals.tokens_estimate)}
+              {t("labs.cmt.tokensTotal")}:{" "}
+              {plan.totals.measured_datasets === 0
+                ? "—"
+                : params(plan.totals.tokens_estimate)}
             </span>
             <span>
               {t("labs.cmt.suggestedSteps")}:{" "}
-              {plan.training.suggested_steps.toLocaleString()}
+              {plan.totals.measured_datasets === 0
+                ? "—"
+                : plan.training.suggested_steps.toLocaleString()}
             </span>
             <span>{plan.sizing.note}</span>
           </div>
@@ -610,11 +626,11 @@ export function CmtPanel(): ReactElement {
               ))}
             </ul>
           ) : null}
-        </section>
+        </div>
       ) : null}
 
       {result ? (
-        <section className="elevated-card flex flex-col gap-3 p-5">
+        <div className="flex flex-col gap-3 rounded-xl border border-border/70 p-4">
           <div className="flex flex-wrap items-center gap-2">
             <HugeiconsIcon
               icon={Tick02Icon}
@@ -705,8 +721,7 @@ export function CmtPanel(): ReactElement {
               {t("labs.cmt.stepsRun")}: {result.training?.steps_run ?? "—"}
             </span>
             <span>
-              {t("labs.cmt.tokensSeen")}:{" "}
-              {params(result.training?.tokens_seen)}
+              {t("labs.cmt.tokensSeen")}: {params(result.training?.tokens_seen)}
             </span>
             <span>
               {t("labs.cmt.gpuHours")}:{" "}
@@ -741,8 +756,8 @@ export function CmtPanel(): ReactElement {
               ))}
             </ul>
           ) : null}
-        </section>
+        </div>
       ) : null}
-    </div>
+    </LabsPanel>
   );
 }

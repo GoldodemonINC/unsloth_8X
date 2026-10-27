@@ -85,7 +85,7 @@ import {
   useState,
 } from "react";
 import { NameDialog } from "../components/library-dialogs";
-import { type HeaderTab, LibraryHeader } from "../components/library-header";
+import { type HeaderTabs, LibraryHeader } from "../components/library-header";
 import type { LibrarySearch } from "../search";
 import { CardGrid } from "../components/library-cards";
 import { LIST_ROW_GAP } from "../components/library-list";
@@ -210,8 +210,6 @@ function isDateField(key: string): key is DateField {
   return (DATE_FIELDS as readonly string[]).includes(key);
 }
 
-type HeaderTabs = { items: HeaderTab[]; active: string; onChange: (key: string) => void };
-
 type PendingDelete =
   | { kind: "chats"; chats: SidebarItem[]; deleteFiles: boolean }
   | { kind: "project"; project: ProjectRecord; deleteFiles: boolean };
@@ -250,11 +248,13 @@ export interface FavoriteChatEntries {
 export function ChatsLibrary({
   search,
   title,
+  description,
   tabs,
   embedded,
 }: {
   search: LibrarySearch;
   title?: ReactNode;
+  description?: ReactNode;
   tabs?: HeaderTabs;
   embedded?: {
     query: string;
@@ -1311,7 +1311,7 @@ export function ChatsLibrary({
   }
 
   const sectionPills = (
-    <nav aria-label={t("library.chats.sections.ariaLabel")} className="flex flex-wrap items-center gap-x-8 gap-y-2 pl-3.5">
+    <nav aria-label={t("library.chats.sections.ariaLabel")} className="flex flex-wrap items-center gap-x-8 gap-y-2">
       {CHATS_SECTIONS.map((entry) => {
         const active = openSectionId ? entry === "sections" : entry === section;
         return (
@@ -1513,10 +1513,11 @@ export function ChatsLibrary({
       {embedded ? (
         embedded.render(favoriteEntries())
       ) : (
-        <main className="relative mx-auto w-full max-w-[calc(1560px*var(--ui-space-scale,1))] px-6 pb-24 pt-8 font-heading sm:px-10">
+        <main className="relative mx-auto w-full max-w-[calc(1180px*var(--ui-space-scale,1))] px-5 pb-20 pt-8 font-heading max-sm:px-4 sm:px-9">
           <LibraryHeader
             title={title}
-            controls={
+            description={description}
+            toolbar={
               <ChatsToolbar
                 filters={section === "projects" || section === "sections" ? undefined : filters}
                 onFiltersChange={setFilters}
@@ -1534,13 +1535,13 @@ export function ChatsLibrary({
                 onNewSection={() => setMovingIntoNew({ kind: "section", chats: [] })}
               />
             }
-            tabs={tabs ?? null}
+            tabs={tabs}
           />
-          <div className="flex flex-col gap-5 pl-3 font-sans">
+          <div className="flex flex-col gap-5 font-sans">
             {sectionPills}
             {sectionHeader && <div className="mt-3">{sectionHeader}</div>}
           </div>
-          <div className="pl-3 font-sans">
+          <div className="font-sans">
             {section === "all"
               ? renderAll()
               : section === "projects"

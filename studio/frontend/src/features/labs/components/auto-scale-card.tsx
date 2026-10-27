@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: NRC-2
 // Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { fetchJob } from "@/features/advanced/api/advanced-api";
@@ -13,7 +12,6 @@ import {
   Alert02Icon,
   ArrowExpand02Icon,
   PlayIcon,
-  Refresh01Icon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -127,9 +125,7 @@ export function AutoScaleCard({
           break;
         }
         if (current.status === "failed") {
-          throw new Error(
-            current.error || t("labs.autoScale.failed"),
-          );
+          throw new Error(current.error || t("labs.autoScale.failed"));
         }
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
@@ -158,9 +154,6 @@ export function AutoScaleCard({
         <h3 className="text-ui-12 font-semibold text-foreground">
           {t("labs.autoScale.title")}
         </h3>
-        <Badge variant="outline" className="text-ui-9">
-          {t("labs.experimental")}
-        </Badge>
       </div>
       <p className="max-w-3xl text-ui-10p5 leading-relaxed text-muted-foreground">
         {t("labs.autoScale.description")}
@@ -240,18 +233,19 @@ export function AutoScaleCard({
             {t("labs.autoScale.use")}
           </Button>
         ) : null}
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => {
-            setPlan(null);
-            setResult(null);
-            setError(null);
-          }}
-        >
-          <HugeiconsIcon icon={Refresh01Icon} className="size-3.5" />
-          {t("labs.autoScale.clear")}
-        </Button>
+        {plan || result || error ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setPlan(null);
+              setResult(null);
+              setError(null);
+            }}
+          >
+            {t("labs.autoScale.clear")}
+          </Button>
+        ) : null}
       </div>
 
       {phase ? (

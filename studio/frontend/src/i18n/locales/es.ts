@@ -4247,6 +4247,7 @@ export const es = {
     reset: "Restablecer",
   },
   library: {
+    description: "Archivos, contenido multimedia, chats y modelos ajustados, todo en un solo lugar.",
     tabs: {
       ariaLabel: "Secciones de la Biblioteca",
       suggested: "Sugerencias",

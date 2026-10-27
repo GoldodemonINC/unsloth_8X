@@ -732,38 +732,48 @@ function LibraryView({ search }: { search: LibrarySearch }) {
     if (breadcrumb.length > 32) break;
   }
 
+  const titleClass =
+    "page-title-halo text-ui-30 font-semibold leading-[1.04] tracking-[-0.028em] text-foreground sm:text-ui-34";
+  // An open folder is its own page: its name is the title and the crumb trail sits under it as
+  // navigation, so the ancestors stay reachable and the leaf is not repeated.
   const title = folderId ? (
-    <nav className="flex min-w-0 items-center gap-2 text-[calc(1.6875rem*var(--ui-font-scale,1))] font-semibold tracking-[-0.028em]" aria-label={t("library.breadcrumb")}>
+    <h1 className={cn(titleClass, "break-words")}>
+      {currentFolder?.name ?? t("shell.navigation.library")}
+    </h1>
+  ) : (
+    <h1 className={titleClass}>{t("shell.navigation.library")}</h1>
+  );
+  const trail = folderId ? (
+    <nav
+      aria-label={t("library.breadcrumb")}
+      className="flex min-w-0 flex-wrap items-center gap-2"
+    >
       <button
         type="button"
         onClick={() => go({ show: "folders" })}
-        className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+        className="shrink-0 transition-colors hover:text-foreground"
       >
         {t("shell.navigation.library")}
       </button>
-      {breadcrumb.map((folder, index) => (
+      {breadcrumb.slice(0, -1).map((folder) => (
         <span key={folder.id} className="flex min-w-0 items-center gap-2">
-          <HugeiconsIcon icon={ChevronRightStandardIcon} strokeWidth={2} className="size-5 shrink-0 text-muted-foreground" />
-          {index === breadcrumb.length - 1 ? (
-            <span className="truncate text-foreground">{folder.name}</span>
-          ) : (
-            <button
-              type="button"
-              onClick={() => go({ folder: folder.id })}
-              className="truncate text-muted-foreground transition-colors hover:text-foreground"
-            >
-              {folder.name}
-            </button>
-          )}
+          <HugeiconsIcon
+            icon={ChevronRightStandardIcon}
+            strokeWidth={2}
+            className="size-4 shrink-0"
+          />
+          <button
+            type="button"
+            onClick={() => go({ folder: folder.id })}
+            className="truncate transition-colors hover:text-foreground"
+          >
+            {folder.name}
+          </button>
         </span>
       ))}
     </nav>
-  ) : (
-    // truncate clips at the padding box, which the y overhangs; the margins give the padding back.
-    <h1 className="-my-[0.15em] min-w-0 truncate py-[0.15em] pr-[0.08em] text-[calc(1.6875rem*var(--ui-font-scale,1))] font-semibold leading-[1.04] tracking-[-0.028em] text-foreground">
-      {t("shell.navigation.library")}
-    </h1>
-  );
+  ) : undefined;
+  const description = folderId ? undefined : t("library.description");
 
 
   const uploadButton = (
@@ -1013,7 +1023,7 @@ function LibraryView({ search }: { search: LibrarySearch }) {
 
   // Chats use their own view and data; the file listing, filters and selection never apply.
   if (tab === "chats" && !folderId) {
-    return <ChatsLibrary search={search} title={title} tabs={headerTabs} />;
+    return <ChatsLibrary search={search} title={title} description={description} tabs={headerTabs} />;
   }
 
   return (
@@ -1021,7 +1031,7 @@ function LibraryView({ search }: { search: LibrarySearch }) {
       <main
         ref={dropRef}
         {...dragHandlers}
-        className="relative mx-auto w-full max-w-[calc(1560px*var(--ui-space-scale,1))] px-6 pb-24 pt-8 font-heading sm:px-10"
+        className="relative mx-auto w-full max-w-[calc(1180px*var(--ui-space-scale,1))] px-5 pb-20 pt-8 font-heading max-sm:px-4 sm:px-9"
       >
         <input
           ref={fileInput}
@@ -1035,7 +1045,9 @@ function LibraryView({ search }: { search: LibrarySearch }) {
         />
         <LibraryHeader
           title={title}
-          controls={
+          description={description}
+          trail={trail}
+          toolbar={
             <LibraryToolbar
               filters={filters}
               onFiltersChange={setFilters}
@@ -1051,9 +1063,9 @@ function LibraryView({ search }: { search: LibrarySearch }) {
               onSettings={() => openSettings("library")}
             />
           }
-          tabs={folderId ? null : headerTabs}
+          tabs={folderId ? undefined : headerTabs}
         />
-        <div className="pl-3">{renderBody()}</div>
+        <div>{renderBody()}</div>
 
         {dragging && (
           <div className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center bg-background/70 backdrop-blur-sm">

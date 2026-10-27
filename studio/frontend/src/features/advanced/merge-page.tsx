@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { useAppShellReadySignal } from "@/components/app-readiness";
+import { PathInput } from "@/components/path-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1341,14 +1342,15 @@ export function MergePage(): ReactElement {
             <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
               Output folder
             </span>
-            <Input
+            <PathInput
               value={outputDir}
-              onChange={(event) => {
+              onChange={(value) => {
                 setOutputTouched(true);
-                setOutputDir(event.target.value);
+                setOutputDir(value);
               }}
               placeholder="Automatic — named after the parents, inside Unsloth's library"
-              className="font-mono text-ui-12"
+              kind="folder"
+              title="Choose the output folder"
             />
             {folderCollisionNotice(
               outputFolderName(
@@ -1520,6 +1522,8 @@ export function MergePage(): ReactElement {
                       reason: string;
                     };
                   };
+                  /** Why this run has no verdict, when it has none. */
+                  gate_note?: string;
                 };
                 const metrics = result.metrics;
                 const check: StructuralLike | null =
@@ -1549,6 +1553,16 @@ export function MergePage(): ReactElement {
                         on a special token and it was accepted. The merged
                         folder keeps Model A&apos;s tokenizer files, so prompt
                         the result the way that parent expects.
+                      </p>
+                    ) : null}
+                    {!check && result.gate_note ? (
+                      <p className="mt-2 flex flex-col gap-0.5 text-ui-10p5 leading-ui-14">
+                        <span className="font-medium text-amber-600 dark:text-amber-400">
+                          No keep/discard verdict
+                        </span>
+                        <span className="text-muted-foreground">
+                          {result.gate_note}
+                        </span>
                       </p>
                     ) : null}
                     {check ? (

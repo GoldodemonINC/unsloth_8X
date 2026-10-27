@@ -2,6 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { Input } from "@/components/ui/input";
+import { PathInput } from "@/components/path-input";
 import { Spinner } from "@/components/ui/spinner";
 import { hfApiToken, useHfTokenStore, useHubModelSearch } from "@/features/hub";
 import { filterMergeSearchResults } from "@/features/advanced/merge-search-filter";
@@ -182,12 +183,13 @@ export function MergeModelSlot({
           ) : null}
         </div>
       ) : (
-        <Input
+        <PathInput
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={onChange}
           placeholder={placeholder}
           disabled={disabled}
-          className="h-9 font-mono text-ui-12"
+          kind="folder"
+          title="Choose a checkpoint folder"
         />
       )}
     </div>

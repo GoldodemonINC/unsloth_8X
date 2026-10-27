@@ -4174,6 +4174,7 @@ export const ar = {
     reset: "إعادة التعيين",
   },
   library: {
+    description: "الملفات والوسائط والمحادثات والنماذج المضبوطة، كلها في مكان واحد.",
     tabs: {
       ariaLabel: "أقسام المكتبة",
       suggested: "مقترحة",

@@ -497,6 +497,56 @@ pub async fn pick_native_model_folder(
     pick_local_folder(&app, "Choose a model folder").await
 }
 
+/// A plain path picker for the Advanced and Labs forms: a checkpoint folder, a
+/// dataset file, an output folder. Like the pickers above, the webview only ever
+/// receives the chosen path.
+#[tauri::command]
+pub async fn pick_local_path(
+    webview: tauri::Webview,
+    app: AppHandle,
+    kind: Option<String>,
+    extensions: Option<Vec<String>>,
+    title: Option<String>,
+) -> Result<Option<String>, String> {
+    ensure_main_window(&webview)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let builder = app
+        .dialog()
+        .file()
+        .set_title(title.as_deref().unwrap_or("Choose a location"));
+    if kind.as_deref() == Some("file") {
+        let wanted: Vec<&str> = extensions
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .collect();
+        if wanted.is_empty() {
+            builder.pick_file(move |path| {
+                let _ = tx.send(path);
+            });
+        } else {
+            builder
+                .add_filter("Supported files", &wanted)
+                .pick_file(move |path| {
+                    let _ = tx.send(path);
+                });
+        }
+    } else {
+        builder.pick_folder(move |path| {
+            let _ = tx.send(path);
+        });
+    }
+    let Some(chosen) = rx.await.map_err(|_| "Dialog closed".to_string())? else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|_| "Only local filesystem paths are supported.".to_string())?;
+    Ok(Some(portable_path_string(&path)))
+}
+
 async fn pick_local_folder(app: &AppHandle, title: &str) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()

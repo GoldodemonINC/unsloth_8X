@@ -4,6 +4,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PathInput } from "@/components/path-input";
 import {
   Select,
   SelectContent,
@@ -127,22 +128,26 @@ export function CheckpointSplitterCard() {
               <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
                 Source checkpoint
               </span>
-              <Input
+              <PathInput
                 value={source}
-                onChange={(event) => setSource(event.target.value)}
+                onChange={setSource}
                 placeholder="path/to/merged-output"
-                className="font-mono text-ui-12"
+                kind="folder"
+                title="Choose the checkpoint to split"
+                inputClassName="h-9"
               />
             </label>
             <label className="flex flex-col gap-1.5">
               <span className="text-ui-11 font-medium uppercase tracking-[0.05em] text-muted-foreground/70">
                 Split into
               </span>
-              <Input
+              <PathInput
                 value={outputDir}
-                onChange={(event) => setOutputDir(event.target.value)}
+                onChange={setOutputDir}
                 placeholder="sharded"
-                className="font-mono text-ui-12"
+                kind="folder"
+                title="Choose where the shards go"
+                inputClassName="h-9"
               />
               <span className="text-ui-11 leading-ui-15 text-muted-foreground/70">
                 A name lands in Unsloth&apos;s outputs folder; an absolute path is

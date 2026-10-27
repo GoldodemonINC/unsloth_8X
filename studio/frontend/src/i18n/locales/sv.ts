@@ -4428,6 +4428,7 @@ export const sv = {
     reset: "Återställ",
   },
   library: {
+    description: "Filer, media, chattar och finjusterade modeller på ett ställe.",
     tabs: {
       ariaLabel: "Bibliotekssektioner",
       suggested: "Förslag",

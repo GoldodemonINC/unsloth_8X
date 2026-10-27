@@ -4075,6 +4075,7 @@ export const zhCN = {
     reset: "重置",
   },
   library: {
+    description: "文件、媒体、聊天和微调模型，都集中在这里。",
     tabs: {
       ariaLabel: "资料库分区",
       suggested: "推荐",

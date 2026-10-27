@@ -4121,6 +4121,7 @@ export const ja = {
     reset: "リセット",
   },
   library: {
+    description: "ファイル、メディア、チャット、微調整済みモデルをひとつの場所にまとめます。",
     tabs: {
       ariaLabel: "ライブラリのセクション",
       suggested: "おすすめ",
