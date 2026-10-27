@@ -32,8 +32,6 @@ import {
   type MergeHistoryEntry,
   type MergePlanResponse,
   type MergeValidation,
-  type StructuralEval,
-  evalMergedModel,
   fetchAdvancedCapabilities,
   fetchMergeHistory,
   fetchOutputLocations,
@@ -57,6 +55,7 @@ import {
   MERGE_METHOD_NOTES,
   type MergePreset,
   type MergeSetup,
+  type StructuralLike,
   WEIGHT_TOOL_LABELS,
   applyPreset,
   applyWeightTool,
@@ -244,7 +243,6 @@ export function MergePage(): ReactElement {
   const [validating, setValidating] = useState(false);
   const [allowTokenConflict, setAllowTokenConflict] = useState(false);
   const [allowPickle, setAllowPickle] = useState(false);
-  const [structural, setStructural] = useState<StructuralEval | null>(null);
   // Recipes and recent runs: one is saved here, the other read from the manifests
   // the finished merges wrote.
   const [savedPresets, setSavedPresets] = useState<SavedMergePreset[]>([]);
@@ -299,7 +297,6 @@ export function MergePage(): ReactElement {
     // The plan and the tokenizer check describe the old parent list.
     setPlan(null);
     setValidation(null);
-    setStructural(null);
   };
   const usePreset = (preset: MergePreset) => {
     const next = applyPreset(currentSetup, preset);
@@ -484,7 +481,6 @@ export function MergePage(): ReactElement {
   const start = async () => {
     setRunError(null);
     setJob(null);
-    setStructural(null);
     setRunning(true);
     try {
       const created =
@@ -518,23 +514,6 @@ export function MergePage(): ReactElement {
       if (finished.status === "completed") {
         // The new run is now the newest manifest on disk.
         refreshHistory();
-      }
-      const mergedPath =
-        finished.output_dir ??
-        (finished.result as { output_dir?: string } | null)?.output_dir ??
-        null;
-      // Structural tier only: it proves the folder loads and is sane, not that the
-      // merge is better. Quality needs an eval suite.
-      if (
-        mode === "standard" &&
-        finished.status === "completed" &&
-        mergedPath
-      ) {
-        try {
-          setStructural(await evalMergedModel({ source: mergedPath }));
-        } catch {
-          setStructural(null);
-        }
       }
     } catch (error) {
       setRunError(error instanceof Error ? error.message : String(error));
@@ -1533,8 +1512,19 @@ export function MergePage(): ReactElement {
                     total_bytes?: number;
                   };
                   tokenizer?: { status?: string; override_used?: boolean };
+                  // Written by the server when the merge finished, so the verdict is
+                  // there without a second click.
+                  structural_eval?: StructuralLike & {
+                    gate?: {
+                      decision: "keep" | "review" | "discard";
+                      reason: string;
+                    };
+                  };
                 };
                 const metrics = result.metrics;
+                const check: StructuralLike | null =
+                  result.structural_eval ?? null;
+                const gate = result.structural_eval?.gate ?? null;
                 const override = result.tokenizer?.override_used === true;
                 // Only a weight-space merge is a loadable model; an MMoE bundle is a router
                 // Studio trains, so Library and Export have nothing to open for it.
@@ -1561,42 +1551,63 @@ export function MergePage(): ReactElement {
                         the result the way that parent expects.
                       </p>
                     ) : null}
-                    {structural ? (
+                    {check ? (
                       <div className="mt-2 flex flex-col gap-1">
+                        {gate ? (
+                          <p
+                            className={cn(
+                              "font-medium",
+                              gate.decision === "keep"
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : gate.decision === "review"
+                                  ? "text-amber-600 dark:text-amber-400"
+                                  : "text-destructive",
+                            )}
+                          >
+                            {gate.decision === "keep"
+                              ? "Keep it"
+                              : gate.decision === "review"
+                                ? "Keep after a look"
+                                : "Discard it"}{" "}
+                            <span className="font-normal text-muted-foreground">
+                              {gate.reason}
+                            </span>
+                          </p>
+                        ) : null}
                         <p
                           className={cn(
                             "font-medium",
-                            structural.structurally_valid
+                            check.structurally_valid
                               ? "text-emerald-600 dark:text-emerald-400"
                               : "text-destructive",
                           )}
                         >
-                          Structural check: {structural.verdict}
+                          Structural check: {check.verdict} (ran automatically)
                         </p>
                         <ul className="flex flex-col gap-0.5">
-                          {structuralChecks(structural).map((check) => (
+                          {structuralChecks(check).map((row) => (
                             <li
-                              key={check.label}
+                              key={row.label}
                               className="text-ui-10p5 leading-ui-14"
                             >
                               <span
                                 className={
-                                  check.ok
+                                  row.ok
                                     ? "text-muted-foreground"
                                     : "text-destructive"
                                 }
                               >
-                                {check.ok ? "PASS" : "FAIL"} · {check.label}
+                                {row.ok ? "PASS" : "FAIL"} · {row.label}
                               </span>{" "}
                               <span className="text-muted-foreground/70">
-                                {check.detail}
+                                {row.detail}
                               </span>
                             </li>
                           ))}
                         </ul>
-                        {structural.problems.length > 0 ? (
+                        {check.problems.length > 0 ? (
                           <p className="text-ui-10p5 leading-ui-14 text-destructive">
-                            {structural.problems.join(" ")}
+                            {check.problems.join(" ")}
                           </p>
                         ) : null}
                       </div>

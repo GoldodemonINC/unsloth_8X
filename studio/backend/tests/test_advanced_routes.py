@@ -690,6 +690,117 @@ def test_start_job_records_the_lease_and_releases_it():
     )
 
 
+def test_a_finished_merge_carries_its_structural_report(
+    client: TestClient, tmp_path: Path, started_jobs, monkeypatch
+):
+    """Eval → keep or discard: the job's own result says whether to keep the folder."""
+    from core.advanced import merge as merge_module
+
+    model_a = _tokenized_checkpoint(tmp_path / "a")
+    model_b = _tokenized_checkpoint(tmp_path / "b")
+    output = tmp_path / "out"
+    output.mkdir()
+    monkeypatch.setattr(
+        merge_module,
+        "merge_checkpoints_many",
+        lambda *args, **kwargs: {"metrics": {"blended_tensors": 2}},
+    )
+    client.post(
+        "/api/advanced/merge/run",
+        json={"model_a": model_a, "model_b": model_b, "output_dir": str(output)},
+    )
+
+    result = started_jobs[-1]["work"](lambda payload: None)
+
+    # The merge's own report survives beside the check.
+    assert result["metrics"] == {"blended_tensors": 2}
+    assert result["structural_eval"]["verdict"] == "unloadable"
+    # An empty output folder is not a model, so the gate has to say discard.
+    assert result["structural_eval"]["gate"]["decision"] == "discard"
+
+
+def test_the_harness_install_route_reports_what_it_did(client: TestClient, monkeypatch):
+    monkeypatch.setattr(
+        advanced.eval_harness,
+        "install",
+        lambda **kwargs: {
+            "installed": True,
+            "available": True,
+            "harness": {},
+            "command": ["python", "-m", "pip", "install", "lm-eval"],
+            "output": "Successfully installed lm-eval",
+            "note": "lm_eval imports in this environment now.",
+        },
+    )
+
+    body = client.post("/api/advanced/eval/install").json()
+
+    assert body["installed"] is True
+    assert body["available"] is True
+
+
+def test_the_harness_install_route_maps_a_failed_install_to_500(
+    client: TestClient, monkeypatch
+):
+    """A pip failure is the user's answer, not a silent no-op."""
+
+    def boom(**kwargs):
+        raise advanced.eval_harness.HarnessInstallError(
+            "`python -m pip install lm-eval` exited 1. no matching distribution"
+        )
+
+    monkeypatch.setattr(advanced.eval_harness, "install", boom)
+
+    response = client.post("/api/advanced/eval/install")
+
+    assert response.status_code == 500
+    assert "exited 1" in response.json()["detail"]
+
+
+def test_a_finished_reshape_carries_its_structural_report(
+    client: TestClient, tmp_path: Path, started_jobs, monkeypatch
+):
+    """Loadability after reshaping: the scaler's result carries the same gate."""
+    from core.advanced import scaling as scaling_module
+
+    source = _tokenized_checkpoint(tmp_path / "base")
+    planned = client.post("/api/advanced/scale/plan", json={"source": source}).json()
+    output = tmp_path / "scaled"
+    output.mkdir()
+    monkeypatch.setattr(
+        scaling_module,
+        "run",
+        lambda *args, **kwargs: {
+            "final_params": planned["default_target_params"],
+            "verified": True,
+            "step0_max_logit_diff": 0.0,
+        },
+    )
+    client.post(
+        "/api/advanced/scale/run",
+        json={
+            "source": source,
+            "target_params": planned["default_target_params"],
+            "output_dir": str(output),
+        },
+    )
+
+    result = started_jobs[-1]["work"](lambda payload: None)
+
+    # The reshape verified its logits, but the folder it wrote holds no weights,
+    # so the loadability gate has to say discard on its own.
+    assert result["structural_eval"]["verdict"] == "unloadable"
+    assert result["structural_eval"]["gate"]["decision"] == "discard"
+
+
+def test_the_completion_check_warns_on_a_merge_that_only_loads(tmp_path: Path):
+    """All-zero sampled weights load, so it is review rather than a clean keep."""
+    report = advanced._completion_check(Path(_tokenized_checkpoint(tmp_path / "merged")))
+
+    assert report["verdict"] == "structurally-valid"
+    assert report["gate"]["decision"] == "review"
+
+
 def test_merge_run_hands_its_sources_to_the_broker(client: TestClient, tmp_path: Path, started_jobs):
     model_a, model_b = _two_checkpoints(tmp_path)
     client.post(

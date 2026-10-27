@@ -367,6 +367,34 @@ def _stage_manifest(
         return None
 
 
+def _completion_check(directory: Path) -> dict[str, Any]:
+    """Run the structural tier on a written checkpoint, and call keep or discard.
+
+    A job returning is not the same as a checkpoint that loads, and that gap is
+    expensive to discover later: the export runs, the GGUF is written, and the
+    load fails at the end of it. The structural tier reads shard headers and
+    samples tensors, so it costs seconds against the hours the job just spent.
+
+    Failing to run the check must not throw away a finished job, so the error
+    becomes the report's finding instead of an exception.
+    """
+    try:
+        report = merge_eval.structural_eval(directory)
+    except Exception as error:  # noqa: BLE001 - a failed check is a finding
+        report = {
+            "verdict": "unloadable",
+            "structurally_valid": False,
+            "problems": [f"The structural check could not run: {error}"],
+            "warnings": [],
+            "checks": {},
+            "samples": [],
+            "tier": "structural",
+            "scope": "The check itself failed, so this output is unverified.",
+            "benchmark_verdicts": ["pareto-positive", "within-noise", "regressed"],
+        }
+    return {**report, "gate": merge_eval.completion_gate(report)}
+
+
 def _start_job(
     kind: str,
     work,
@@ -1047,7 +1075,7 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
             continue
 
     def work(progress) -> dict[str, Any]:
-        return merge.merge_checkpoints_many(
+        result = merge.merge_checkpoints_many(
             sources,
             str(output),
             method = request.method,
@@ -1060,6 +1088,10 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
             allow_tokenizer_conflict = request.allow_tokenizer_conflict,
             progress = progress,
         )
+        # Eval → keep or discard, on the merge itself rather than on a later
+        # click: the verdict belongs in the job the user is watching.
+        result["structural_eval"] = _completion_check(output)
+        return result
 
     return _start_job(
         "merge",
@@ -1332,6 +1364,10 @@ def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
                 "verified": result.get("verified"),
             },
         )
+        # Loadability after reshaping: the scaler verifies that function survived,
+        # which is a different question from whether the folder it wrote loads. A
+        # resized checkpoint can pass the logit check and still be unloadable.
+        result["structural_eval"] = _completion_check(output)
         return result
 
     return _start_job(
@@ -1363,6 +1399,21 @@ def eval_suites() -> dict[str, Any]:
 @router.get("/eval/tasks")
 def eval_custom_tasks() -> dict[str, Any]:
     return eval_tasks.list_custom_suites()
+
+
+@router.post("/eval/install")
+def eval_install_harness() -> dict[str, Any]:
+    """Install lm-evaluation-harness into the interpreter Studio is running on.
+
+    The alternative is the hint the UI already prints and a copy-paste into a
+    terminal that may belong to another virtualenv, which reports success while
+    Studio still sees nothing. The package is fixed here: this endpoint cannot be
+    asked to install anything else.
+    """
+    try:
+        return eval_harness.install()
+    except eval_harness.HarnessInstallError as error:
+        raise HTTPException(status_code = 500, detail = str(error)) from error
 
 
 @router.post("/eval/plan")

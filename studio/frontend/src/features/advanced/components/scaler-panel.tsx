@@ -575,6 +575,26 @@ export function ScalerPanel({
                   ? ` · ${result.elapsed_seconds.toFixed(0)}s`
                   : ""}
               </p>
+              {result.structural_eval?.gate ? (
+                <p
+                  className={
+                    result.structural_eval.gate.decision === "keep"
+                      ? "font-medium text-emerald-700 dark:text-emerald-400"
+                      : result.structural_eval.gate.decision === "review"
+                        ? "font-medium text-amber-700 dark:text-amber-400"
+                        : "font-medium text-destructive"
+                  }
+                >
+                  {result.structural_eval.gate.decision === "keep"
+                    ? "Keep it"
+                    : result.structural_eval.gate.decision === "review"
+                      ? "Keep after a look"
+                      : "Discard it"}{" "}
+                  <span className="font-normal text-muted-foreground">
+                    {result.structural_eval.gate.reason}
+                  </span>
+                </p>
+              ) : null}
               {result.recovery_required ? (
                 <p className="text-amber-700 dark:text-amber-400">
                   Not a drop-in replacement: run continued pretraining or a

@@ -334,6 +334,13 @@ export interface ScalerResult {
   function_preserved?: boolean;
   /** True for a shrink: the checkpoint needs recovery training before it is useful. */
   recovery_required?: boolean;
+  /** Written by the server after the reshape: does the folder it wrote actually load? */
+  structural_eval?: StructuralEval & {
+    gate?: {
+      decision: "keep" | "review" | "discard";
+      reason: string;
+    };
+  };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -488,6 +495,33 @@ export function evalMergedModel(body: {
   sample_tensors?: number;
 }): Promise<StructuralEval> {
   return request("/merge/eval", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** What an install attempt did, including pip's own output when it failed. */
+export interface EvalHarnessInstall {
+  installed: boolean;
+  available: boolean;
+  harness: {
+    available: boolean;
+    lm_eval_module: boolean;
+    lm_eval_cli: boolean;
+    install_hint: string;
+  };
+  /** The exact argv that ran, so a terminal can reproduce it. */
+  command: string[];
+  output: string;
+  note: string;
+}
+
+/**
+ * Install lm-evaluation-harness into the interpreter Studio runs on.
+ *
+ * The backend owns the command: the package is fixed, so this cannot install
+ * anything the UI did not offer. It blocks while pip resolves, which is why the
+ * caller shows a spinner rather than polling a job.
+ */
+export function installEvalHarness(): Promise<EvalHarnessInstall> {
+  return request("/eval/install", { method: "POST" });
 }
 
 export function runMoeMerge(body: {

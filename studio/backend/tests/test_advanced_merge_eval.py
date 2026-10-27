@@ -81,6 +81,35 @@ def test_a_missing_folder_is_unloadable(tmp_path: Path):
     assert result["verdict"] == "unloadable"
 
 
+def test_the_gate_says_keep_for_a_clean_merge(tmp_path: Path):
+    report = merge_eval.structural_eval(_checkpoint(tmp_path / "merged"))
+    gate = merge_eval.completion_gate(report)
+    assert gate["decision"] == "keep"
+    # Keeping is structural only; the reason has to say so or it reads as quality.
+    assert "quality" in gate["reason"].lower()
+
+
+def test_the_gate_discards_a_broken_merge_and_names_the_defect(tmp_path: Path):
+    report = merge_eval.structural_eval(_checkpoint(tmp_path / "nan", nan = True))
+    gate = merge_eval.completion_gate(report)
+    assert gate["decision"] == "discard"
+    assert "NaN" in gate["reason"]
+    # The point of the gate is not exporting a folder that cannot load.
+    assert "quantizing" in gate["reason"].lower()
+
+
+def test_a_warning_puts_the_gate_on_review_instead_of_keep():
+    gate = merge_eval.completion_gate(
+        {
+            "verdict": "structurally-valid",
+            "problems": [],
+            "warnings": ["The checkpoint may be truncated."],
+        }
+    )
+    assert gate["decision"] == "review"
+    assert "truncated" in gate["reason"]
+
+
 def test_verdict_label_uses_the_noise_floor():
     assert merge_eval.verdict_label(0.004) == "within-noise"
     assert merge_eval.verdict_label(0.02) == "pareto-positive"

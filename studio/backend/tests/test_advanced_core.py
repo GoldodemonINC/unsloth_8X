@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 
@@ -186,3 +189,79 @@ def test_eval_command_includes_limit():
     assert command[:4] == ["lm_eval", "--model", "hf", "--model_args"]
     assert command[4] == "pretrained=org/model"
     assert "--limit" in command and "10" in command
+
+
+# ---------------------------------------------------------------------------
+# Installing the harness from Studio
+# ---------------------------------------------------------------------------
+
+
+def test_the_install_plan_targets_the_interpreters_own_pip():
+    """The hint says pip; the command must name this interpreter or it lands elsewhere."""
+    plan = eval_harness.install_plan()
+
+    assert plan["package"] == "lm-eval"
+    if plan["has_pip"]:
+        assert plan["command"][:3] == [sys.executable, "-m", "pip"]
+    else:
+        assert plan["command"][:4] == ["uv", "pip", "install", "--python"]
+        assert plan["command"][4] == sys.executable
+    assert plan["disabled"] is False
+
+
+def test_the_installer_refuses_when_an_operator_turned_it_off(monkeypatch):
+    monkeypatch.setenv(eval_harness.DISABLE_ENV, "1")
+
+    with pytest.raises(eval_harness.HarnessInstallError) as caught:
+        eval_harness.install()
+
+    # Naming the variable is the whole remedy, so the message has to carry it.
+    assert eval_harness.DISABLE_ENV in str(caught.value)
+
+
+def test_a_failed_install_reports_pips_own_reason(monkeypatch):
+    monkeypatch.delenv(eval_harness.DISABLE_ENV, raising = False)
+    monkeypatch.setattr(
+        eval_harness.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            1,
+            stdout = "",
+            stderr = "ERROR: No matching distribution found for lm-eval",
+        ),
+    )
+
+    with pytest.raises(eval_harness.HarnessInstallError) as caught:
+        eval_harness.install()
+
+    assert "No matching distribution" in str(caught.value)
+    assert "exited 1" in str(caught.value)
+
+
+def test_a_zero_exit_that_installed_nowhere_says_so(monkeypatch):
+    """pip exits 0 for an install into a different environment; a green tick would lie."""
+    monkeypatch.delenv(eval_harness.DISABLE_ENV, raising = False)
+    monkeypatch.setattr(
+        eval_harness.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout = "Successfully installed lm-eval", stderr = ""
+        ),
+    )
+    monkeypatch.setattr(
+        eval_harness,
+        "harness_available",
+        lambda: {
+            "available": False,
+            "lm_eval_module": False,
+            "lm_eval_cli": False,
+            "install_hint": "pip install lm-eval",
+        },
+    )
+
+    result = eval_harness.install()
+
+    assert result["installed"] is True
+    assert result["available"] is False
+    assert "another environment" in result["note"]

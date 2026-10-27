@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from . import tensor_io
 
@@ -254,3 +254,44 @@ def verdict_label(score_delta: float | None, *, noise_floor: float = 0.015) -> s
     if score_delta >= abs(noise_floor):
         return "pareto-positive"
     return "within-noise"
+
+
+def completion_gate(report: Mapping[str, Any]) -> dict[str, str]:
+    """Turn a structural report into the keep-or-discard call a merge needs.
+
+    A structurally broken folder should be thrown away rather than quantized:
+    the defect surfaces as a load failure, and reaching it costs the merge plus
+    the export that followed it. Warnings are not defects, so they land on
+    ``review`` — the model loads, but the notes name something worth reading
+    before it is taken as the result.
+
+    This is still the structural tier. It never means "better": a loadable
+    merge can be worse than its parents, and only a benchmark can say that.
+    """
+    verdict = str(report.get("verdict") or "unloadable")
+    problems = list(report.get("problems") or [])
+    warnings = list(report.get("warnings") or [])
+    if verdict in ("structurally-broken", "unloadable"):
+        first = problems[0] if problems else "The folder did not load."
+        return {
+            "decision": "discard",
+            "reason": (
+                f"{first} Discard it, or re-run the merge into a clean folder; "
+                "quantizing it will only move the failure later."
+            ),
+        }
+    if warnings:
+        return {
+            "decision": "review",
+            "reason": (
+                "It loads, but the check raised "
+                f"{len(warnings)} warning(s): {warnings[0]} Safe to keep if that is expected."
+            ),
+        }
+    return {
+        "decision": "keep",
+        "reason": (
+            "Loadable and internally consistent. This says nothing about quality: "
+            "compare it against its parents on your own prompts before choosing it."
+        ),
+    }

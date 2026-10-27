@@ -17,7 +17,10 @@ than silently reporting zeroes; the UI surfaces that as "install lm-eval".
 from __future__ import annotations
 
 import math
+import os
 import shutil
+import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +114,131 @@ def _module_available(name: str) -> bool:
         return importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
         return False
+
+
+# The distribution name. lm-evaluation-harness renamed its PyPI package to
+# lm-eval while keeping the import name ``lm_eval``, so the install name and the
+# import name disagree and both have to be written down somewhere.
+HARNESS_PACKAGE = "lm-eval"
+
+# An operator cannot remove a button, but can turn off what it does.
+DISABLE_ENV = "UNSLOTH_DISABLE_LM_EVAL_INSTALL"
+
+
+class HarnessInstallError(RuntimeError):
+    """The install ran and did not work. The message carries pip's own output tail."""
+
+
+def install_disabled() -> bool:
+    value = os.environ.get(DISABLE_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def install_plan() -> dict[str, Any]:
+    """The command that would install lm-eval here, without running it.
+
+    The interpreter is named explicitly because ``pip`` from PATH can belong to a
+    different environment: it would report success while the module stayed
+    invisible to this process. When pip is missing from the interpreter, uv is
+    asked to install *into* it for the same reason.
+    """
+    has_pip = _module_available("pip")
+    command = (
+        [sys.executable, "-m", "pip", "install", HARNESS_PACKAGE]
+        if has_pip
+        else [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            HARNESS_PACKAGE,
+        ]
+    )
+    return {
+        "package": HARNESS_PACKAGE,
+        "command": command,
+        "python_executable": sys.executable,
+        "has_pip": has_pip,
+        "has_uv": shutil.which("uv") is not None,
+        "available": harness_available()["available"],
+        "disabled": install_disabled(),
+        "install_hint": harness_available()["install_hint"],
+    }
+
+
+def install(*, timeout: float = 900.0) -> dict[str, Any]:
+    """Install lm-evaluation-harness into the interpreter Studio is running on.
+
+    This is the action behind the "pip install lm-eval" hint, so it runs that
+    command and nothing more: dependencies are left to pip, because pinning them
+    here would go stale against whatever torch this machine already has, and
+    lm-eval is only imported when a benchmark actually runs.
+
+    A failure raises instead of returning a flag: the caller has to be able to
+    tell "installed" from "pip said something", and a silent False reads like a
+    no-op in the UI.
+    """
+    if install_disabled():
+        raise HarnessInstallError(
+            f"Installing from Studio is turned off by {DISABLE_ENV}. Install "
+            "lm-eval in this environment from a terminal, then check again."
+        )
+    plan = install_plan()
+    try:
+        completed = subprocess.run(
+            plan["command"],
+            capture_output = True,
+            text = True,
+            timeout = timeout,
+        )
+    except FileNotFoundError as error:
+        raise HarnessInstallError(
+            f"Could not run {plan['command'][0]}: {error}. Install lm-eval from a "
+            "terminal instead."
+        ) from error
+    except subprocess.TimeoutExpired as error:
+        raise HarnessInstallError(
+            f"The install did not finish within {int(timeout)}s and was stopped. "
+            "A resolver this slow usually means a large download; run the same "
+            "command in a terminal to see it finish."
+        ) from error
+
+    output = _tail(f"{completed.stdout or ''}\n{completed.stderr or ''}")
+    if completed.returncode != 0:
+        raise HarnessInstallError(
+            f"`{' '.join(plan['command'])}` exited {completed.returncode}. {output}"
+        )
+
+    # find_spec remembers that it looked and found nothing, so without this the
+    # check immediately after a successful install still reports the module missing.
+    import importlib
+
+    importlib.invalidate_caches()
+    available = harness_available()
+    return {
+        "installed": True,
+        "available": available["available"],
+        "harness": available,
+        "command": plan["command"],
+        "output": output,
+        # pip exits 0 for "already satisfied" too, and it can be satisfied in a
+        # different environment; saying which case this is beats a green tick.
+        "note": (
+            "lm_eval imports in this environment now; the next benchmark uses it "
+            "without a restart."
+            if available["available"]
+            else "pip exited 0 but lm_eval still does not import here. It may have "
+            "installed into another environment; run the command in a terminal "
+            "from Studio's Python to see where it lands."
+        ),
+    }
+
+
+def _tail(text: str, *, limit: int = 2000) -> str:
+    """The end of pip's output, which is where the reason for a failure is."""
+    stripped = text.strip()
+    return stripped if len(stripped) <= limit else "…" + stripped[-limit:]
 
 
 @dataclass(frozen=True)

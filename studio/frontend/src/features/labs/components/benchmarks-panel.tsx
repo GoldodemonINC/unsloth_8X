@@ -8,6 +8,7 @@ import {
   type AdvancedCapabilities,
   fetchAdvancedCapabilities,
   fetchJob,
+  installEvalHarness,
 } from "@/features/advanced/api/advanced-api";
 import { useT } from "@/i18n";
 import { toast } from "@/lib/toast";
@@ -99,6 +100,8 @@ export function BenchmarksPanel(): ReactElement {
   const [status, setStatus] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // pip resolves for minutes, so the button owns a spinner instead of a job id.
+  const [installing, setInstalling] = useState(false);
 
   const refreshRecords = useCallback(async () => {
     try {
@@ -201,6 +204,29 @@ export function BenchmarksPanel(): ReactElement {
     }
   };
 
+  const installHarness = async () => {
+    setInstalling(true);
+    setError(null);
+    try {
+      const result = await installEvalHarness();
+      // The capability flag is what gates the run button, so re-read it rather
+      // than assuming the install landed where this process can see it.
+      setCapabilities(await fetchAdvancedCapabilities());
+      toast.success(t("labs.benchmarks.installDone"), {
+        description: result.note,
+      });
+    } catch (failure) {
+      const message =
+        failure instanceof Error
+          ? failure.message
+          : t("labs.benchmarks.installFailed");
+      setError(message);
+      toast.error(t("labs.benchmarks.installFailed"), { description: message });
+    } finally {
+      setInstalling(false);
+    }
+  };
+
   const remove = async (id: string) => {
     try {
       await deleteBenchmark(id);
@@ -242,14 +268,28 @@ export function BenchmarksPanel(): ReactElement {
         ) : null}
 
         {capabilities && !capabilities.eval_harness.available ? (
-          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-ui-11 text-amber-700 dark:text-amber-300">
-            <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-3.5" />
-            <span>
-              {t("labs.benchmarks.harnessMissing")}{" "}
-              <code className="font-mono">
-                {capabilities.eval_harness.install_hint}
-              </code>
-            </span>
+          <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-ui-11 text-amber-700 dark:text-amber-300">
+            <div className="flex min-w-0 items-start gap-2">
+              <HugeiconsIcon icon={Alert02Icon} className="mt-0.5 size-3.5" />
+              <span>
+                {t("labs.benchmarks.harnessMissing")}{" "}
+                <code className="font-mono">
+                  {capabilities.eval_harness.install_hint}
+                </code>
+                . {t("labs.benchmarks.harnessInstallHint")}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={installing}
+              onClick={() => void installHarness()}
+            >
+              {installing ? <Spinner /> : null}
+              {installing
+                ? t("labs.benchmarks.installingHarness")
+                : t("labs.benchmarks.installHarness")}
+            </Button>
           </div>
         ) : null}
 

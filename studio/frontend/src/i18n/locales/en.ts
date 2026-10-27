@@ -849,6 +849,12 @@ export const en = {
       deleteFailed: "The benchmark record could not be deleted",
       harnessMissing:
         "lm-evaluation-harness is not installed, so a run would fail before loading the model. Install it with",
+      harnessInstallHint:
+        "Or let Studio install it into the Python it is already running on.",
+      installHarness: "Install lm-eval",
+      installingHarness: "Installing lm-eval…",
+      installDone: "lm-eval is installed",
+      installFailed: "lm-eval could not be installed",
       noise:
         "A delta under 1.5 points is labelled within noise. That threshold is a guardrail for small models, not a significance test.",
       history: "Recorded benchmarks",
