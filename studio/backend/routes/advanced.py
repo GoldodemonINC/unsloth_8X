@@ -19,12 +19,13 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from core.advanced import (
     blending,
     curriculum,
     eval_harness,
+    eval_tasks,
     layer_lr,
     merge_eval,
     policy as loading_policy,
@@ -1069,6 +1070,43 @@ def run_merge(request: MergeRunRequest) -> dict[str, Any]:
     )
 
 
+class AdapterMergeRequest(BaseModel):
+    model_config = ConfigDict(extra = "forbid")
+
+    adapters: list[str] = Field(min_length = 2)
+    output_dir: str
+    method: Literal["linear", "ties", "dare"] = "linear"
+    weights: Optional[list[float]] = None
+    density: float = 0.5
+    seed: int = 3407
+    rank: Optional[int] = None
+
+
+@router.post("/merge/adapters")
+def merge_lora_adapters(request: AdapterMergeRequest) -> dict[str, Any]:
+    """Blend two or more LoRA adapters into one PEFT adapter folder.
+
+    Synchronous on purpose: adapters are megabytes, not the tens of gigabytes a
+    full checkpoint merge streams, so a job record would add latency without
+    protecting anything.
+    """
+    from core.advanced import adapter_merge
+
+    try:
+        report = adapter_merge.merge_adapters(
+            request.adapters,
+            request.output_dir,
+            method = request.method,
+            weights = request.weights,
+            density = request.density,
+            seed = request.seed,
+            rank = request.rank,
+        )
+    except adapter_merge.AdapterMergeError as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
+    return {"merge": report}
+
+
 @router.post("/merge/moe")
 def run_moe(request: MoeRunRequest) -> dict[str, Any]:
     from core.advanced import merge, moe
@@ -1314,8 +1352,17 @@ def scale_run(request: ScaleRunRequest) -> dict[str, Any]:
 def eval_suites() -> dict[str, Any]:
     return {
         "suites": eval_harness.list_suites(),
+        # Custom tasks are separate from SUITES because the folder is read from
+        # disk on every call: a task added while the app is open appears here
+        # without a restart.
+        "custom": eval_tasks.list_custom_suites(),
         "harness": eval_harness.harness_available(),
     }
+
+
+@router.get("/eval/tasks")
+def eval_custom_tasks() -> dict[str, Any]:
+    return eval_tasks.list_custom_suites()
 
 
 @router.post("/eval/plan")
