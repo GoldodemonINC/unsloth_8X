@@ -374,6 +374,22 @@ def check_manifest(path: pathlib.Path, version: str) -> None:
         )
 
 
+def head_commit() -> str:
+    """The commit the tag must point at.
+
+    Without --target, gh tags the repository's DEFAULT branch. In a fork that branch is
+    upstream's main, so the release advertises a commit that can predate the build by
+    weeks, and the source archives GitHub generates for it are not the shipped code.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd = repo_root(), capture_output = True, text = True
+    )
+    sha = result.stdout.strip()
+    if result.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        die(f"could not resolve HEAD to tag the release against: {result.stderr.strip()}")
+    return sha
+
+
 def upload(tag: str, version: str, assets: list[pathlib.Path], manifest: pathlib.Path,
            notes: str) -> None:
     auth = subprocess.run(["gh", "auth", "status"], capture_output = True, text = True)
@@ -398,6 +414,7 @@ def upload(tag: str, version: str, assets: list[pathlib.Path], manifest: pathlib
         created = subprocess.run(
             [
                 "gh", "release", "create", tag, "--repo", REPO,
+                "--target", head_commit(),
                 "--title", f"Unsloth X8 {version}",
                 "--notes", notes,
                 # A prerelease or draft never reaches /releases/latest, so the app
