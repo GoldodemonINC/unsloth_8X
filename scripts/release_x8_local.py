@@ -385,8 +385,11 @@ def upload(tag: str, version: str, assets: list[pathlib.Path], manifest: pathlib
             code = 2,
         )
 
+    # Every call names the repository explicitly. gh otherwise infers it from git
+    # remotes, and in a fork checkout `origin` is upstream: the release then goes to
+    # unslothai/unsloth or fails 404, and either way never reaches this fork's clients.
     existing = subprocess.run(
-        ["gh", "release", "view", tag, "--json", "tagName"],
+        ["gh", "release", "view", tag, "--repo", REPO, "--json", "tagName"],
         capture_output = True,
         text = True,
     )
@@ -394,7 +397,7 @@ def upload(tag: str, version: str, assets: list[pathlib.Path], manifest: pathlib
         print(f"creating release {tag}...", flush = True)
         created = subprocess.run(
             [
-                "gh", "release", "create", tag,
+                "gh", "release", "create", tag, "--repo", REPO,
                 "--title", f"Unsloth X8 {version}",
                 "--notes", notes,
                 # A prerelease or draft never reaches /releases/latest, so the app
@@ -409,7 +412,7 @@ def upload(tag: str, version: str, assets: list[pathlib.Path], manifest: pathlib
     names = ", ".join(path.name for path in assets)
     print(f"uploading {names} and latest.json...", flush = True)
     uploaded = subprocess.run(
-        ["gh", "release", "upload", tag, *[str(path) for path in assets],
+        ["gh", "release", "upload", tag, "--repo", REPO, *[str(path) for path in assets],
          str(manifest), "--clobber"],
         check = False,
     )
@@ -425,7 +428,7 @@ def verify_published(tag: str, version: str, assets: list[pathlib.Path]) -> None
     """
     print("verifying the published manifest...", flush = True)
     readback = subprocess.run(
-        ["gh", "release", "view", tag, "--json", "isDraft,isPrerelease,assets"],
+        ["gh", "release", "view", tag, "--repo", REPO, "--json", "isDraft,isPrerelease,assets"],
         capture_output = True,
         text = True,
     )
@@ -451,7 +454,7 @@ def verify_published(tag: str, version: str, assets: list[pathlib.Path]) -> None
     # the local one: a signature or URL mangled in transit only shows up here.
     with tempfile.TemporaryDirectory() as download_dir:
         downloaded = subprocess.run(
-            ["gh", "release", "download", tag, "--pattern", "latest.json",
+            ["gh", "release", "download", tag, "--repo", REPO, "--pattern", "latest.json",
              "--dir", download_dir, "--clobber"],
             capture_output = True,
             text = True,
