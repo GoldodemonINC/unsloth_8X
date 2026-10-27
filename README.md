@@ -1,157 +1,71 @@
-# Unsloth X8
+# X8 — experimental features
 
-A fork of [Unsloth](https://github.com/unslothai/unsloth) that keeps the training stack and pushes on the Studio: the Scaler can grow **or** shrink a checkpoint, and Labs is a set of working engines rather than a preview.
+This branch carries the experimental features and nothing else. No desktop shell,
+no HTTP server, no CLI, no training or inference stack. Each feature is a folder
+you can read on its own, with the test that came with it.
 
-The upstream project is the fastest way to fine-tune open models on one GPU. This fork keeps that and adds a layer for the work that comes *around* a run — sizing it, scaling the model first, chaining stages, scoring the result, and knowing what a produced folder is allowed to do next.
+Everything here comes from `x8-main`; the app still carries the same code and is
+where these features actually run.
 
-> **Branch:** `x8-main` is the branch this fork is developed on. `main` mirrors the imported upstream tree.
+## Layout
 
----
-
-## What this fork adds
-
-| Area | What it does |
-| --- | --- |
-| **Scaler, growth** | Any target above the base is allowed — 1.11x and 1.26x included, not just 2x. Ceiling stays base + 3B. Below 2x the plan says the gain is unmeasured instead of refusing. |
-| **Scaler, shrinking** | Depth drops whole transformer blocks to land near a smaller target (a 28-block 1.7B loses ~50M per block, so five or six blocks is ~1.4B). Width narrows each MLP instead, ranking channels by their gate/up/down weights. Edges protected, at least half the depth and a quarter of the width kept. |
-| **Fit check** | Sizes a run from the card before anything starts, so an out-of-memory job is caught at plan time. |
-| **Labs engines** | CMT, Scale-before-training, Benchmarks, Artifacts, Pipelines, the shrink repair preset and Cleanup — each backed by tests, behind a single switch. |
-| **Run records** | Every merge, scale, CMT and pipeline output writes `run_manifest.json` and a copy of the license notice beside the checkpoint. |
-| **Licensing** | Additions original to this fork are under [NRC-2](LICENSE-NRC-2.md); inherited code keeps its upstream license. |
-
-### The two Scaler directions
-
-**Grow** inserts blocks, widens the feed-forward, or both. Depth growth is bit-exact at step 0 — the new block contributes exactly zero until training unlocks it — so the checkpoint computes the base function while it waits for continued pretraining. Width growth is within ~1e-5 of the base logits, not bit-exact, because float32 re-associates the widened sum.
-
-**Shrink** removes blocks or narrows each block's MLP. Neither can be function-preserving: a removed block is a removed residual contribution, and a removed channel is a smaller projection. The run reports the drift it measured against the base and hands you a checkpoint that needs a recovery pass; the Labs **shrink repair** preset is that pass — it measures the gap, trains, measures again, and passes or fails the result against a tolerance you set. Shrinking is the right tool when you have a fine-tune whose behaviour you want at a smaller shape; if you only need training to fit in less VRAM, QLoRA or a smaller base checkpoint is less work.
-
-Both directions plan from `config.json` alone, so the slider answers before any weights load.
-
----
-
-## Run it
-
-### Colab (free T4)
-
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/GoldodemonINC/unsloth_8X/blob/x8-main/studio/Unsloth_Studio_X8_Colab.ipynb)
-
-The notebook clones `x8-main`, installs this checkout editable over any PyPI wheel, verifies the import came from the checkout, and serves the UI through Colab's port proxy.
-
-### Local
-
-```bash
-git clone -b x8-main https://github.com/GoldodemonINC/unsloth_8X.git
-cd unsloth_8X
-
-bash studio/setup.sh --local     # installs this checkout editable, plus prebuilt engines
-unsloth studio -p 8888           # http://127.0.0.1:8888
+```
+features/
+  artifacts/     created files, mirrors and previews for a plan's outputs
+  autoscale/     "scale before training": sizes a growth from the dataset
+  benchmarks/    eval-plan execution and stored benchmark records
+  cmt/           curriculum-mixed training from token budgets
+  housekeeping/  what the outputs, exports and caches cost, and what may go
+  pipelines/     multi-stage plans with preflight and per-stage manifests
+shared/
+  merge, scaling, tensor_io, ...   the machinery the features call
+  paths.py                          where outputs and exports live
 ```
 
-`setup.sh --local` is what makes the fork's own code win over a published `unsloth` wheel; run it from the checkout, not from a copied folder. Set `UNSLOTH_SKIP_WHISPER_INSTALL=1` and `UNSLOTH_SKIP_AUDIO_CPP_INSTALL=1` to skip the speech/audio engines when you only need training and merging — that is what the Colab notebook does.
+`features/<name>/<name>.py` is the feature; `test_<name>.py` beside it is its test.
+`shared/` holds the nine modules the features import — including the weight-blending
+engine and the checkpoint scaler — so the folders above stay readable without
+dragging in the rest of the app.
 
-### Development loop
+## What is deliberately not here
 
-Two terminals, backend first:
+- **The app**: `studio/frontend`, `studio/src-tauri`, `studio/backend/routes`,
+  the settings gate, and the server that hosts these features.
+- **The rest of the backend**: inference, training, export, RAG, research.
+- **`tests/test_labs.py`**: it only exercised the Labs settings gate through the
+  HTTP route, which is app code. Its behaviour is unchanged on `x8-main`.
 
-```bash
-python studio/backend/run.py --port 8888
-```
+Two references to app modules survive on purpose, both already written to fail
+softly rather than raise:
 
-```bash
-cd studio/frontend
-npm install
-npm run dev        # http://127.0.0.1:5173, proxies /api to 127.0.0.1:8888
-```
+- `features/housekeeping/housekeeping.py` reads the running-job registry from
+  `routes.advanced` inside a `try`. The comment there says an import failure means
+  there is nothing to protect, so cleanup simply stops skipping live jobs.
+- `shared/run_manifest.py` stamps `studio_version()` from `utils.studio_version`
+  inside a `try`, falling back to `"unknown"`.
 
-The desktop shell (`studio/src-tauri/`) wraps the same UI; the Vite dev server and the desktop app talk to the same backend.
+## The one behaviour that changed
 
----
+`shared/paths.py` replaces Studio's `utils.paths.storage_roots` for the four call
+sites that needed a directory. Studio's version resolves through its account
+workspace, which enforces per-account isolation and refuses paths that escape it —
+machinery that belongs to the app. The replacement keeps the part that picks the
+directory: `UNSLOTH_STUDIO_HOME`, then `STUDIO_HOME`, then `UNSLOTH_HOME/studio`,
+then `~/.unsloth/studio`, with `outputs` and `exports` beneath it, and
+`HF_HOME`/`HF_HUB_CACHE` for the caches. Run beside Studio, it reads the same
+folders Studio lists; run alone, it does not consult Studio's stored settings.
 
-## What is in here
-
-| Path | What it is |
-| --- | --- |
-| `unsloth/` | Unsloth Core: PEFT/LoRA kernels, model loaders, patchers, `models/scaling.py` (grow + shrink) |
-| `studio/backend/` | FastAPI server: training worker, merges, Scaler, splitter, export, Labs routes, hardware probe |
-| `studio/frontend/` | React + Vite + Tailwind UI, TypeScript, node's own test runner |
-| `studio/src-tauri/` | Desktop shell hosting the Studio UI |
-| `studio/backend/core/labs/` | The Labs engines: CMT, auto-scale, benchmarks, artifacts, pipelines |
-| `studio/backend/core/advanced/` | Merge, MoE, splitter, Scaler, eval harness, run manifests |
-| `install.sh`, `studio/setup.sh` | Installers: pin the Python stack and prebuilt inference engines |
-| `docs/` | Repository docs (see below) |
-
-### Studio surfaces
-
-The sidebar is the map of the app; rows are gated on the measured hardware verdict.
-
-- **Chat, Projects, Library, Model hub** — run and organize models.
-- **Images, Video, Audio** — media workspaces.
-- **Train** — the wizard: method picker, datasets, fit check, advanced/Scaler section, run preview.
-- **Merge** — CPU streaming merge or GPU full-load merge, two to six parents.
-- **Scaler** — grow or shrink a checkpoint before training it.
-- **Recipes** — Data Recipes for building datasets.
-- **Export** — merged, adapter, GGUF and quantized export.
-- **Labs** — hidden until Settings → Labs is on. Artifacts, Pipelines, Benchmarks, CMT, Scale-before-training, Run manifest, Cleanup.
-- **API** — the OpenAI-compatible server and request monitor.
-
-Merging, scaling and export are engines under the run layer (jobs, resource arbitration, `run_manifest.json`), not separate applications.
-
----
-
-## Checks
-
-From `studio/frontend/`:
+## Tests
 
 ```bash
-npm run typecheck    # tsc over src and tests
-npm test             # node --test over tests/**/*.test.ts
-npm run i18n:check   # locale overlay parity
-npm run biome:check  # lint + format
+python -m pytest features shared
 ```
 
-Backend tests run from `studio/backend/`:
+`conftest.py` puts the repository root on `sys.path` so `features.*` and `shared.*`
+import regardless of where pytest is invoked from. The modules import each other by
+package name, so nothing works from inside a single feature folder.
 
-```bash
-python -m pytest tests -q
-```
-
-The Scaler's own suites are `tests/test_advanced_scaling.py`,
-`tests/test_advanced_scaling_routes.py` and `tests/test_engine_shrink.py`; the
-last one builds a tiny Llama and performs the block surgery for real.
-
-From the repository root: `pre-commit run --all-files` (Ruff and the repo's lint scripts).
-
----
-
-## Docs
-
-| Doc | Covers |
-| --- | --- |
-| [docs/labs.md](docs/labs.md) | The Labs switch, the experiment registry, Artifacts and Pipelines |
-| [docs/simulated-training.md](docs/simulated-training.md) | The Debugging simulator that runs a job with no hardware behind it |
-| [docs/theming.md](docs/theming.md) | Palettes, accent tokens, changing the UI color |
-| [docs/README.md](docs/README.md) | Repository map and the local CRLF trap |
-
----
-
-## License
-
-This repository carries three sets of terms, and they do not overlap:
-
-- **Unsloth Core** (`unsloth/`) is **Apache-2.0**, as inherited from upstream.
-- **The Studio application** (`studio/`) is **AGPL-3.0** — see [studio/LICENSE.AGPL-3.0](studio/LICENSE.AGPL-3.0).
-- **Original additions in this fork** — the Labs engines, the trainer surface and the run records — are under **[NRC-2](LICENSE-NRC-2.md)**. Files that carry the `NRC-2` header are the ones covered; the Scaler lives in upstream-licensed files and keeps those terms.
-
-NRC-2 permits private, internal and commercial use, modification, and sharing with attribution. It reserves three things: relaunching the work as a rebranded product with its own name, logo or separate interface, broad public distribution of it (or a modified copy) at scale from a company, and stacking more than three licenses onto a public distribution of it — this license counts as one of the three. Code inherited from upstream, and every model weight, tokenizer or dataset, keeps whatever license came with it.
-
-Produced checkpoints carry a `LICENSE-NRC-2.txt` beside their `run_manifest.json`, so a folder keeps those terms wherever it is copied.
-
----
-
-## Contributing
-
-Issues and pull requests are welcome. Small fixes can go straight to a PR; for anything larger, open an issue with the shape you have in mind first so the approach can be agreed before you spend the time.
-
-The most self-contained places to start are `studio/backend/core/labs/` (each engine is a module with its own tests), `studio/frontend/src/features/labs/`, and `studio/backend/core/advanced/` — custom eval tasks, the repair preset and adapter merging each live in one module there with its own tests.
-
-If a suite looks mysteriously red on Windows, check the line endings before changing the test: `.gitattributes` asks for LF under `studio/frontend/`, but `core.autocrlf=true` checks files out as CRLF and several tests pin exact source text. [docs/README.md](docs/README.md) has the details.
+Current state: **46 passed, 1 failed**. The failure is
+`features/artifacts/test_artifacts.py::test_growth_below_the_floor_is_blocked_with_the_number`,
+which expects a 1.5x growth to be refused at a 2x floor; `scaling.GROWTH_FLOOR` is
+`1.0` today. It fails the same way on `x8-main` and was not introduced here.
