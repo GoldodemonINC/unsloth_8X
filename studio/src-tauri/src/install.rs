@@ -984,6 +984,57 @@ pub(crate) fn run_install_for_repair(
     )
 }
 
+/// The release flavor this binary was built as, from UNSLOTH_DESKTOP_FLAVOR.
+///
+/// The three installers a release publishes are this same app compiled three times, and
+/// this is the only thing that differs. It has to be baked in at compile time because the
+/// stack is chosen at run time -- install.ps1 / install.sh run on first launch -- so the
+/// flavor travels with the binary that starts them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopFlavor {
+    /// Pin the CPU stack: no GPU probe, no CUDA wheels.
+    Cpu,
+    /// CUDA llama.cpp; the torch leaf stays unpinned because it follows the driver.
+    Gpu,
+    /// Probe and install whatever the machine can run. Every non-release build.
+    CpuGpu,
+}
+
+impl DesktopFlavor {
+    /// The flavor the release compiled in, or the universal one when unset.
+    ///
+    /// Nothing else reads this variable, so anything that does not set it -- `cargo test`,
+    /// `tauri dev`, any CI job that is not the release -- is the universal build.
+    fn baked() -> Self {
+        match option_env!("UNSLOTH_DESKTOP_FLAVOR") {
+            Some("cpu") => Self::Cpu,
+            Some("gpu") => Self::Gpu,
+            _ => Self::CpuGpu,
+        }
+    }
+
+    /// The environment that makes this flavor real rather than a label on an identical file.
+    ///
+    /// Both names are existing installer knobs. UNSLOTH_TORCH_INDEX_FAMILY skips ALL GPU
+    /// probing in install.ps1's Get-TorchIndexUrl and in install_python_stack.py, and
+    /// UNSLOTH_LLAMA_CPP_BACKEND selects the llama.cpp bundle at install time (setup.ps1).
+    /// The universal flavor deliberately emits nothing, so its install is the unpinned,
+    /// auto-detecting one every earlier build already performed.
+    fn install_env(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Cpu => &[
+                ("UNSLOTH_TORCH_INDEX_FAMILY", "cpu"),
+                ("UNSLOTH_LLAMA_CPP_BACKEND", "cpu"),
+            ],
+            // No family pin here on purpose: which CUDA leaf is correct depends on the
+            // driver, which only the installer can see. Pinning it from the build would
+            // hand a cu126 build to a card that needs cu128.
+            Self::Gpu => &[("UNSLOTH_LLAMA_CPP_BACKEND", "cuda")],
+            Self::CpuGpu => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct InstallerEnv {
     upgrade_torch: bool,
@@ -1001,6 +1052,9 @@ fn installer_env(env: InstallerEnv) -> Vec<(&'static str, &'static str)> {
     if env.skip_long_paths {
         vars.push(("UNSLOTH_SKIP_LONG_PATHS", "1"));
     }
+    // Appended here rather than at the call sites so that no install path can forget it:
+    // this function is the one place every managed install funnels through.
+    vars.extend_from_slice(DesktopFlavor::baked().install_env());
     vars
 }
 
@@ -1710,6 +1764,27 @@ mod tests {
             installer_env(both),
             vec![("UNSLOTH_TORCH_UPGRADE", "1"), ("UNSLOTH_SKIP_LONG_PATHS", "1")]
         );
+    }
+
+    #[test]
+    fn each_flavor_pins_the_installer_it_was_built_as() {
+        // The universal build must stay pin-free: it is what the updater installs, and a
+        // pin there would narrow a machine that could have run the full stack.
+        assert!(DesktopFlavor::CpuGpu.install_env().is_empty());
+
+        let cpu = DesktopFlavor::Cpu.install_env();
+        assert!(cpu.contains(&("UNSLOTH_TORCH_INDEX_FAMILY", "cpu")));
+        assert!(cpu.contains(&("UNSLOTH_LLAMA_CPP_BACKEND", "cpu")));
+
+        // No torch pin for the GPU flavor: the leaf follows the driver, not the build.
+        assert_eq!(DesktopFlavor::Gpu.install_env(), &[("UNSLOTH_LLAMA_CPP_BACKEND", "cuda")]);
+    }
+
+    #[test]
+    fn an_unset_flavor_is_the_universal_build() {
+        // These tests run without UNSLOTH_DESKTOP_FLAVOR set, which is also the assertion
+        // that a plain `cargo test` tree installs exactly what it always did.
+        assert_eq!(DesktopFlavor::baked(), DesktopFlavor::CpuGpu);
     }
 
     #[test]
