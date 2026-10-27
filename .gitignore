@@ -274,3 +274,10 @@ studio/backend/requirements/.*-filtered-*.txt
 tests/security/fixtures/malicious_wheel.whl
 tests/security/fixtures/malicious_sdist.tar.gz
 tests/security/fixtures/clean_wheel.whl
+
+# Desktop updater signing key. Never commit: upload the file contents as the
+# TAURI_SIGNING_PRIVATE_KEY repository secret.
+studio/src-tauri/x8-updater.key
+
+# Local release staging (scripts/release_x8_local.py).
+release-out/

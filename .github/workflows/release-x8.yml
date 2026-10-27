@@ -1,0 +1,254 @@
+name: Release X8 Desktop (Windows)
+
+# The fork's updater channel. release-desktop.yml belongs to upstream: it releases
+# upstream's tags, validates them against unslothai/unsloth, and needs the signing,
+# notarization and Azure secrets that only upstream holds. This workflow publishes
+# this fork's own Windows build, signed with this fork's updater key, together with
+# the latest.json that studio/src-tauri/tauri.conf.json points at:
+#
+#   https://github.com/GoldodemonINC/unsloth_8X/releases/latest/download/latest.json
+#
+# Two properties decide whether an installed app ever sees the result, and both are
+# enforced below rather than left to the operator:
+#
+#   * the tag is v<version> exactly, because desktop_update_policy.rs only trusts
+#     asset URLs under /releases/download/v<version>/ for the version the manifest
+#     declares;
+#   * the release is neither a draft nor a prerelease, because /releases/latest
+#     skips both and the endpoint above is a /latest/ URL.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish, no leading v and no suffix (for example 2026.4.9)'
+        type: string
+        required: true
+      notes:
+        description: 'Release notes, shown in the app''s update popup'
+        type: string
+        required: false
+      draft:
+        description: 'Build and sign without publishing; drafts never reach clients'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-x8-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  windows:
+    name: Build, sign and publish
+    runs-on: windows-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      APP_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: v${{ inputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag is hand-typed, and a stray character here publishes a release that
+      # no client can ever install. Refuse anything that is not plain SemVer before
+      # a runner starts compiling.
+      - name: Validate version and tag
+        shell: bash
+        env:
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RAW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must be plain SemVer with no leading v and no prerelease suffix: $RAW_VERSION" >&2
+            echo "The updater compares this string against the installed build, and the" >&2
+            echo "manifest URL is checked against /releases/download/v<version>/ exactly." >&2
+            exit 1
+          fi
+          echo "Publishing ${RELEASE_TAG}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Must run BEFORE any `npm ci`: this job has contents: write, so a compromised
+      # lockfile's postinstall script could publish attacker-built binaries.
+      - name: Lockfile supply-chain audit (pre-install scan)
+        shell: bash
+        run: python scripts/lockfile_supply_chain_audit.py
+
+      - name: Install pinned Tauri CLI
+        run: npm ci --prefix studio --no-fund --no-audit
+
+      - name: Verify pinned Tauri CLI
+        shell: bash
+        run: |
+          out="$(npx --prefix studio tauri --version)"
+          echo "$out"
+          if [ "$out" != "tauri-cli 2.10.1" ]; then
+            echo "Expected tauri-cli 2.10.1, got $out" >&2
+            exit 1
+          fi
+
+      - name: Install frontend dependencies
+        working-directory: studio/frontend
+        run: npm ci --no-fund --no-audit
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable @ 2026-03-27
+
+      # tauri-action publishes whatever version the bundle reports, and that comes
+      # from Cargo.toml. Without this the tag and the manifest disagree and every
+      # client either sees no update or installs the wrong one.
+      - name: Patch desktop app version
+        shell: bash
+        working-directory: studio/src-tauri
+        run: |
+          set -euo pipefail
+          if command -v python3 >/dev/null 2>&1; then PYTHON=python3; else PYTHON=python; fi
+          "$PYTHON" <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          app_version = os.environ['APP_VERSION']
+          if not app_version:
+              sys.exit('APP_VERSION is required')
+
+          cargo_toml = pathlib.Path('Cargo.toml')
+          lines = cargo_toml.read_text().splitlines(keepends = True)
+          in_package = False
+          patched = False
+          for index, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped == '[package]':
+                  in_package = True
+                  continue
+              if stripped.startswith('[') and stripped.endswith(']'):
+                  in_package = False
+              if in_package and re.fullmatch(r'version\s*=\s*"[^"]+"', stripped):
+                  lines[index] = f'version = "{app_version}"\n'
+                  patched = True
+                  break
+          if not patched:
+              sys.exit('Could not patch [package] version in Cargo.toml')
+          cargo_toml.write_text(''.join(lines))
+
+          cargo_lock = pathlib.Path('Cargo.lock')
+          lock_text = cargo_lock.read_text()
+          lock_text, count = re.subn(
+              r'(?m)(^\[\[package\]\]\nname = "unsloth-studio"\nversion = ")[^"]+(")',
+              lambda match: f'{match.group(1)}{app_version}{match.group(2)}',
+              lock_text,
+          )
+          if count != 1:
+              sys.exit(f'Could not patch unsloth-studio version in Cargo.lock (matches={count})')
+          cargo_lock.write_text(lock_text)
+          PY
+
+          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
+          "$PYTHON" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          app_version = os.environ['APP_VERSION']
+          metadata = json.loads(pathlib.Path(os.environ['RUNNER_TEMP'], 'cargo-metadata.json').read_text())
+          versions = [p['version'] for p in metadata.get('packages', []) if p.get('name') == 'unsloth-studio']
+          if versions != [app_version]:
+              sys.exit(f'cargo metadata unsloth-studio version mismatch: expected {app_version}, got {versions}')
+          PY
+
+      # tauri-bundler fetches the NSIS toolset and WebView2 bootstrapper with one
+      # unretried GET after the whole compile; seeding it here turns a transient
+      # 504 into a slow run instead of a failed release.
+      - name: Prefetch Tauri Windows bundler tools
+        shell: pwsh
+        run: .github/scripts/prefetch-tauri-windows-tools.ps1
+
+      # Without a key the build silently produces unsigned bundles, latest.json
+      # carries an empty signature, and every client rejects the update. Fail here
+      # instead, where the message names the fix.
+      - name: Require the updater signing key
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEY" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY is not set on this repository." >&2
+            echo "Add the contents of studio/src-tauri/x8-updater.key as a repository" >&2
+            echo "secret; the matching public key is already embedded in tauri.conf.json." >&2
+            echo "An update signed with any other key is refused by every installed app." >&2
+            exit 1
+          fi
+
+      - name: Build, sign and publish
+        id: publish
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5  # v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # The generated key has no password. Explicit rather than unset: with the
+          # variable absent, tauri prompts for one and the job hangs until timeout.
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        with:
+          projectPath: studio
+          tauriScript: npx --prefix . tauri
+          args: -v --bundles nsis
+          tagName: v${{ inputs.version }}
+          releaseName: Unsloth X8 ${{ inputs.version }}
+          releaseBody: ${{ inputs.notes || format('Unsloth X8 desktop build {0}.', inputs.version) }}
+          releaseDraft: ${{ inputs.draft }}
+          # /releases/latest, which the app's endpoint uses, never resolves to a
+          # prerelease. Publishing as one would look successful and serve nothing.
+          prerelease: false
+          # Writes latest.json next to the installer, with the signature and an
+          # asset URL pinned to this tag.
+          includeUpdaterJson: true
+
+      - name: Verify the published manifest is what clients will read
+        if: ${{ !inputs.draft }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/latest.json"
+          # Read it back from the release rather than from the build directory: a
+          # manifest that exists locally but was not uploaded updates nobody.
+          gh release download "$RELEASE_TAG" --pattern latest.json --dir "$RUNNER_TEMP" --clobber
+          python - "$manifest" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          tag = os.environ['RELEASE_TAG']
+          version = os.environ['APP_VERSION']
+          data = json.loads(pathlib.Path(sys.argv[1]).read_text())
+          if data.get('version') != version:
+              sys.exit(f'latest.json version {data.get("version")!r} != {version!r}')
+
+          entry = (data.get('platforms') or {}).get('windows-x86_64')
+          if not isinstance(entry, dict):
+              sys.exit(f'latest.json has no windows-x86_64 entry: {sorted((data.get("platforms") or {}))}')
+          if not (entry.get('signature') or '').strip():
+              sys.exit('windows-x86_64 entry has no signature; every client would reject it')
+
+          expected = f'https://github.com/GoldodemonINC/unsloth_8X/releases/download/{tag}/'
+          url = entry.get('url') or ''
+          if not url.startswith(expected):
+              sys.exit(f'windows-x86_64 URL is not pinned to {tag}: {url}')
+          PY
+
+          latest="$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)"
+          if [ "$latest" != "$RELEASE_TAG" ]; then
+            echo "::warning::GitHub latest is $latest, not $RELEASE_TAG; clients keep reading the older manifest until this release becomes latest."
+          fi
