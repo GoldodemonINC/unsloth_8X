@@ -488,6 +488,175 @@ def _expand_mlp_width(
 
 
 # ---------------------------------------------------------------------------
+# MLP-width reduction
+# ---------------------------------------------------------------------------
+
+#: A width shrink keeps at least this fraction of each MLP's channels. Below it
+#: the FFN stops being a FFN, and the recovery pass is being asked to rebuild
+#: capacity from almost nothing. Depth has the same kind of floor.
+WIDTH_FLOOR = 0.25
+
+
+def _mlp_of(block: Any) -> Any:
+    return block.mlp if hasattr(block, "mlp") else block.feed_forward
+
+
+def _channel_scores(mlp: Any) -> Any:
+    """How much each intermediate channel contributes, from the weights alone.
+
+    A channel is a row of gate/up and a column of down. Its score is the product
+    of the two magnitudes: a channel whose output weight is near zero cannot
+    change the block's output however large its input rows are, and vice versa.
+    This is a proxy, not an activation statistic - it needs no calibration pass
+    and no forward, which is what lets the Scaler answer from ``config.json``
+    before any weights are loaded.
+    """
+    gate = mlp.gate_proj.weight.detach().float()
+    up = mlp.up_proj.weight.detach().float()
+    down = mlp.down_proj.weight.detach().float()
+    return down.norm(dim = 0) * (gate.norm(dim = 1) + up.norm(dim = 1))
+
+
+def _slice_linear(module: Any, rows: Any = None, columns: Any = None) -> None:
+    """Replace a Linear's weight (and bias) along one axis, keeping it a Linear."""
+    import torch
+
+    weight = module.weight
+    target = weight if rows is None else weight.index_select(0, rows)
+    if columns is not None:
+        target = target.index_select(1, columns)
+    module.weight = torch.nn.Parameter(
+        target.contiguous(), requires_grad = weight.requires_grad
+    )
+    # nn.Linear caches both, and PEFT sizes an adapter from them: a sliced weight
+    # with the old in_features fails on the first forward that builds one.
+    module.out_features = int(module.weight.shape[0])
+    module.in_features = int(module.weight.shape[1])
+    if module.bias is not None:
+        bias = module.bias
+        selected = bias if rows is None else bias.index_select(0, rows)
+        module.bias = torch.nn.Parameter(
+            selected.contiguous(), requires_grad = bias.requires_grad
+        )
+
+
+def shrink_model_width(
+    model: Any,
+    target_params: Optional[float] = None,
+    intermediate_size: Optional[int] = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Narrow every block's MLP to ``intermediate_size`` channels in place.
+
+    Depth shrinking removes whole blocks; this removes width inside each one.
+    The two are not interchangeable: a removed block is a removed residual
+    contribution, while a removed channel is a smaller projection, so the model
+    keeps its depth and loses resolution in the FFN.
+
+    Channels are ranked by :func:`_channel_scores` and the lowest-scoring ones
+    go, per block. Because a PEFT config carries one ``intermediate_size``, every
+    block must keep the same count - the model builds one FFN shape and reloads
+    it from that config.
+
+    Like the depth path this is **not** function-preserving: the returned model
+    computes something related but worse, and needs a recovery pass. The report
+    says so and records the counts it kept.
+    """
+    import torch
+
+    if target_params is None and intermediate_size is None:
+        raise ValueError("Give target_params or intermediate_size.")
+
+    config = _guard_dense_model(model, operation = "shrink")
+    _, _, layers = _layers_owner(model)
+    _check_block_layout(layers[0], method = "mlp_width")
+
+    sizes = {int(_mlp_of(block).gate_proj.weight.shape[0]) for block in layers}
+    if len(sizes) != 1:
+        raise ValueError(
+            "Width shrinking needs uniform MLPs; this checkpoint has intermediate "
+            f"sizes {sorted(sizes)}."
+        )
+    old_intermediate = sizes.pop()
+    hidden_size = int(_mlp_of(layers[0]).gate_proj.weight.shape[1])
+    base_params = _parameter_count(model)
+    num_layers = len(layers)
+    per_channel = 3 * hidden_size * max(1, num_layers)
+
+    if intermediate_size is not None:
+        new_intermediate = int(intermediate_size)
+    else:
+        gap = base_params - float(target_params)
+        if gap <= 0:
+            raise ValueError(
+                f"Target {target_params:.0f} is not smaller than this checkpoint's "
+                f"{base_params} parameters; narrowing needs a lower target."
+            )
+        new_intermediate = old_intermediate - int(round(gap / max(1, per_channel)))
+
+    floor = max(1, int(math.ceil(old_intermediate * WIDTH_FLOOR)))
+    if new_intermediate >= old_intermediate:
+        raise ValueError(
+            f"intermediate_size must narrow below {old_intermediate}; "
+            f"got {new_intermediate}."
+        )
+    if new_intermediate < floor:
+        raise ValueError(
+            f"Narrowing {old_intermediate} channels to {new_intermediate} goes below the "
+            f"{WIDTH_FLOOR:.0%} floor ({floor} channels). Shrink depth, or start from a "
+            "smaller checkpoint."
+        )
+
+    kept: list[int] = []
+    dropped_sample: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for index, block in enumerate(layers):
+            mlp = _mlp_of(block)
+            scores = _channel_scores(mlp)
+            keep = torch.topk(scores, new_intermediate).indices.sort().values
+            dropped = torch.ones_like(scores, dtype = torch.bool)
+            dropped[keep] = False
+            _slice_linear(mlp.gate_proj, rows = keep)
+            _slice_linear(mlp.up_proj, rows = keep)
+            _slice_linear(mlp.down_proj, columns = keep)
+            kept.append(int(keep.numel()))
+            if index < 4:
+                removed = dropped.nonzero().flatten().tolist()
+                dropped_sample.append(
+                    {"layer": index, "dropped": removed[:20], "dropped_count": len(removed)}
+                )
+
+    for target_config in (config, getattr(config, "text_config", None)):
+        if target_config is not None and hasattr(target_config, "intermediate_size"):
+            target_config.intermediate_size = int(new_intermediate)
+
+    final_params = _parameter_count(model)
+    report: dict[str, Any] = {
+        "base_params": base_params,
+        "final_params": final_params,
+        "removed_params": base_params - final_params,
+        "old_intermediate_size": old_intermediate,
+        "new_intermediate_size": int(new_intermediate),
+        "removed_channels": old_intermediate - int(new_intermediate),
+        "keep_ratio": int(new_intermediate) / max(1, old_intermediate),
+        "narrowed_layers": len(kept),
+        "channels_per_layer": kept[:4],
+        "dropped_channels_sample": dropped_sample,
+        "scored_by": "channel_norm",
+        "params_per_channel": per_channel,
+        "params_per_channel_estimate": True,
+        "shrink_factor": final_params / max(1, base_params),
+        "function_preserved": False,
+        "warning": (
+            "Removing MLP channels changes the function: this checkpoint is a starting "
+            "point for recovery training, not a drop-in replacement. Use the shrink "
+            "repair preset to measure the gap and train it back."
+        ),
+    }
+    model._unsloth_scaling_report = report
+    return model, report
+
+
+# ---------------------------------------------------------------------------
 # Public: expand_model
 # ---------------------------------------------------------------------------
 

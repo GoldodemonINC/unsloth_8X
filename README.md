@@ -13,9 +13,9 @@ The upstream project is the fastest way to fine-tune open models on one GPU. Thi
 | Area | What it does |
 | --- | --- |
 | **Scaler, growth** | Any target above the base is allowed — 1.11x and 1.26x included, not just 2x. Ceiling stays base + 3B. Below 2x the plan says the gain is unmeasured instead of refusing. |
-| **Scaler, shrinking** | Drops whole transformer blocks to land near a smaller target (a 28-block 1.7B loses ~50M per block, so five or six blocks is ~1.4B). Influence-ranked, edges protected, at least half the depth kept. |
+| **Scaler, shrinking** | Depth drops whole transformer blocks to land near a smaller target (a 28-block 1.7B loses ~50M per block, so five or six blocks is ~1.4B). Width narrows each MLP instead, ranking channels by their gate/up/down weights. Edges protected, at least half the depth and a quarter of the width kept. |
 | **Fit check** | Sizes a run from the card before anything starts, so an out-of-memory job is caught at plan time. |
-| **Labs engines** | CMT, Scale-before-training, Benchmarks, Artifacts, Pipelines and Cleanup — each backed by tests, behind a single switch. |
+| **Labs engines** | CMT, Scale-before-training, Benchmarks, Artifacts, Pipelines, the shrink repair preset and Cleanup — each backed by tests, behind a single switch. |
 | **Run records** | Every merge, scale, CMT and pipeline output writes `run_manifest.json` and a copy of the license notice beside the checkpoint. |
 | **Licensing** | Additions original to this fork are under [NRC-2](LICENSE-NRC-2.md); inherited code keeps its upstream license. |
 
@@ -23,7 +23,7 @@ The upstream project is the fastest way to fine-tune open models on one GPU. Thi
 
 **Grow** inserts blocks, widens the feed-forward, or both. Depth growth is bit-exact at step 0 — the new block contributes exactly zero until training unlocks it — so the checkpoint computes the base function while it waits for continued pretraining. Width growth is within ~1e-5 of the base logits, not bit-exact, because float32 re-associates the widened sum.
 
-**Shrink** removes blocks. That cannot be function-preserving: a removed block is a removed residual contribution. The run reports the drift it measured against the base and hands you a checkpoint that needs a recovery pass. It is the right tool when you have a fine-tune whose behaviour you want at a smaller shape; if you only need training to fit in less VRAM, QLoRA or a smaller base checkpoint is less work. Shrinking is depth-only on purpose — trimming MLP width would reshape every projection with no way to keep the block's function.
+**Shrink** removes blocks or narrows each block's MLP. Neither can be function-preserving: a removed block is a removed residual contribution, and a removed channel is a smaller projection. The run reports the drift it measured against the base and hands you a checkpoint that needs a recovery pass; the Labs **shrink repair** preset is that pass — it measures the gap, trains, measures again, and passes or fails the result against a tolerance you set. Shrinking is the right tool when you have a fine-tune whose behaviour you want at a smaller shape; if you only need training to fit in less VRAM, QLoRA or a smaller base checkpoint is less work.
 
 Both directions plan from `config.json` alone, so the slider answers before any weights load.
 
@@ -152,6 +152,6 @@ Produced checkpoints carry a `LICENSE-NRC-2.txt` beside their `run_manifest.json
 
 Issues and pull requests are welcome. Small fixes can go straight to a PR; for anything larger, open an issue with the shape you have in mind first so the approach can be agreed before you spend the time.
 
-The most self-contained places to start are `studio/backend/core/labs/` (each engine is a module with its own tests), `studio/frontend/src/features/labs/`, and the Scaler's shrink path — width trimming is deliberately unimplemented and is a real piece of work.
+The most self-contained places to start are `studio/backend/core/labs/` (each engine is a module with its own tests), `studio/frontend/src/features/labs/`, and `studio/backend/core/advanced/` — custom eval tasks, the repair preset and adapter merging each live in one module there with its own tests.
 
 If a suite looks mysteriously red on Windows, check the line endings before changing the test: `.gitattributes` asks for LF under `studio/frontend/`, but `core.autocrlf=true` checks files out as CRLF and several tests pin exact source text. [docs/README.md](docs/README.md) has the details.

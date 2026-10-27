@@ -85,7 +85,7 @@ def test_capabilities_advertise_the_scaler(client):
     assert {"depth", "mlp_width", "depth+mlp_width"} == {
         item["id"] for item in scaler["methods"]
     }
-    assert [item["id"] for item in scaler["shrink_methods"]] == ["depth"]
+    assert [item["id"] for item in scaler["shrink_methods"]] == ["depth", "mlp_width"]
 
 
 def test_a_shrink_run_past_the_floor_is_refused_before_a_job_starts(client, tmp_path):
@@ -116,4 +116,7 @@ def test_plan_endpoint_plans_a_shrink_below_the_base(client, tmp_path):
     assert body["direction"] == "shrink"
     assert body["runnable"] is True
     assert body["projection"]["removed_layers"] >= 1
-    assert body["methods"] == [{"id": "depth", "label": "Depth (drop whole transformer blocks)"}]
+    assert body["methods"] == [
+        {"id": "depth", "label": "Depth (drop whole transformer blocks)"},
+        {"id": "mlp_width", "label": "MLP width (narrow the feed-forward)"},
+    ]

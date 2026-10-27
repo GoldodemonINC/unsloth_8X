@@ -145,13 +145,45 @@ def test_shrinking_past_half_the_depth_is_refused(tmp_path):
     assert "below_shrink_floor" in [item["code"] for item in plan["refusals"]]
 
 
-def test_shrinking_only_supports_depth(tmp_path):
-    with pytest.raises(ValueError):
-        scaling.plan(
-            str(_checkpoint(tmp_path, SMOLLM2_135M)),
-            target_params=110_000_000,
-            method="mlp_width",
-        )
+def test_a_narrowing_target_plans_a_width_shrink(tmp_path):
+    plan = scaling.plan(
+        str(_checkpoint(tmp_path, SMOLLM2_135M)),
+        target_params=130_000_000,
+        method="mlp_width",
+    )
+
+    assert plan["direction"] == "shrink"
+    assert plan["method"] == "mlp_width"
+    assert plan["method_label"] == "MLP width (narrow the feed-forward)"
+    assert plan["runnable"] is True
+    assert plan["shrink_floor"] == scaling.WIDTH_SHRINK_FLOOR
+    projection = plan["projection"]
+    assert projection["new_intermediate_size"] < SMOLLM2_135M["intermediate_size"]
+    assert projection["removed_channels"] >= 1
+    assert projection["params_per_channel"] == 3 * 576 * 30
+
+
+def test_a_width_shrink_beyond_the_floor_is_refused(tmp_path):
+    plan = scaling.plan(
+        str(_checkpoint(tmp_path, SMOLLM2_135M)),
+        target_params=60_000_000,
+        method="mlp_width",
+    )
+
+    assert plan["runnable"] is False
+    assert "below_shrink_floor" in [item["code"] for item in plan["refusals"]]
+
+
+def test_a_width_target_above_one_channel_of_saving_is_refused(tmp_path):
+    source = str(_checkpoint(tmp_path, SMOLLM2_135M))
+    base = scaling.plan(source)["base_params"]
+
+    plan = scaling.plan(
+        source, target_params=float(base - 1_000), method="mlp_width"
+    )
+
+    assert plan["runnable"] is False
+    assert "not_smaller" in [item["code"] for item in plan["refusals"]]
 
 
 @pytest.mark.parametrize(
@@ -222,5 +254,6 @@ def test_supported_families_match_the_engine():
     assert tuple(scaling.MOE_CONFIG_KEYS) == tuple(engine._MOE_CONFIG_KEYS)
     assert scaling.GROWTH_FLOOR == engine.GROWTH_FLOOR
     assert scaling.SHRINK_FLOOR == engine.SHRINK_FLOOR
+    assert scaling.WIDTH_SHRINK_FLOOR == engine.WIDTH_FLOOR
     assert set(scaling.METHODS) == set(engine._METHODS)
     assert scaling.WIDTH_ALIGNMENT == engine._WIDTH_ALIGNMENT

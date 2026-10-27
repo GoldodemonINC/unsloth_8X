@@ -61,11 +61,16 @@ METHOD_LABELS = {
 # embeddings dominate and a smaller base checkpoint is the better start.
 SHRINK_FLOOR = 0.5
 
-SHRINK_METHODS = ("depth",)
+SHRINK_METHODS = ("depth", "mlp_width")
 
 SHRINK_METHOD_LABELS = {
     "depth": "Depth (drop whole transformer blocks)",
+    "mlp_width": "MLP width (narrow the feed-forward)",
 }
+
+# Mirrors ``unsloth.models.scaling.WIDTH_FLOOR``: a width shrink keeps at least
+# this fraction of each MLP's channels. A test keeps the two constants equal.
+WIDTH_SHRINK_FLOOR = 0.25
 
 # Mirrors ``unsloth.models.scaling._SUPPORTED_MODEL_TYPES``; a test keeps the two
 # equal without importing torch into the planning path.
@@ -438,6 +443,166 @@ def _shrink_projection(
     }
 
 
+def _shrink_width_plan(
+    label: str,
+    source: str,
+    config: Mapping[str, Any],
+    base_params: Optional[int],
+    *,
+    target_params: Optional[float],
+    token: Optional[str],
+) -> dict[str, Any]:
+    """A shrink plan that narrows each MLP instead of dropping blocks.
+
+    One channel costs the same everywhere (a gate row, an up row and a down
+    column, each ``hidden`` wide), so the slider's step is that cost times the
+    layers, and the floor is a fraction of the channels rather than of the depth.
+    """
+    refusals = _refusals(source, config, base_params, operation = "shrink")
+    blocking = [item for item in refusals if item["blocks"]]
+
+    available, engine_error = engine_available()
+    if not available:
+        refusals = refusals + [
+            _refusal(
+                "engine_unavailable",
+                f"Plans work, but the shrinking engine cannot load here: {engine_error}",
+            )
+        ]
+
+    hidden = _int(config.get("hidden_size")) or _int(config.get("n_embd")) or 0
+    layers = _int(config.get("num_hidden_layers")) or _int(config.get("n_layer")) or 0
+    intermediate = (
+        _int(config.get("intermediate_size"))
+        or _int(config.get("ffn_dim"))
+        or (_int(config.get("n_inner")) or 4 * hidden if hidden else 0)
+    )
+    per_channel = 3 * hidden * max(1, layers) if hidden else 0
+    keep_floor = max(1, int(math.ceil(intermediate * WIDTH_SHRINK_FLOOR))) if intermediate else 0
+    removable = max(0, intermediate - keep_floor)
+
+    min_params = int(base_params or 0)
+    max_params = int(base_params or 0)
+    default_target = int(base_params or 0)
+    target = float(target_params or 0.0)
+    projection: Optional[dict[str, Any]] = None
+    below_floor = False
+    too_large = False
+
+    if base_params and intermediate and removable >= 1:
+        max_params = int(base_params - per_channel)
+        min_params = int(base_params - removable * per_channel)
+        default_removals = max(1, min(removable, int(round(0.1 * removable))))
+        default_target = int(base_params - default_removals * per_channel)
+
+        if target_params is None:
+            target = float(default_target)
+        target = float(max(min_params, min(max_params, target)))
+        removed = int(round((base_params - target) / max(1, per_channel)))
+        removed = max(1, min(removable, removed))
+        projection = {
+            "current_intermediate_size": intermediate,
+            "removed_channels": removed,
+            "new_intermediate_size": intermediate - removed,
+            "params_per_channel": per_channel,
+        }
+    elif base_params and intermediate and removable < 1:
+        refusals = refusals + [
+            _refusal(
+                "no_room",
+                f"A {intermediate}-channel MLP cannot lose a channel and still keep "
+                f"{WIDTH_SHRINK_FLOOR:.0%} of its width. Start from a smaller checkpoint.",
+            )
+        ]
+
+    if base_params and intermediate and target_params is not None:
+        if float(target_params) >= float(base_params):
+            too_large = True
+            refusals = refusals + [
+                _refusal(
+                    "not_smaller",
+                    f"{_format_params(float(target_params))} is not smaller than this "
+                    f"checkpoint's {_format_params(base_params)}. Use the growth direction for "
+                    "a larger target.",
+                    blocks = False,
+                )
+            ]
+        elif removable >= 1 and float(target_params) > max_params:
+            too_large = True
+            refusals = refusals + [
+                _refusal(
+                    "not_smaller",
+                    f"The smallest width shrink removes one channel (~{_format_params(per_channel)}), "
+                    f"to {_format_params(max_params)}. Ask for that or lower.",
+                    blocks = False,
+                )
+            ]
+        elif removable >= 1 and float(target_params) < min_params:
+            below_floor = True
+            refusals = refusals + [
+                _refusal(
+                    "below_shrink_floor",
+                    f"Width shrinking keeps at least {WIDTH_SHRINK_FLOOR:.0%} of the MLP "
+                    f"channels, which is {keep_floor} of {intermediate} here - about "
+                    f"{_format_params(min_params)}. Below that the FFN stops being a FFN.",
+                    blocks = False,
+                )
+            ]
+
+    blocked_reason = blocking[0]["message"] if blocking else None
+    if blocked_reason is None:
+        first_soft = next((item for item in refusals if not item["blocks"]), None)
+        blocked_reason = first_soft["message"] if first_soft else None
+
+    notes = [
+        "Parameter counts are read from config.json and are analytic; the run reports the "
+        "measured count after the channels are removed.",
+        "Narrowing does not preserve the function: the output is a starting point for "
+        "recovery training, and the run reports the drift it measured.",
+        "Channels are ranked per block by the magnitude of their gate, up and down weights; "
+        "the lowest-scoring channels go first, and at least "
+        f"{WIDTH_SHRINK_FLOOR:.0%} of the width is kept.",
+    ]
+
+    return {
+        "source": label,
+        "direction": "shrink",
+        "spec": {
+            "architecture": str(config.get("model_type") or config.get("architecture") or "unknown"),
+            "hidden_size": _int(config.get("hidden_size")),
+            "num_layers": _int(config.get("num_hidden_layers") or config.get("n_layer")),
+            "intermediate_size": _int(config.get("intermediate_size")),
+            "vocab_size": _int(config.get("vocab_size")),
+        },
+        "base_params": int(base_params or 0),
+        "min_params": min_params,
+        "floor_params": min_params,
+        "max_params": max_params,
+        "cap_added_params": CAP_ADDED_PARAMS,
+        "growth_floor": GROWTH_FLOOR,
+        "shrink_floor": WIDTH_SHRINK_FLOOR,
+        "target_params": int(target),
+        "default_target_params": int(default_target),
+        "min_added_params": int(min_params - (base_params or 0)),
+        "max_added_params": int(max_params - (base_params or 0)),
+        "added_params": int(target) - int(base_params or 0),
+        "default_added_params": int(default_target) - int(base_params or 0),
+        "floor_added_params": int(min_params - (base_params or 0)),
+        "step_params": max(1, int(per_channel)),
+        "method": "mlp_width",
+        "method_label": SHRINK_METHOD_LABELS["mlp_width"],
+        "methods": [{"id": key, "label": SHRINK_METHOD_LABELS[key]} for key in SHRINK_METHODS],
+        "projection": projection,
+        "target_below_floor": below_floor,
+        "refusals": refusals,
+        "blocked": bool(blocking),
+        "blocked_reason": blocked_reason,
+        "runnable": not blocking and not below_floor and not too_large,
+        "engine": {"available": available, "error": engine_error},
+        "notes": notes,
+    }
+
+
 def _shrink_plan(
     label: str,
     source: str,
@@ -448,11 +613,15 @@ def _shrink_plan(
     method: str,
     token: Optional[str],
 ) -> dict[str, Any]:
-    """A plan whose target is smaller than the checkpoint: drop whole blocks."""
+    """A plan whose target is smaller than the checkpoint: drop blocks or narrow MLPs."""
+    if method == "mlp_width":
+        return _shrink_width_plan(
+            label, source, config, base_params, target_params = target_params, token = token
+        )
     if method != "depth":
         raise ValueError(
-            "Shrinking only drops whole blocks, so method must be 'depth'; width trimming "
-            "would leave every projection with a new shape and no way to keep its function."
+            "Shrinking needs method 'depth' or 'mlp_width'; "
+            f"got {method!r}."
         )
 
     refusals = _refusals(source, config, base_params, operation = "shrink")
@@ -796,10 +965,11 @@ def _run_shrink(
     output_dir: str,
     target_params: float,
     drop_strategy: str = "importance",
+    method: str = "depth",
     token: Optional[str] = None,
     progress: Optional[Callable[[dict[str, Any]], None]] = None,
 ) -> dict[str, Any]:
-    """Drop blocks from ``source`` and save the smaller checkpoint in ``output_dir``.
+    """Shrink ``source`` and save the smaller checkpoint in ``output_dir``.
 
     Unlike growth there is no function to preserve: the saved model is a warm start
     for recovery training, and the result reports the drift it measured so nobody
@@ -810,7 +980,9 @@ def _run_shrink(
         if progress is not None:
             progress({"stage": name, "message": message, **extra})
 
-    report = plan(source, target_params = target_params, direction = "shrink", token = token)
+    report = plan(
+        source, target_params = target_params, method = method, direction = "shrink", token = token
+    )
     if not report["runnable"]:
         raise ValueError(report.get("blocked_reason") or "This checkpoint cannot be shrunk.")
 
@@ -843,18 +1015,28 @@ def _run_shrink(
         base_logits = model(input_ids = ids).logits.float().clone()
 
     projection = report["projection"] or {}
-    stage(
-        "shrinking",
-        f"Dropping {projection.get('removed_layers', '?')} of "
-        f"{projection.get('current_num_layers', '?')} blocks...",
-    )
     started = time.monotonic()
-    model, shrink = engine.shrink_model(
-        model,
-        target_params = float(report["target_params"]),
-        drop_strategy = drop_strategy,
-        calibration_input_ids = calibration,
-    )
+    if method == "mlp_width":
+        stage(
+            "shrinking",
+            f"Narrowing the MLP from {projection.get('current_intermediate_size', '?')} to "
+            f"{projection.get('new_intermediate_size', '?')} channels in every block...",
+        )
+        model, shrink = engine.shrink_model_width(
+            model, target_params = float(report["target_params"])
+        )
+    else:
+        stage(
+            "shrinking",
+            f"Dropping {projection.get('removed_layers', '?')} of "
+            f"{projection.get('current_num_layers', '?')} blocks...",
+        )
+        model, shrink = engine.shrink_model(
+            model,
+            target_params = float(report["target_params"]),
+            drop_strategy = drop_strategy,
+            calibration_input_ids = calibration,
+        )
 
     stage("measuring", "Measuring how far the smaller model drifts from the base...")
     with torch.no_grad():
@@ -884,16 +1066,17 @@ def _run_shrink(
         "output_dir": str(saved.get("output_dir") or output_dir),
         "source": report["source"],
         "direction": "shrink",
-        "method": "depth",
+        "method": method,
         "base_params": int(shrink["base_params"]),
         "final_params": int(shrink["final_params"]),
         "added_params": int(shrink["final_params"]) - int(shrink["base_params"]),
         "removed_params": int(shrink["removed_params"]),
-        "removed_layers": shrink["removed_layers"],
-        "new_num_layers": shrink["new_num_layers"],
+        "removed_layers": shrink.get("removed_layers"),
+        "removed_channels": shrink.get("removed_channels"),
+        "new_num_layers": shrink.get("new_num_layers"),
         "growth_factor": float(shrink["shrink_factor"]),
         "shrink_factor": float(shrink["shrink_factor"]),
-        "new_intermediate_size": None,
+        "new_intermediate_size": shrink.get("new_intermediate_size"),
         "scored_by": shrink["scored_by"],
         "step0_max_logit_diff": drift,
         "relative_drift": drift / max(1e-6, scale),
@@ -948,6 +1131,7 @@ def run(
             output_dir = output_dir,
             target_params = float(report["target_params"]),
             drop_strategy = drop_strategy,
+            method = method,
             token = token,
             progress = progress,
         )
