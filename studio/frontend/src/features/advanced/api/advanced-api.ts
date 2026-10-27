@@ -281,17 +281,22 @@ export interface ScalerPlan {
     projected_params: number;
     added_params?: number;
     growth_factor?: number;
+    /** Absent on a width shrink, which keeps the block count. */
     new_num_layers: number;
     new_intermediate_size?: number;
     current_num_layers: number;
     current_intermediate_size?: number;
-    params_per_layer: number;
+    /** Absent on a width shrink, which removes MLP channels instead. */
+    params_per_layer?: number;
     /** Shrink plans only. */
     removed_layers?: number;
     removed_params?: number;
     shrink_factor?: number;
     max_removable_layers?: number;
     keep_floor_layers?: number;
+    /** Width shrink only: channels removed and the parameters each one carries. */
+    removed_channels?: number;
+    params_per_channel?: number;
   } | null;
   target_below_floor: boolean;
   refusals: ScalerRefusal[];

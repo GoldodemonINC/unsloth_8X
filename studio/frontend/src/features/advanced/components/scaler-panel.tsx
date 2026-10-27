@@ -82,6 +82,9 @@ export function ScalerPanel({
   // refusal list, so nothing about the run is guessed on the client.
   useEffect(() => {
     const trimmed = source.trim();
+    // A run error belongs to the inputs that produced it: any change here makes it
+    // stale, and leaving it on screen next to a runnable plan reads as a live failure.
+    setRunError(null);
     if (!trimmed) {
       setPlan(null);
       setPlanError(null);
@@ -95,7 +98,7 @@ export function ScalerPanel({
         direction === "shrink"
           ? {
               source: trimmed,
-              method: "depth",
+              method,
               direction,
               target_params: target,
             }
@@ -142,7 +145,7 @@ export function ScalerPanel({
     const shrinkTarget =
       direction === "shrink" ? (target ?? plan?.default_target_params ?? null) : null;
     if (!plan || (direction === "grow" && added == null) || shrinkTarget == null) {
-      setRunError("Plan a checkpoint first.");
+      setRunError("Choose a checkpoint first.");
       return;
     }
     setRunning(true);
@@ -152,13 +155,15 @@ export function ScalerPanel({
           ? {
               source: plan.source,
               target_params: shrinkTarget,
-              method: "depth",
+              // Run what was planned: after a method change the plan can be one
+              // response ahead of the select.
+              method: plan.method,
               direction,
             }
           : {
               source: plan.source,
               added_params: added as number,
-              method,
+              method: plan.method,
               direction,
             },
       );
@@ -177,6 +182,20 @@ export function ScalerPanel({
       ? (job.result as unknown as ScalerResult)
       : null;
   const shrink = plan?.direction === "shrink";
+  // Width shrinking removes channels, not layers. Read the axis off the plan, not the
+  // select: during the debounce the two can disagree.
+  const widthShrink = plan?.method === "mlp_width";
+  const removedParams = plan?.projection
+    ? (plan.projection.removed_params ??
+      Math.max(0, plan.base_params - plan.projection.projected_params))
+    : 0;
+  const removedChannels = plan?.projection
+    ? Math.max(
+        0,
+        (plan.projection.current_intermediate_size ?? 0) -
+          (plan.projection.new_intermediate_size ?? 0),
+      )
+    : 0;
   const floorPercent = plan
     ? Math.min(
         100,
@@ -240,6 +259,9 @@ export function ScalerPanel({
             disabled={running}
             onClick={() => {
               setDirection(mode);
+              // "depth" is the one axis both directions offer, so switching cannot
+              // leave the select on a value the new plan does not list.
+              setMethod("depth");
               setAdded(null);
               setTarget(null);
               setJob(null);
@@ -252,7 +274,7 @@ export function ScalerPanel({
         <span className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
           {direction === "grow"
             ? "adds capacity; the new blocks start inert"
-            : "drops blocks; needs recovery training"}
+            : "removes capacity; needs recovery training"}
         </span>
       </div>
 
@@ -292,7 +314,9 @@ export function ScalerPanel({
                       {params(plan.base_params)} → {params(targetValue)} (
                       {(targetValue / Math.max(1, plan.base_params)).toFixed(2)}x)
                       <span className="ml-2 font-normal text-muted-foreground">
-                        −{removedPreview} blocks
+                        {widthShrink
+                          ? `−${removedChannels} channels`
+                          : `−${removedPreview} blocks`}
                       </span>
                     </>
                   ) : (
@@ -388,8 +412,7 @@ export function ScalerPanel({
                 {shrink ? "Axis" : "Growth axis"}
               </span>
               <Select
-                value={shrink ? "depth" : method}
-                disabled={shrink}
+                value={method}
                 onValueChange={(value) => {
                   setMethod(value as ScalerMethod);
                   setAdded(null);
@@ -408,7 +431,7 @@ export function ScalerPanel({
               </Select>
               <span className="text-ui-10p5 leading-ui-14 text-muted-foreground/70">
                 {shrink
-                  ? "Shrinking only drops whole blocks: width trimming would reshape every projection with no way to keep its function."
+                  ? "Blocks or feed-forward width. Neither preserves the function, so both report the drift they measured and hand off to recovery training."
                   : "Depth is the best-evidenced axis; width only widens the feed-forward, so every other shape stays loadable."}
               </span>
             </label>
@@ -430,25 +453,26 @@ export function ScalerPanel({
                 </p>
                 <p className="font-mono text-ui-14 text-foreground">
                   {shrink
-                    ? `−${params(plan.projection.removed_params ?? 0)}`
+                    ? `−${params(removedParams)}`
                     : `+${params(plan.projection.added_params ?? 0)}`}
                 </p>
               </div>
               <div>
                 <p className="text-ui-10p5 uppercase tracking-[0.06em] text-muted-foreground/70">
-                  Layers
+                  {widthShrink ? "Params / channel" : "Layers"}
                 </p>
                 <p className="font-mono text-ui-14 text-foreground">
-                  {plan.projection.current_num_layers} →{" "}
-                  {plan.projection.new_num_layers}
+                  {widthShrink
+                    ? params(plan.projection.params_per_channel)
+                    : `${plan.projection.current_num_layers} → ${plan.projection.new_num_layers}`}
                 </p>
               </div>
               <div>
                 <p className="text-ui-10p5 uppercase tracking-[0.06em] text-muted-foreground/70">
-                  {shrink ? "Params / block" : "MLP width"}
+                  {shrink && !widthShrink ? "Params / block" : "MLP width"}
                 </p>
                 <p className="font-mono text-ui-14 text-foreground">
-                  {shrink
+                  {shrink && !widthShrink
                     ? params(plan.projection.params_per_layer)
                     : `${plan.projection.current_intermediate_size} → ${plan.projection.new_intermediate_size}`}
                 </p>
@@ -487,7 +511,7 @@ export function ScalerPanel({
             <Button
               size="sm"
               onClick={() => void start()}
-              disabled={running || !plan.runnable}
+              disabled={running || planning || !plan.runnable}
             >
               {running ? (
                 <Spinner className="size-3.5" />
