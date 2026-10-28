@@ -734,6 +734,28 @@ export function ExportPage() {
   const estimatedSize = getEstimatedSize(exportMethod, quantLevels, fp16Bytes);
   const selectedExportSource =
     sourceMode === "checkpoint" ? checkpoint : selectedSourceModel;
+  // The checkpoint list holds display names; the deploy scripts need the folder they name.
+  const deployModelPath = useMemo(() => {
+    if (sourceMode === "checkpoint") {
+      return (
+        checkpointsForModel.find((candidate) => candidate.display_name === checkpoint)
+          ?.path ?? null
+      );
+    }
+    if (modelSource === "local") {
+      return selectedSourceModel
+        ? (localMetaById.get(selectedSourceModel)?.path ?? selectedSourceModel)
+        : null;
+    }
+    return selectedSourceModel;
+  }, [
+    sourceMode,
+    checkpointsForModel,
+    checkpoint,
+    modelSource,
+    selectedSourceModel,
+    localMetaById,
+  ]);
   // Derived, not reset in an effect: an imatrix is calibrated for one model, so another source must not inherit it.
   const imatrixSourceKey = JSON.stringify([
     sourceTab,
@@ -2134,10 +2156,7 @@ export function ExportPage() {
             </>
           )}
         </SectionCard>
-        <DeployScriptsCard
-          model={selectedExportSource}
-          modelName={modelName}
-        />
+        <DeployScriptsCard model={deployModelPath} modelName={modelName} />
         <ImageLoraExportCard preselect={preselectImageLora} />
         <Q4nxConvertCard />
         <CheckpointSplitterCard />
