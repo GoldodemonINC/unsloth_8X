@@ -5,6 +5,22 @@ import type { DeepPartialMessageTree } from "../types";
 import { en } from "./en.ts";
 
 export const zhCN = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "本地路径",
+      idle: "输入以搜索 Hub",
+      searching: "正在搜索 Hub…",
+      empty: "无结果",
+      searchFailed: "Hub 搜索失败",
+      badRepoId: "请使用 owner/name，或粘贴 Hugging Face 链接。",
+      localHint: "请输入路径 — 浏览需要桌面应用。",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "选择基础检查点",
+      datasetTitle: "选择数据文件",
+    },
+  },
   linkMenu: {
     openInBrowser: "在 Unsloth 浏览器中打开",
     openExternal: "在外部浏览器中打开",

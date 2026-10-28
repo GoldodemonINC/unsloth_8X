@@ -5,6 +5,23 @@ import type { DeepPartialMessageTree } from "../types";
 import { en } from "./en.ts";
 
 export const es = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "Ruta local",
+      idle: "Escribe para buscar en el Hub",
+      searching: "Buscando en el Hub…",
+      empty: "Sin resultados",
+      searchFailed: "La búsqueda en el Hub falló",
+      badRepoId: "Usa owner/name o pega un enlace de Hugging Face.",
+      localHint:
+        "Escribe una ruta; para explorar hace falta la app de escritorio.",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "Elegir el checkpoint base",
+      datasetTitle: "Elegir un archivo de datos",
+    },
+  },
   linkMenu: {
     openInBrowser: "Abrir en el navegador de Unsloth",
     openExternal: "Abrir en el navegador externo",

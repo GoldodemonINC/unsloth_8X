@@ -5,6 +5,22 @@ import type { DeepPartialMessageTree } from "../types";
 import type { en } from "./en";
 
 export const he = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "נתיב מקומי",
+      idle: "הקלידו כדי לחפש ב-Hub",
+      searching: "מחפש ב-Hub…",
+      empty: "אין תוצאות",
+      searchFailed: "החיפוש ב-Hub נכשל",
+      badRepoId: "השתמשו ב-owner/name או הדביקו קישור Hugging Face.",
+      localHint: "הקלידו נתיב — לעיון בקבצים נדרשת אפליקציית השולחן.",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "בחירת נקודת ביקורת בסיסית",
+      datasetTitle: "בחירת קובץ נתונים",
+    },
+  },
   linkMenu: {
     openInBrowser: "פתח בדפדפן של Unsloth",
     openExternal: "פתח בדפדפן חיצוני",

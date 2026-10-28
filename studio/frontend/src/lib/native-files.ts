@@ -234,10 +234,21 @@ export interface LocalPathPick {
  * The OS dialog behind every local-path field. Cancelling, and the web build
  * (which has no filesystem), both return null so the field keeps its value.
  */
+/**
+ * Whether this build owns a real filesystem, so a path picker returns a path
+ * the backend can open. Browsers have no OS dialog to offer, and a file input
+ * yields contents, not a path, so the field must stay typed-only there.
+ */
+export function canPickLocalPath(): boolean {
+  return isTauri;
+}
+
 export async function pickLocalPath(
   options: LocalPathPick,
 ): Promise<string | null> {
-  if (!isTauri) return null;
+  if (!canPickLocalPath()) {
+    return null;
+  }
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<string | null>("pick_local_path", {
     kind: options.kind,

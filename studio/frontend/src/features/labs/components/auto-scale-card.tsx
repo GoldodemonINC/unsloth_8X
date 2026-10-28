@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 import {
   Alert02Icon,
   ArrowExpand02Icon,
+  Cancel01Icon,
   PlayIcon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
@@ -23,16 +24,14 @@ import {
   planAutoScale,
   runAutoScale,
 } from "../api";
+import {
+  HubPickerAdder,
+  HubPickerField,
+  type PickerMode,
+} from "./hub-picker-field";
 
 const INPUT_CLASS =
   "h-8 min-w-0 rounded-lg border border-border bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring";
-
-function pathsFrom(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
-}
 
 /**
  * The one-step version of the Scaler below: it sizes the growth from the
@@ -49,8 +48,16 @@ export function AutoScaleCard({
   const adoptTrainingModel = useTrainingConfigStore(
     (state) => state.selectTrainingModel,
   );
+  const wizardModelIsLocal = useTrainingConfigStore(
+    (state) => state.modelLocalPath !== null,
+  );
   const [model, setModel] = useState(defaultModel);
-  const [datasets, setDatasets] = useState("");
+  const [modelMode, setModelMode] = useState<PickerMode>(
+    wizardModelIsLocal ? "local" : "hub",
+  );
+  const [datasets, setDatasets] = useState<
+    Array<{ value: string; mode: PickerMode }>
+  >([]);
   const [added, setAdded] = useState("");
   const [plan, setPlan] = useState<AutoScalePlan | null>(null);
   const [planning, setPlanning] = useState(false);
@@ -71,11 +78,12 @@ export function AutoScaleCard({
   }, [defaultModel]);
 
   const buildSpec = (): AutoScaleSpec => {
-    const paths = pathsFrom(datasets);
     const override = added.trim() === "" ? null : Number(added);
     return {
       model: model.trim(),
-      datasets: paths.map((path) => ({ path })),
+      datasets: datasets.map((entry) =>
+        entry.mode === "hub" ? { repo_id: entry.value } : { path: entry.value },
+      ),
       method: "depth",
       added_params: Number.isFinite(override) ? override : null,
     };
@@ -160,20 +168,22 @@ export function AutoScaleCard({
       </p>
 
       <div className="grid gap-3 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <label className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
             {t("labs.autoScale.model")}
           </span>
-          <input
-            className={INPUT_CLASS}
+          <HubPickerField
+            kind="model"
             value={model}
-            onChange={(event) => {
-              setModel(event.target.value);
+            mode={modelMode}
+            onModeChange={setModelMode}
+            onChange={(value) => {
+              setModel(value);
               setPlan(null);
             }}
             placeholder={t("labs.autoScale.modelPlaceholder")}
           />
-        </label>
+        </div>
         <label className="flex min-w-0 flex-col gap-1.5">
           <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
             {t("labs.autoScale.added")}
@@ -191,23 +201,55 @@ export function AutoScaleCard({
         </label>
       </div>
 
-      <label className="flex min-w-0 flex-col gap-1.5">
+      <div className="flex min-w-0 flex-col gap-1.5">
         <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
           {t("labs.autoScale.datasets")}
         </span>
-        <textarea
-          className="min-h-[72px] w-full resize-y rounded-lg border border-border bg-background px-2 py-1.5 font-mono text-ui-11 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          value={datasets}
-          onChange={(event) => {
-            setDatasets(event.target.value);
+        {datasets.length > 0 ? (
+          <ul className="flex flex-wrap gap-1.5">
+            {datasets.map((entry, index) => (
+              <li
+                key={`${entry.mode}:${entry.value}`}
+                className="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border border-border/60 bg-background py-1 pr-1.5 pl-2.5"
+              >
+                <span className="truncate font-mono text-ui-10 text-foreground">
+                  {entry.value}
+                </span>
+                <button
+                  type="button"
+                  aria-label={`${t("labs.cmt.removeDataset")}: ${entry.value}`}
+                  onClick={() => {
+                    setDatasets((current) =>
+                      current.filter((_, position) => position !== index),
+                    );
+                    setPlan(null);
+                  }}
+                  className="flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
+                >
+                  <HugeiconsIcon icon={Cancel01Icon} className="size-3" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <HubPickerAdder
+          kind="dataset"
+          placeholder={t("labs.autoScale.datasetsPlaceholder")}
+          onAdd={(value, mode) => {
+            setDatasets((current) =>
+              current.some(
+                (entry) => entry.value === value && entry.mode === mode,
+              )
+                ? current
+                : [...current, { value, mode }],
+            );
             setPlan(null);
           }}
-          placeholder={t("labs.autoScale.datasetsPlaceholder")}
         />
         <span className="text-ui-10 text-muted-foreground/70">
           {t("labs.autoScale.datasetsHint")}
         </span>
-      </label>
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
         <Button

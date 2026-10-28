@@ -2,8 +2,7 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 import { Input } from "@/components/ui/input";
-import { isTauri } from "@/lib/api-base";
-import { pickLocalPath } from "@/lib/native-files";
+import { canPickLocalPath, pickLocalPath } from "@/lib/native-files";
 import { cn } from "@/lib/utils";
 import { useState } from "react";
 
@@ -61,7 +60,7 @@ export function PathInput({
         disabled={disabled}
         className={cn("h-9 min-w-0 font-mono text-ui-12", inputClassName)}
       />
-      {isTauri ? (
+      {canPickLocalPath() ? (
         <button
           type="button"
           onClick={browse}

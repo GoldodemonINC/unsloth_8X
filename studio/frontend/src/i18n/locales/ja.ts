@@ -6,6 +6,24 @@ import type { DeepPartialMessageTree } from "../types";
 import { en } from "./en.ts";
 
 export const ja = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "ローカルパス",
+      idle: "入力して Hub を検索",
+      searching: "Hub を検索中…",
+      empty: "結果なし",
+      searchFailed: "Hub の検索に失敗しました",
+      badRepoId:
+        "owner/name を入力するか、Hugging Face のリンクを貼り付けてください。",
+      localHint:
+        "パスを入力してください。参照にはデスクトップアプリが必要です。",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "ベースチェックポイントを選択",
+      datasetTitle: "データセットファイルを選択",
+    },
+  },
   linkMenu: {
     openInBrowser: "Unsloth ブラウザで開く",
     openExternal: "外部ブラウザで開く",

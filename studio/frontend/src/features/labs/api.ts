@@ -529,8 +529,8 @@ export async function runCmt(spec: CmtSpec): Promise<LabsJob> {
 export interface AutoScaleSpec {
   /** The checkpoint to grow: a local folder or a Hub id. */
   model: string;
-  /** Local dataset files the growth is sized from. */
-  datasets?: Array<{ path: string }>;
+  /** Local dataset files, or Hub ids the picker committed, the growth is sized from. */
+  datasets?: Array<{ path?: string; repo_id?: string }>;
   method?: "depth" | "width";
   insert_strategy?: string;
   /** Blank lets the sizing rule decide; otherwise 1M-700M. */
@@ -552,7 +552,8 @@ export interface AutoScalePlan {
     note: string;
   };
   datasets: Array<{
-    path: string;
+    path?: string;
+    repo_id?: string;
     name: string;
     rows: number;
     bytes: number;

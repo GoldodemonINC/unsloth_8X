@@ -44,22 +44,45 @@ def _override(value: Any) -> Optional[int]:
     return int(parsed)
 
 
-def _datasets(spec: Mapping[str, Any]) -> list[str]:
+def _datasets(spec: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Local files and Hub ids alike: the picker offers both, so the planner does.
+
+    A Hub entry is recorded but not downloaded while planning. Downloading a
+    repository to count its rows would turn a click into an unbounded wait, so
+    the plan reports it as unmeasured and says so in the warnings.
+    """
     raw = spec.get("datasets")
     if raw is None:
         return []
     if not isinstance(raw, list):
-        raise ValueError("datasets must be a list of local files.")
-    paths: list[str] = []
+        raise ValueError("datasets must be a list of files or Hub dataset ids.")
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
     for index, entry in enumerate(raw, start = 1):
-        value = entry.get("path") if isinstance(entry, Mapping) else entry
-        path = str(value or "").strip()
-        if not path:
+        if not isinstance(entry, Mapping):
+            entry = {"path": str(entry or "")}
+        repo_id = str(entry.get("repo_id") or "").strip()
+        path = str(entry.get("path") or "").strip()
+        if repo_id and path:
+            raise ValueError(f"Dataset {index} names both a path and a Hub id.")
+        if not repo_id and not path:
             raise ValueError(f"Dataset {index} has no path.")
-        if str(Path(path).expanduser()) in paths:
+        if repo_id:
+            if not cmt._HUB_ID.match(repo_id):
+                raise ValueError(
+                    f"Dataset {index} is not a Hub id: {repo_id!r}. It needs to look like 'owner/name'."
+                )
+            if repo_id.lower() in seen:
+                raise ValueError(f"Dataset {index} repeats {repo_id}.")
+            seen.add(repo_id.lower())
+            entries.append({"repo_id": repo_id})
+            continue
+        expanded = str(Path(path).expanduser())
+        if expanded in seen:
             raise ValueError(f"Dataset {index} repeats {path}.")
-        paths.append(str(Path(path).expanduser()))
-    return paths
+        seen.add(expanded)
+        entries.append({"path": expanded})
+    return entries
 
 
 def _hint(spec: Mapping[str, Any], key: str) -> int:
@@ -83,8 +106,11 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
     if not model:
         raise ValueError("A model is required: a checkpoint path or a Hub id.")
 
-    paths = _datasets(spec)
-    inspected = [cmt.inspect_file(path) for path in paths]
+    entries = _datasets(spec)
+    inspected = [
+        cmt.inspect_file(entry["path"]) for entry in entries if entry.get("path")
+    ]
+    hub = [entry["repo_id"] for entry in entries if entry.get("repo_id")]
     rows = _hint(spec, "rows") or sum(
         int(entry["rows"]) for entry in inspected if int(entry["rows"]) > 0
     )
@@ -117,6 +143,12 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
     warnings: list[str] = []
     for entry in inspected:
         warnings.extend(f"{entry['name']}: {note}" for note in entry["notes"])
+    for repo_id in hub:
+        warnings.append(
+            f"{repo_id} is a Hub dataset and is not downloaded while planning, so it "
+            "does not add to the size. Point at a local file, or give a row or token "
+            "count, for a data-sized growth."
+        )
     if rows == 0 and tokens == 0:
         warnings.append(
             "No dataset size was known when this was sized, so the growth is the 1M floor. "
@@ -166,6 +198,17 @@ def plan(spec: Mapping[str, Any], *, token: Optional[str] = None) -> dict[str, A
                 "tokens_estimate": entry["tokens_estimate"],
             }
             for entry in inspected
+        ]
+        + [
+            {
+                "path": "",
+                "repo_id": repo_id,
+                "name": repo_id,
+                "rows": 0,
+                "bytes": 0,
+                "tokens_estimate": 0,
+            }
+            for repo_id in hub
         ],
         "expansion": {
             "base_params": base_params,

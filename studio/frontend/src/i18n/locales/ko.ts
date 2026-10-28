@@ -5,6 +5,22 @@ import type { DeepPartialMessageTree } from "../types";
 import { en } from "./en.ts";
 
 export const ko = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "로컬 경로",
+      idle: "입력하여 Hub 검색",
+      searching: "Hub 검색 중…",
+      empty: "결과 없음",
+      searchFailed: "Hub 검색 실패",
+      badRepoId: "owner/name을 입력하거나 Hugging Face 링크를 붙여넣으세요.",
+      localHint: "경로를 입력하세요. 찾아보기는 데스크톱 앱에서만 가능합니다.",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "베이스 체크포인트 선택",
+      datasetTitle: "데이터셋 파일 선택",
+    },
+  },
   linkMenu: {
     openInBrowser: "Unsloth 브라우저에서 열기",
     openExternal: "외부 브라우저에서 열기",

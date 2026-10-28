@@ -4,6 +4,22 @@
 import { en } from "./en.ts";
 
 export const it = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "Percorso locale",
+      idle: "Digita per cercare nell'Hub",
+      searching: "Ricerca nell'Hub…",
+      empty: "Nessun risultato",
+      searchFailed: "Ricerca nell'Hub non riuscita",
+      badRepoId: "Usa owner/name o incolla un link di Hugging Face.",
+      localHint: "Digita un percorso: per sfogliare serve l'app desktop.",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "Scegli il checkpoint di base",
+      datasetTitle: "Scegli un file di dati",
+    },
+  },
   linkMenu: {
     openInBrowser: "Apri nel browser di Unsloth",
     openExternal: "Apri nel browser esterno",

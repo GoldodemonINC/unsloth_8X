@@ -5,6 +5,22 @@ import type { DeepPartialMessageTree } from "../types";
 import { en } from "./en.ts";
 
 export const hi = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "स्थानीय पाथ",
+      idle: "Hub में खोजने के लिए टाइप करें",
+      searching: "Hub में खोज रहे हैं…",
+      empty: "कोई परिणाम नहीं",
+      searchFailed: "Hub खोज विफल रही",
+      badRepoId: "owner/name इस्तेमाल करें या Hugging Face लिंक पेस्ट करें।",
+      localHint: "पाथ टाइप करें — ब्राउज़ करने के लिए डेस्कटॉप ऐप चाहिए।",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "बेस चेकपॉइंट चुनें",
+      datasetTitle: "डेटासेट फ़ाइल चुनें",
+    },
+  },
   linkMenu: {
     openInBrowser: "Unsloth ब्राउज़र में खोलें",
     openExternal: "बाहरी ब्राउज़र में खोलें",

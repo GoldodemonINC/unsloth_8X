@@ -2,6 +2,22 @@
 // Copyright 2026-present the Unsloth AI Inc. team. All rights reserved. See /studio/LICENSE.AGPL-3.0
 
 export const sv = {
+  labs: {
+    picker: {
+      hubMode: "Hugging Face",
+      localMode: "Lokal sökväg",
+      idle: "Skriv för att söka i Hubben",
+      searching: "Söker i Hubben…",
+      empty: "Inga resultat",
+      searchFailed: "Hubsökningen misslyckades",
+      badRepoId: "Använd owner/name eller klistra in en Hugging Face-länk.",
+      localHint: "Skriv en sökväg – bläddring kräver skrivbordsappen.",
+      modelPlaceholder: "C:\\models\\checkpoint",
+      datasetPlaceholder: "C:\\datasets\\train.jsonl",
+      checkpointTitle: "Välj bascheckpoint",
+      datasetTitle: "Välj en datafil",
+    },
+  },
   linkMenu: {
     openInBrowser: "Öppna i Unsloth-webbläsaren",
     openExternal: "Öppna i extern webbläsare",

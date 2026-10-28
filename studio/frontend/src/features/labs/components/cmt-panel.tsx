@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: NRC-2
 // Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
 
-import { PathInput } from "@/components/path-input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
@@ -14,8 +13,8 @@ import {
   Alert02Icon,
   ArrowDown01Icon,
   Delete02Icon,
-  PlusSignIcon,
   PlayIcon,
+  PlusSignIcon,
   Tick02Icon,
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -27,30 +26,16 @@ import {
   planCmt,
   runCmt,
 } from "../api";
-import { LABS_PATH_INPUT_CLASS, LabsPanel } from "./labs-panel";
+import { HubPickerField, type PickerMode } from "./hub-picker-field";
+import { LabsPanel } from "./labs-panel";
 
 const INPUT_CLASS =
-  "h-8 min-w-0 rounded-lg border border-border bg-background px-2 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring";
-
-const HUB_DATASET_ID =
-  /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/;
-
-/**
- * One field takes either: a local dataset file, or `owner/name` on the Hub.
- * Anything that names a file on disk (a separator, a drive, a leading `~` or
- * `.`, or a dataset extension) stays a path, so `data/train.jsonl` is never
- * mistaken for a Hub repo.
- */
-function isHubDataset(value: string): boolean {
-  const text = value.trim();
-  if (!HUB_DATASET_ID.test(text)) return false;
-  if (/[\\:~]/.test(text) || text.startsWith(".")) return false;
-  return !/\.(jsonl|json|parquet|csv|txt)$/i.test(text);
-}
+  "h-9 min-w-0 rounded-full border border-border bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring";
 
 interface DatasetRow {
   id: string;
   path: string;
+  mode: PickerMode;
   name: string;
   evalPercent: string;
   textColumn: string;
@@ -101,6 +86,7 @@ function newRow(): DatasetRow {
   return {
     id: crypto.randomUUID(),
     path: "",
+    mode: "hub",
     name: "",
     evalPercent: "10",
     textColumn: "",
@@ -139,7 +125,13 @@ async function waitForCmt(
 export function CmtPanel(): ReactElement {
   const t = useT();
   const selectedModel = useTrainingConfigStore((state) => state.selectedModel);
+  const modelLocalPath = useTrainingConfigStore(
+    (state) => state.modelLocalPath,
+  );
   const [source, setSource] = useState(selectedModel ?? "");
+  const [sourceMode, setSourceMode] = useState<PickerMode>(
+    modelLocalPath ? "local" : "hub",
+  );
   const [rows, setRows] = useState<DatasetRow[]>([newRow(), newRow()]);
   const [mode, setMode] = useState<"cpt" | "finetune">("cpt");
   const [added, setAdded] = useState("");
@@ -172,8 +164,9 @@ export function CmtPanel(): ReactElement {
     const datasets = rows
       .filter((row) => row.path.trim() !== "")
       .map((row) => ({
-        path: isHubDataset(row.path) ? "" : row.path.trim(),
-        ...(isHubDataset(row.path) ? { repo_id: row.path.trim() } : {}),
+        ...(row.mode === "hub"
+          ? { path: "", repo_id: row.path.trim() }
+          : { path: row.path.trim() }),
         name: row.name.trim() || undefined,
         text_column: row.textColumn.trim() || null,
         eval_fraction: Math.max(
@@ -257,29 +250,25 @@ export function CmtPanel(): ReactElement {
       description={t("labs.cmt.description")}
     >
       <div className="grid gap-3 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-        <label className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex min-w-0 flex-col gap-1.5">
           <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
             {t("labs.cmt.source")}
           </span>
-          {/* Stacked below the panel's two-column layout, the field must keep
-              the full row: the desktop build's Browse button is a sibling
-              (~60px) and would otherwise leave ~110px of typing room. */}
-          <PathInput
+          <HubPickerField
+            kind="model"
             value={source}
+            mode={sourceMode}
+            onModeChange={setSourceMode}
             onChange={(value) => {
               setSource(value);
               setPlan(null);
             }}
             placeholder={t("labs.cmt.sourcePlaceholder")}
-            kind="folder"
-            title="Choose the base checkpoint"
-            className={LABS_PATH_INPUT_CLASS}
-            inputClassName={INPUT_CLASS}
           />
           <span className="text-ui-10 text-muted-foreground/70">
             {t("labs.cmt.sourceHint")}
           </span>
-        </label>
+        </div>
         <div className="flex min-w-0 flex-col gap-1.5">
           <span className="text-ui-10 uppercase tracking-[0.05em] text-muted-foreground">
             {t("labs.cmt.mode")}
@@ -334,22 +323,19 @@ export function CmtPanel(): ReactElement {
           </Button>
         </div>
         <div className="flex flex-col gap-2">
-          {rows.map((row, index) => (
+          {rows.map((row) => (
             <div
               key={row.id}
               className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-2.5 @2xl/train-card:grid-cols-[minmax(0,2fr)_minmax(0,1fr)_5rem_7rem_2rem]"
             >
-              <PathInput
+              <HubPickerField
+                kind="dataset"
                 value={row.path}
+                mode={row.mode}
+                onModeChange={(mode) => updateRow(row.id, { mode })}
                 onChange={(value) => updateRow(row.id, { path: value })}
-                placeholder={t("labs.cmt.datasetPath", {
-                  index: index + 1,
-                })}
-                kind="file"
+                placeholder={t("labs.cmt.datasetPath")}
                 extensions={["jsonl", "json", "parquet", "csv", "txt"]}
-                title="Choose a dataset file"
-                className={LABS_PATH_INPUT_CLASS}
-                inputClassName={INPUT_CLASS}
               />
               <input
                 className={INPUT_CLASS}
