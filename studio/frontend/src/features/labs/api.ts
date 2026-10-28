@@ -60,7 +60,11 @@ export interface ArtifactList {
 }
 
 export type PipelineKind =
-  "merge" | "scale" | "train" | "quantize" | "benchmark";
+  | "merge"
+  | "scale"
+  | "train"
+  | "quantize"
+  | "benchmark";
 
 export interface PipelineStageSpec {
   kind: PipelineKind;
@@ -223,6 +227,41 @@ export async function deletePipeline(id: string): Promise<void> {
   if (!response.ok) {
     throw new Error(await readFastApiError(response));
   }
+}
+
+export interface LineageNode {
+  id: string;
+  label: string;
+  path: string;
+  stage: string;
+  created_at: string;
+  studio_version: string | null;
+  valid: boolean;
+  problems: string[];
+}
+
+export interface LineageEdge {
+  from: string;
+  to: string;
+  label: string;
+}
+
+export interface LineageReport {
+  root: string;
+  nodes: LineageNode[];
+  edges: LineageEdge[];
+  roots: string[];
+  truncated: boolean;
+}
+
+export async function loadLineage(
+  signal?: AbortSignal,
+): Promise<LineageReport> {
+  const response = await authFetch(`${BASE}/lineage`, {
+    method: "GET",
+    signal,
+  });
+  return readJson<LineageReport>(response, "lineage");
 }
 
 export interface BenchmarkRecord {

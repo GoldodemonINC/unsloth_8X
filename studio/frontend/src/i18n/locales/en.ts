@@ -722,6 +722,41 @@ export const en = {
     search: "Search",
     shutdown: "Shutdown",
   },
+  trainingAnomaly: {
+    nan: "The loss is no longer a number.",
+    nanHint:
+      "A NaN or infinite loss means the run is already broken. Stop it, lower the learning rate or batch size, and restart from the last good checkpoint.",
+    divergence: "The loss is rising across the last third of the run.",
+    divergenceHint:
+      "That usually means the learning rate is too high or the data has a corrupted stretch. Lower the learning rate and resume from the step before the turn.",
+    spike: "One step jumped well above its recent average.",
+    spikeHint:
+      "A single spike can be a bad batch or a momentary optimizer excursion. If it has not recovered within a few steps, lower the learning rate and resume.",
+    plateau: "The loss has stopped improving.",
+    plateauHint:
+      "The recent curve is flat. Check whether the run has hit its learning-rate floor, raise it slightly, or stop early: more steps are not buying anything.",
+    step: "step {step}",
+  },
+  datasetPreflight: {
+    title: "Pre-flight check",
+    description:
+      "Read the selected local file before training and report the rows that would stop the run. Nothing is rewritten.",
+    run: "Check dataset",
+    running: "Checking…",
+    clean: "No blocking rows found.",
+    blocked: "This dataset has rows the trainer cannot read.",
+    rowsChecked: "{count} rows checked",
+    textField: "text field: {field}",
+    invalid: "{count} unreadable",
+    missingText: "{count} with no text field",
+    duplicates: "{count} duplicate",
+    longRows: "{count} overlong",
+    truncated: "Only the first {count} rows were checked.",
+    details: "Show the rows",
+    row: "row {row}",
+    noTextKeys: "no text field (keys: {keys})",
+    failed: "The dataset check could not run.",
+  },
   labs: {
     picker: {
       hubMode: "Hugging Face",
@@ -744,7 +779,7 @@ export const en = {
     loading: "Reading the Labs switch…",
     offTitle: "Labs is off",
     offDescription:
-      "Labs holds unfinished features. Turn it on in Settings → Labs to open the Artifacts, Pipelines, Benchmarks, CMT and Cleanup studios here.",
+      "Labs holds unfinished features. Turn it on in Settings → Labs to open the Artifacts, Pipelines, Benchmarks, CMT, Lineage and Cleanup studios here.",
     openSettings: "Open Settings → Labs",
     reload: "Reload",
     featureOff: "This experiment is switched off.",
@@ -763,7 +798,21 @@ export const en = {
       pipelines: "Pipelines",
       benchmarks: "Benchmarks",
       cmt: "CMT",
+      lineage: "Lineage",
       cleanup: "Cleanup",
+    },
+    lineage: {
+      title: "Run lineage",
+      description:
+        "Every checkpoint's history, drawn from the run manifests: what each run started from and what each merge combined.",
+      empty: "No run manifests yet.",
+      emptyHint:
+        "A finished train, merge, split, benchmark or expansion run writes run_manifest.json beside its output. Those records are the tree.",
+      counts: "{runs} runs · {links} links",
+      truncated: "Showing the most recent runs; older manifests are still on disk.",
+      unlinked: "Not linked to a root ({count})",
+      loading: "Reading run manifests…",
+      incomplete: "This manifest is missing required fields ({count}).",
     },
     artifacts: {
       count: "{count} checkpoints",
@@ -4942,6 +4991,23 @@ export const en = {
       readVideoFailed: "Could not read the video ({status}).",
       openFileFailed: "Could not open the file",
     },
+  },
+  deployScripts: {
+    title: "Deploy scripts",
+    description:
+      "Ready-to-copy commands for serving the checkpoint selected above. Nothing runs from here.",
+    ollama: "Ollama",
+    vllm: "vLLM",
+    contextLength: "Context",
+    port: "Port",
+    tensorParallel: "Tensor parallel",
+    copy: "Copy script",
+    copied: "Copied.",
+    copyFailed: "Could not copy the script.",
+    ollamaHint:
+      "Save this as Modelfile, then run: ollama create <name> -f Modelfile",
+    vllmHint:
+      "Serves an OpenAI-compatible API at /v1. Raise tensor parallel to split the model across GPUs.",
   },
   exportDecision: {
     title: "Decision model",

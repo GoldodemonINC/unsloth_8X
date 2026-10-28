@@ -55,6 +55,16 @@ FEATURES: tuple[dict[str, Any], ...] = (
         "studio": True,
     },
     {
+        "id": "lineage",
+        "label": "Run lineage",
+        "description": (
+            "Trace a produced checkpoint back through the runs and merges that made "
+            "it, using the run_manifest.json every stage already writes."
+        ),
+        "status": "alpha",
+        "studio": True,
+    },
+    {
         "id": "cmt",
         "label": "CMT",
         "description": (

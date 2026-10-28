@@ -3,7 +3,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
+import { Skeleton } from "@/components/ui/skeleton";
 import { PillTabs } from "@/features/model-picker";
 import { useSettingsDialogStore } from "@/features/settings";
 import { type TranslationKey, useT } from "@/i18n";
@@ -15,6 +15,7 @@ import { BenchmarksPanel } from "./components/benchmarks-panel";
 import { CmtPanel } from "./components/cmt-panel";
 import { JanitorPanel } from "./components/janitor-panel";
 import { LabsFeatureGate } from "./components/labs-off-card";
+import { LineagePanel } from "./components/lineage-panel";
 import { PipelinesPanel } from "./components/pipelines-panel";
 import {
   ensureLabsLoaded,
@@ -23,13 +24,20 @@ import {
   useLabsStore,
 } from "./store";
 
-type StudioTab = "artifacts" | "pipelines" | "benchmarks" | "cmt" | "cleanup";
+type StudioTab =
+  | "artifacts"
+  | "pipelines"
+  | "benchmarks"
+  | "cmt"
+  | "lineage"
+  | "cleanup";
 
 const TABS: ReadonlyArray<readonly [StudioTab, TranslationKey]> = [
   ["artifacts", "labs.tab.artifacts"],
   ["pipelines", "labs.tab.pipelines"],
   ["benchmarks", "labs.tab.benchmarks"],
   ["cmt", "labs.tab.cmt"],
+  ["lineage", "labs.tab.lineage"],
   ["cleanup", "labs.tab.cleanup"],
 ];
 
@@ -72,9 +80,16 @@ export function LabsPage(): ReactElement {
         </header>
 
         {!loaded && loading ? (
-          <div className="flex items-center gap-2 text-ui-11 text-muted-foreground">
-            <Spinner />
-            {t("labs.loading")}
+          <div className="flex flex-col gap-4" aria-busy="true">
+            <div className="flex gap-2">
+              {["one", "two", "three", "four"].map((key) => (
+                <Skeleton key={key} className="h-7 w-24 rounded-full" />
+              ))}
+            </div>
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <Skeleton className="h-48 rounded-3xl" />
+              <Skeleton className="h-48 rounded-3xl" />
+            </div>
           </div>
         ) : null}
 
@@ -142,6 +157,11 @@ export function LabsPage(): ReactElement {
             {tab === "cmt" ? (
               <LabsFeatureGate feature="cmt">
                 <CmtPanel />
+              </LabsFeatureGate>
+            ) : null}
+            {tab === "lineage" ? (
+              <LabsFeatureGate feature="lineage">
+                <LineagePanel />
               </LabsFeatureGate>
             ) : null}
             {tab === "cleanup" ? (

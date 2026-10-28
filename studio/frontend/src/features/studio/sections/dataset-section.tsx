@@ -8,6 +8,7 @@ import { toast } from "@/lib/toast";
 import { type ReactNode, useEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { DatasetAdvancedSettingsSection } from "./dataset-advanced-settings-section";
+import { DatasetPreflightCard } from "./dataset-preflight-card";
 import { DatasetSelectionSection } from "./dataset-selection";
 import { DatasetUploadField } from "./dataset-upload";
 import { EvalDatasetSection } from "./eval-dataset-section";
@@ -85,6 +86,7 @@ export function DatasetPanel() {
         localInventorySettled={localDatasetInventory.settled}
         uploads={uploads}
       />
+      <DatasetPreflightCard />
       {datasetSource === "huggingface" && modelType !== "decision" ? (
         <div className="rounded-2xl border border-border/60 bg-card p-4">
           <EvalDatasetSection />

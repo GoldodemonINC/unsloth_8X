@@ -3,6 +3,7 @@
 
 import type { TrainingSeriesPoint } from "@/features/training";
 import { type ReactElement, Suspense, lazy, useMemo } from "react";
+import { LossAnomalyCallout } from "./loss-anomaly-callout";
 
 const ChartsContent = lazy(() =>
   import("./charts-content").then((module) => ({
@@ -58,7 +59,14 @@ export function ChartsSection({
         loss: point.value,
       })),
     }),
-    [currentStep, evalLossHistory, gradNormHistory, lossHistory, lrHistory, totalSteps],
+    [
+      currentStep,
+      evalLossHistory,
+      gradNormHistory,
+      lossHistory,
+      lrHistory,
+      totalSteps,
+    ],
   );
 
   if (
@@ -82,7 +90,14 @@ export function ChartsSection({
         </div>
       }
     >
-      <ChartsContent metrics={series} isTraining={isTraining} evalEnabled={evalEnabled} />
+      <div className="flex flex-col gap-4">
+        <LossAnomalyCallout lossHistory={lossHistory} />
+        <ChartsContent
+          metrics={series}
+          isTraining={isTraining}
+          evalEnabled={evalEnabled}
+        />
+      </div>
     </Suspense>
   );
 }

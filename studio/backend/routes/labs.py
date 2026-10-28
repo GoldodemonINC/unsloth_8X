@@ -23,7 +23,7 @@ from auth import policy
 from auth.authentication import get_current_subject
 from core import labs
 from core.advanced import repair
-from core.labs import artifacts, autoscale, benchmarks, cmt, housekeeping, pipelines
+from core.labs import artifacts, autoscale, benchmarks, cmt, housekeeping, lineage, pipelines
 
 router = APIRouter()
 
@@ -210,6 +210,21 @@ def artifact_manifest(path: str) -> dict[str, Any]:
     try:
         return artifacts.read_manifest(path)
     except Exception as error:  # noqa: BLE001
+        raise _translate(error) from error
+
+
+# ---------------------------------------------------------------------------
+# Lineage
+# ---------------------------------------------------------------------------
+
+
+@router.get("/lineage")
+def run_lineage() -> dict[str, Any]:
+    """The manifest graph under the Studio outputs folder, roots first."""
+    _gate("lineage")
+    try:
+        return lineage.scan()
+    except Exception as error:  # noqa: BLE001 - reported as an HTTP failure with its reason
         raise _translate(error) from error
 
 

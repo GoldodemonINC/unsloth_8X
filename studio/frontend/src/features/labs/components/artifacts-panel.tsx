@@ -182,7 +182,7 @@ export function ArtifactsPanel(): ReactElement {
                     onClick={() => select(record)}
                     aria-pressed={active}
                     className={cn(
-                      "flex w-full flex-col gap-1 rounded-2xl border p-3 text-left transition-colors",
+                      "flex w-full flex-col gap-1 rounded-2xl border p-3 text-left transition-[background-color,border-color,transform] duration-150 motion-safe:hover:-translate-y-px motion-safe:active:translate-y-0",
                       active
                         ? "border-primary/50 bg-primary/5"
                         : "border-border/60 hover:bg-muted/40",

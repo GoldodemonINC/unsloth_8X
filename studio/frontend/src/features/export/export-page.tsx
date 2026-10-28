@@ -71,6 +71,7 @@ import {
   fetchCheckpointExportProbe,
 } from "./api/export-api";
 import { adapterCompatibilityTip, type AdapterFormat } from "./constants";
+import { DeployScriptsCard } from "./components/deploy-scripts-card";
 import { ExportRunPanel } from "./components/export-run-panel";
 import { ImageLoraExportCard } from "./components/image-lora-export-card";
 import { MethodPicker } from "./components/method-picker";
@@ -2133,6 +2134,10 @@ export function ExportPage() {
             </>
           )}
         </SectionCard>
+        <DeployScriptsCard
+          model={selectedExportSource}
+          modelName={modelName}
+        />
         <ImageLoraExportCard preselect={preselectImageLora} />
         <Q4nxConvertCard />
         <CheckpointSplitterCard />

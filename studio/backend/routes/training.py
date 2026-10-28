@@ -170,6 +170,13 @@ class TrainingResetRequest(PydanticBaseModel):
     )
 
 
+class DatasetPreflightRequest(PydanticBaseModel):
+    path: str = PydanticField(..., min_length = 1, max_length = 4096)
+    # Bounded so a stray call on a 20 GB file cannot hold a worker for minutes.
+    max_rows: int = PydanticField(default = 200_000, gt = 0, le = 1_000_000)
+    long_row_chars: int = PydanticField(default = 32_768, gt = 0, le = 10_000_000)
+
+
 router = APIRouter()
 logger = get_logger(__name__)
 
@@ -1869,6 +1876,27 @@ def _token_preview_rows(request: TokenPreviewRequest, hf_token) -> list[dict]:
             detail = download_registry.scrub_secrets(str(exc), hf_token = hf_token),
         ) from exc
     return rows.to_list()
+
+
+@router.post("/dataset/preflight")
+def dataset_preflight(
+    request: DatasetPreflightRequest,
+    current_subject: str = Depends(get_current_subject),
+) -> dict[str, Any]:
+    """Scan a local dataset for the row defects that stop a run, without writing anything."""
+    from core.training import dataset_preflight as preflight
+
+    [resolved] = _validate_local_dataset_paths([request.path])
+    try:
+        return preflight.scan(
+            resolved,
+            max_rows = request.max_rows,
+            long_row_chars = request.long_row_chars,
+        )
+    except FileNotFoundError as error:
+        raise HTTPException(status_code = 404, detail = str(error)) from error
+    except (ValueError, OSError) as error:
+        raise HTTPException(status_code = 400, detail = str(error)) from error
 
 
 @router.post("/token-preview")
