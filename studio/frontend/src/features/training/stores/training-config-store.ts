@@ -126,6 +126,24 @@ function earlyStoppingPatienceFrom(value: unknown): number {
   return Number.isFinite(patience) && patience > 0 ? Math.floor(patience) : 0;
 }
 
+const DEFAULT_PARENT_GUARD_STEPS = 50;
+
+function earlyStopParentRunIdFrom(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function earlyStopPatienceStepsFrom(value: unknown): number {
+  const steps = Number(value);
+  return Number.isFinite(steps) && steps > 0
+    ? Math.min(Math.floor(steps), 100000)
+    : 0;
+}
+
+function earlyStopMinDeltaFrom(value: unknown): number {
+  const delta = Number(value);
+  return Number.isFinite(delta) && delta > 0 ? delta : 0;
+}
+
 // evalSteps is left alone: it follows the chosen eval split, not the model.
 const GENERIC_MODEL_DEFAULTS = Object.fromEntries(
   MODEL_DEFAULT_STATE_KEYS.filter((key) => key !== "evalSteps").map((key) => [
@@ -1646,6 +1664,22 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
         },
         setEarlyStoppingPatience: (earlyStoppingPatience) =>
           setUserEdit({ earlyStoppingPatience }),
+        setEarlyStopParentRunId: (earlyStopParentRunId) =>
+          setUserEdit({
+            earlyStopParentRunId,
+            earlyStopPatienceSteps:
+              earlyStopParentRunId === null
+                ? 0
+                : get().earlyStopPatienceSteps || DEFAULT_PARENT_GUARD_STEPS,
+          }),
+        setEarlyStopPatienceSteps: (earlyStopPatienceSteps) =>
+          setUserEdit({
+            earlyStopPatienceSteps: earlyStopPatienceStepsFrom(
+              earlyStopPatienceSteps,
+            ),
+          }),
+        setEarlyStopMinDelta: (earlyStopMinDelta) =>
+          setUserEdit({ earlyStopMinDelta: earlyStopMinDeltaFrom(earlyStopMinDelta) }),
         setDrafterEnabled: (drafterEnabled) => setUserEdit({ drafterEnabled }),
         setDrafterStrategy: (drafterStrategy) =>
           setUserEdit({ drafterStrategy }),
@@ -1733,6 +1767,13 @@ export const useTrainingConfigStore = create<TrainingConfigStore>()(
             earlyStoppingPatience: earlyStoppingPatienceFrom(
               config.early_stopping_patience,
             ),
+            earlyStopParentRunId: earlyStopParentRunIdFrom(
+              config.early_stop_parent_run_id,
+            ),
+            earlyStopPatienceSteps: earlyStopPatienceStepsFrom(
+              config.early_stop_patience_steps,
+            ),
+            earlyStopMinDelta: earlyStopMinDeltaFrom(config.early_stop_min_delta),
             ...drafterStateFrom(config.drafter),
             advanced: advancedStateFromRunConfig(
               config.advanced,

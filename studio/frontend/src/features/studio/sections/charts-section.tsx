@@ -3,6 +3,7 @@
 
 import type { TrainingSeriesPoint } from "@/features/training";
 import { type ReactElement, Suspense, lazy, useMemo } from "react";
+import type { LossChartEvent } from "./charts/loss-chart-events";
 import { LossAnomalyCallout } from "./loss-anomaly-callout";
 
 const ChartsContent = lazy(() =>
@@ -26,6 +27,7 @@ interface ChartsSectionProps {
   lrHistory: TrainingSeriesPoint[];
   gradNormHistory: TrainingSeriesPoint[];
   evalLossHistory: TrainingSeriesPoint[];
+  events?: readonly LossChartEvent[];
 }
 
 export function ChartsSection({
@@ -37,6 +39,7 @@ export function ChartsSection({
   lrHistory,
   gradNormHistory,
   evalLossHistory,
+  events = [],
 }: ChartsSectionProps): ReactElement | null {
   const series = useMemo(
     () => ({
@@ -96,6 +99,7 @@ export function ChartsSection({
           metrics={series}
           isTraining={isTraining}
           evalEnabled={evalEnabled}
+          events={events}
         />
       </div>
     </Suspense>

@@ -139,6 +139,12 @@ export interface TrainingConfigState {
   evalSteps: number;
   /** Evaluations without a lower eval loss before the run stops; 0 = off. */
   earlyStoppingPatience: number;
+  /** Parent run whose recorded loss this run must beat; null = guard off. */
+  earlyStopParentRunId: string | null;
+  /** Training steps allowed without beating the parent's recorded loss; 0 = off. */
+  earlyStopPatienceSteps: number;
+  /** How much lower than the parent's loss counts as an improvement. */
+  earlyStopMinDelta: number;
   /** Train a speculative-decoding drafter (MTP head or EAGLE-3) after fine-tuning. */
   drafterEnabled: boolean;
   drafterStrategy: DrafterStrategy;
@@ -306,6 +312,9 @@ export interface TrainingConfigActions {
   setSaveSteps: (value: number) => void;
   setEvalSteps: (value: number) => void;
   setEarlyStoppingPatience: (value: number) => void;
+  setEarlyStopParentRunId: (value: string | null) => void;
+  setEarlyStopPatienceSteps: (value: number) => void;
+  setEarlyStopMinDelta: (value: number) => void;
   setDrafterEnabled: (value: boolean) => void;
   setDrafterStrategy: (value: DrafterStrategy) => void;
   setDrafterDataSource: (value: DrafterDataSource) => void;

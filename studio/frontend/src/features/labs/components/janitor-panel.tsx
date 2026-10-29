@@ -4,6 +4,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { listTrainingRuns } from "@/features/training";
 import { useT } from "@/i18n";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -21,6 +22,10 @@ import {
   deleteHousekeeping,
   scanHousekeeping,
 } from "../api";
+import {
+  type RetentionPlan,
+  planRetention,
+} from "../lib/retention-policy";
 
 const KIND_LABEL: Record<string, string> = {
   checkpoint: "Checkpoint",
@@ -46,6 +51,9 @@ export function JanitorPanel(): ReactElement {
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [keepPerProject, setKeepPerProject] = useState("3");
+  const [plan, setPlan] = useState<RetentionPlan | null>(null);
+  const [planning, setPlanning] = useState(false);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -54,6 +62,7 @@ export function JanitorPanel(): ReactElement {
       const next = await scanHousekeeping();
       setReport(next);
       setSelected({});
+      setPlan(null);
     } catch (failure) {
       setError(
         failure instanceof Error
@@ -80,6 +89,65 @@ export function JanitorPanel(): ReactElement {
       ...current,
       [entry.path]: !current[entry.path],
     }));
+  };
+
+  const previewRetention = async () => {
+    if (!report) return;
+    setPlanning(true);
+    setError(null);
+    try {
+      const response = await listTrainingRuns(200, 0);
+      setPlan(
+        planRetention(
+          report.entries,
+          response.runs,
+          Number(keepPerProject) || 3,
+        ),
+      );
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : t("labs.cleanup.retentionFailed"),
+      );
+    } finally {
+      setPlanning(false);
+    }
+  };
+
+  const removePlanned = async () => {
+    if (!plan || plan.candidates.length === 0) return;
+    const ok = window.confirm(
+      `${t("labs.cleanup.confirm")}\n\n${plan.candidates
+        .map((entry) => entry.path)
+        .join("\n")}`,
+    );
+    if (!ok) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      const result = await deleteHousekeeping(
+        plan.candidates.map((entry) => entry.path),
+      );
+      toast.success(t("labs.cleanup.deleted"), {
+        description: result.freed_label,
+      });
+      if (result.refused.length > 0) {
+        setError(
+          result.refused
+            .map((item) => `${item.path}: ${item.reason}`)
+            .join("\n"),
+        );
+      }
+      await refresh();
+    } catch (failure) {
+      const message =
+        failure instanceof Error ? failure.message : t("labs.cleanup.failed");
+      setError(message);
+      toast.error(t("labs.cleanup.failed"), { description: message });
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const remove = async () => {
@@ -146,6 +214,85 @@ export function JanitorPanel(): ReactElement {
           ))}
         </div>
       ) : null}
+
+      <div className="flex flex-col gap-2 rounded-lg border border-border/70 bg-background/40 p-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="min-w-48 flex-1">
+            <p className="text-ui-11 font-medium text-foreground">
+              {t("labs.cleanup.retentionTitle")}
+            </p>
+            <p className="mt-0.5 text-ui-10 text-muted-foreground">
+              {t("labs.cleanup.retentionHint")}
+            </p>
+          </div>
+          <label className="flex items-center gap-1.5 text-ui-10 text-muted-foreground">
+            {t("labs.cleanup.retentionKeep")}
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={keepPerProject}
+              onChange={(event) => setKeepPerProject(event.target.value)}
+              className="h-7 w-16 rounded-md border border-border bg-background px-1.5 text-ui-11 text-foreground outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            />
+          </label>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!report || planning || deleting}
+            onClick={() => void previewRetention()}
+          >
+            {planning ? <Spinner /> : null}
+            {t("labs.cleanup.retentionPreview")}
+          </Button>
+        </div>
+        {plan ? (
+          plan.candidates.length === 0 ? (
+            <p className="text-ui-10 text-muted-foreground">
+              {t("labs.cleanup.retentionNone")}
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2 border-t border-border/60 pt-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-ui-10 text-foreground">
+                  {t("labs.cleanup.retentionReady", {
+                    count: plan.candidates.length,
+                    size: `${(
+                      plan.candidates.reduce(
+                        (total, entry) => total + entry.bytes,
+                        0,
+                      ) / 1e9
+                    ).toFixed(2)} GB`,
+                  })}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="destructive"
+                  className="ml-auto"
+                  disabled={deleting}
+                  onClick={() => void removePlanned()}
+                >
+                  {deleting ? (
+                    <Spinner />
+                  ) : (
+                    <HugeiconsIcon icon={Delete02Icon} className="size-3.5" />
+                  )}
+                  {t("labs.cleanup.retentionDelete")}
+                </Button>
+              </div>
+              <ul className="max-h-40 overflow-y-auto text-ui-10 text-muted-foreground">
+                {plan.candidates.map((entry) => (
+                  <li key={entry.path} className="truncate font-mono">
+                    {entry.path}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        ) : null}
+      </div>
 
       {error ? (
         <pre className="whitespace-pre-wrap rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-ui-10 text-destructive">

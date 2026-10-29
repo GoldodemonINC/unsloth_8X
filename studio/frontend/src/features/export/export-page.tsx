@@ -2089,6 +2089,13 @@ export function ExportPage() {
                   exportMethod={exportMethod}
                   quantLevels={quantLevels}
                   checkpoint={selectedExportSource}
+                  modelCardPath={
+                    sourceMode === "checkpoint"
+                      ? (checkpointsForModel.find(
+                          (candidate) => candidate.display_name === checkpoint,
+                        )?.path ?? null)
+                      : null
+                  }
                   baseModelName={sourceBaseModelName}
                   isAdapter={sourceMode === "checkpoint" && isAdapter}
                   destination={destination}

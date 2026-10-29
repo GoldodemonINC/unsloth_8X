@@ -57,6 +57,9 @@ export interface TrainingStartRequest {
   save_steps: number;
   eval_steps: number;
   early_stopping_patience?: number;
+  early_stop_parent_run_id?: string | null;
+  early_stop_patience_steps?: number;
+  early_stop_min_delta?: number;
   weight_decay: number;
   max_grad_norm?: number | null;
   max_grad_value?: number | null;

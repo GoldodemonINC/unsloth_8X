@@ -230,6 +230,7 @@ import {
   useDuplicateTrainingRun,
   useTrainingCompletionWatch,
   useTrainingHistorySidebarItems,
+  useTrainingQueueDriver,
   useTrainingRuntimeStore,
 } from "@/features/training";
 import type { TrainingRunSummary } from "@/features/training";
@@ -3538,6 +3539,7 @@ export function AppSidebar() {
       storeThreadId != null);
   // The Train-page status poll doesn't run off-route; keep state fresh so the spinner clears.
   useTrainingCompletionWatch();
+  useTrainingQueueDriver();
 
   const chatDisabled = trainingInProgress;
   const usesDesktopTitlebar = usesCustomTitlebar || usesNativeMacTitlebar;

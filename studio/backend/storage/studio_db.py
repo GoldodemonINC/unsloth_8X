@@ -364,6 +364,8 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             duration_seconds REAL,
             loss_sparkline TEXT,
             display_name TEXT,
+            tags TEXT,
+            notes TEXT,
             resume_blocked INTEGER NOT NULL DEFAULT 0,
             resumed_from_run_id TEXT
         )
@@ -379,6 +381,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     # Nullable, so older rows stay NULL and fall back to the output_dir heuristic.
     if "resumed_from_run_id" not in existing_cols:
         conn.execute("ALTER TABLE training_runs ADD COLUMN resumed_from_run_id TEXT")
+    if "tags" not in existing_cols:
+        conn.execute("ALTER TABLE training_runs ADD COLUMN tags TEXT")
+    if "notes" not in existing_cols:
+        conn.execute("ALTER TABLE training_runs ADD COLUMN notes TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS training_metrics (
@@ -1637,6 +1643,37 @@ def update_run_display_name(id: str, display_name: Optional[str]) -> None:
         conn.close()
 
 
+_RUN_ANNOTATION_COLUMNS = frozenset(("display_name", "tags", "notes"))
+
+
+def update_run_metadata(id: str, values: dict) -> None:
+    columns = [column for column in values if column in _RUN_ANNOTATION_COLUMNS]
+    if not columns:
+        return
+    assignments = ", ".join(f"{column} = ?" for column in columns)
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"UPDATE training_runs SET {assignments} WHERE id = ?",
+            tuple(values[column] for column in columns) + (id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _decode_run_tags(value: Optional[str]) -> list[str]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if not isinstance(decoded, list):
+        return []
+    return [tag for tag in decoded if isinstance(tag, str) and tag]
+
+
 def update_run_output_dir(id: str, output_dir: Optional[str]) -> None:
     conn = get_connection()
     try:
@@ -1684,16 +1721,42 @@ def mark_run_cancel_requested(id: str) -> bool:
         conn.close()
 
 
-def list_runs(limit: int = 50, offset: int = 0) -> dict:
+def list_runs(
+    limit: int = 50,
+    offset: int = 0,
+    query: Optional[str] = None,
+    tag: Optional[str] = None,
+) -> dict:
+    clauses: list[str] = []
+    params: list = []
+    needle = (query or "").strip()
+    if needle:
+        pattern = f"%{needle}%"
+        clauses.append(
+            "(display_name LIKE ? OR model_name LIKE ? OR dataset_name LIKE ?"
+            " OR notes LIKE ? OR tags LIKE ?)"
+        )
+        params.extend([pattern] * 5)
+    wanted_tag = (tag or "").strip()
+    if wanted_tag:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END)"
+            " WHERE value = ?)"
+        )
+        params.append(wanted_tag)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     conn = get_connection()
     try:
-        total = conn.execute("SELECT COUNT(*) FROM training_runs").fetchone()[0]
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM training_runs {where}", tuple(params)
+        ).fetchone()[0]
         rows = conn.execute(
-            """
+            f"""
             SELECT r.id, r.status, r.model_name, r.dataset_name, r.started_at,
                    r.ended_at, r.total_steps, r.final_step, r.final_loss,
                    r.output_dir, r.duration_seconds, r.error_message,
                    r.loss_sparkline, r.display_name, r.config_json, r.resume_blocked,
+                   r.tags, r.notes,
                    CASE
                        WHEN r.status IN ('stopped', 'error')
                             AND r.output_dir IS NOT NULL
@@ -1707,15 +1770,17 @@ def list_runs(limit: int = 50, offset: int = 0) -> dict:
                        THEN 1 ELSE 0
                    END AS resumed_later
             FROM training_runs r
+            {where}
             ORDER BY started_at DESC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            tuple(params) + (limit, offset),
         ).fetchall()
         runs = []
         for row in rows:
             run = dict(row)
             run["project_name"] = _extract_project_name_from_config_json(run.get("config_json"))
+            run["tags"] = _decode_run_tags(run.get("tags"))
             sparkline = run.get("loss_sparkline")
             if sparkline:
                 try:
@@ -1756,6 +1821,7 @@ def get_run(id: str) -> Optional[dict]:
             return None
         run = dict(row)
         run["project_name"] = _extract_project_name_from_config_json(run.get("config_json"))
+        run["tags"] = _decode_run_tags(run.get("tags"))
         sparkline = run.get("loss_sparkline")
         if sparkline:
             try:
@@ -5364,12 +5430,32 @@ def compare_and_set_app_setting(
         conn.close()
 
 
-def upsert_app_settings(settings: dict[str, Any], *, read_back: bool = True) -> dict[str, Any]:
+def _reclaim_freed_pages(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+    except sqlite3.Error as exc:
+        logger.warning("Could not reclaim freed database pages: %s", exc)
+    finally:
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as exc:
+            logger.warning("Could not truncate the database WAL: %s", exc)
+
+
+def upsert_app_settings(
+    settings: dict[str, Any],
+    *,
+    read_back: bool = True,
+    reclaim_free_pages: bool = False,
+) -> dict[str, Any]:
     if not settings:
         return {}
     conn = get_connection()
     committed = False
     try:
+        if reclaim_free_pages:
+            conn.execute("PRAGMA secure_delete=ON")
         now = datetime.now(timezone.utc).isoformat()
         conn.executemany(
             """
@@ -5383,6 +5469,8 @@ def upsert_app_settings(settings: dict[str, Any], *, read_back: bool = True) -> 
         )
         conn.commit()
         committed = True
+        if reclaim_free_pages:
+            _reclaim_freed_pages(conn)
         if not read_back:
             return settings
         rows = conn.execute("SELECT key, value_json FROM app_settings ORDER BY key").fetchall()

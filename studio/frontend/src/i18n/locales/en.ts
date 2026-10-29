@@ -757,6 +757,40 @@ export const en = {
     noTextKeys: "no text field (keys: {keys})",
     failed: "The dataset check could not run.",
   },
+  diskPreflight: {
+    title: "Disk space",
+    ok: "This run fits on disk.",
+    tight: "This run is close to the free space.",
+    over: "Not enough disk for this run.",
+    unknown: "The disk estimate is unavailable for this model.",
+    failed: "The disk check could not run.",
+    summary: "Needs about {required} GB · {free} GB free",
+    baseWeights: "Base weights",
+    checkpoints: "Checkpoints",
+    finalSave: "Final save",
+    reserve: "Reserve",
+    stepsUnknown: "The checkpoint count is unknown until max steps or save steps are set.",
+    idle: "Checking the run's disk budget…",
+  },
+  resumeSafety: {
+    title: "Resume check",
+    ready: "The checkpoint, dataset, tokenizer and optimizer state all match this run.",
+    blocked: "Resume is blocked: {reason}",
+    pass: "Can resume",
+    fail: "Blocked",
+    dataset: "Dataset",
+    tokenizer: "Tokenizer",
+    adapter: "Adapter",
+    optimizer: "Optimizer state",
+    match: "matches",
+    changed: "changed",
+    unavailable: "not verifiable",
+    adapterPresent: "The checkpoint has adapter weights.",
+    adapterMissing: "The checkpoint has no adapter weights.",
+    optimizerPresent: "The checkpoint has optimizer state.",
+    optimizerMissing: "The checkpoint has no optimizer state.",
+    failed: "The resume check could not run.",
+  },
   labs: {
     picker: {
       hubMode: "Hugging Face",
@@ -931,6 +965,12 @@ export const en = {
       delete: "Delete record",
       stored:
         "Records live under outputs/labs-benchmarks and survive a restart; the checkpoint is never modified.",
+      trendTitle: "Score trend",
+      trendDescription:
+        "Candidate score per recorded benchmark, oldest to newest. A drop of 1.5 points or more below that artifact's previous best is flagged.",
+      trendRegression: "{value} pts below best",
+      trendBest: "New best",
+      trendFlat: "Within noise",
     },
     cleanup: {
       title: "Cleanup studio",
@@ -948,6 +988,15 @@ export const en = {
       failed: "The folders could not be deleted",
       note:
         "A folder a running job is writing to is refused. Hugging Face entries are safe to delete but will be downloaded again by the next run that needs them.",
+      retentionTitle: "Retention policy",
+      retentionHint:
+        "Keep the best runs per project by final loss and remove the rest. Only output folders the scan offers to delete are eligible.",
+      retentionKeep: "Keep per project",
+      retentionPreview: "Preview",
+      retentionReady: "{count} folders · {size}",
+      retentionNone: "Every project already fits the limit.",
+      retentionDelete: "Delete previewed",
+      retentionFailed: "The retention preview could not be built.",
     },
     autoScale: {
       title: "Scale from the dataset",
@@ -2122,6 +2171,65 @@ export const en = {
           "Disabled by UNSLOTH_HELPER_MODEL_DISABLE in the backend environment.",
         loadError: "Failed to load Helper LLM settings.",
         saveError: "Failed to save Helper LLM settings.",
+      },
+      webhooks: {
+        sectionTitle: "Training webhooks",
+        description:
+          "Send a signed JSON POST when a run finishes or its loss curve turns bad. Off by default.",
+        enabled: "Enable webhook alerts",
+        enabledDescription:
+          "Deliver run and loss-anomaly alerts to the endpoint below.",
+        url: "Endpoint URL",
+        urlDescription:
+          "HTTP or HTTPS only. Each delivery is attempted three times with a bounded timeout.",
+        urlPlaceholder: "https://example.com/hooks/unsloth",
+        save: "Save",
+        saving: "Saving...",
+        saved: "Webhook settings saved.",
+        secret: "Shared secret",
+        secretDescription:
+          "Optional. Signs each request; stored locally and never returned to the browser.",
+        secretPlaceholder: "Optional signing secret",
+        secretPlaceholderStored: "Leave blank to keep the stored secret",
+        secretStored: "Stored secret",
+        secretStoredDescription:
+          "The saved secret is not shown again. Replace it above or remove it here.",
+        secretUnavailable: "Saved secret can't be read",
+        secretUnavailableDescription:
+          "Enter a new secret to sign deliveries again. Test sends stay unsigned until you do.",
+        clearSecret: "Remove the stored secret",
+        test: "Send test",
+        testDescription:
+          "Posts a real test event to the saved endpoint and any unsaved values above, then reports the actual HTTP result.",
+        testing: "Sending...",
+        testFailed: "The test event could not be sent.",
+        testHttpResult: "HTTP {status} in {ms} ms · attempts: {attempts}",
+        testFailedResult:
+          "No successful response · attempts: {attempts} · {error}",
+        testUnsigned: "No shared secret is set, so this request is unsigned.",
+        testUnsignedUnavailable:
+          "The saved secret can't be read, so this request is unsigned.",
+        testSignatureChecked:
+          "Signed request: the signature header was checked locally against the body with HMAC-SHA256. The HTTP result above is the receiver's response.",
+        testSignatureFailed:
+          "The signature header did not match the body under HMAC-SHA256 on this machine. Check the shared secret.",
+        signatureDescription:
+          "Requests are signed with {algorithm} over {signedContent} and sent in the {header} header.",
+        historyTitle: "Recent deliveries",
+        historyEmpty: "Nothing has been delivered yet.",
+        refresh: "Refresh",
+        delivered: "Delivered",
+        failed: "Failed",
+        attempts: "{count}x",
+        invalidEmpty: "Enter the endpoint URL.",
+        invalidScheme: "The endpoint must start with http:// or https://.",
+        invalidHost: "The endpoint must include a host.",
+        invalidCredentials:
+          "Remove the username and password from the URL; use the shared secret instead.",
+        invalidSpaces: "The URL must not contain spaces or control characters.",
+        invalidMalformed: "The URL is not valid.",
+        loadError: "Failed to load webhook settings.",
+        saveError: "Failed to save webhook settings.",
       },
       modelAutoSwitch: {
         sectionTitle: "Model auto-switch (OpenAI API)",
@@ -3674,6 +3782,42 @@ export const en = {
   },
   studio: {
     routeTitle: "Train",
+    queue: {
+      title: "Run queue",
+      description:
+        "Line up configurations to train one after another. The queue is stored on this device, so it survives a reload while the app stays open.",
+      addCurrent: "Add current setup",
+      addSweep: "Add sweep",
+      added: "{count} queued",
+      addFailed: "The current setup could not be queued.",
+      pause: "Pause queue",
+      resume: "Resume queue",
+      pausedHint: "The queue is paused. A run already in progress keeps training.",
+      hint: "The next run starts when the current one finishes. A scheduled run waits for its time.",
+      empty: "Nothing queued. Add the current setup, or expand a sweep.",
+      scheduleLabel: "Start no earlier than",
+      scheduledFor: "Starts {time}",
+      startNow: "Start now",
+      remove: "Remove {run}",
+      clearFinished: "Clear finished",
+      startFailed: "The queued run could not start.",
+      sweepTitle: "Sweep",
+      sweepCount: "{count} combinations",
+      sweepHint: "One run per combination of the values entered.",
+      sweepLimit: "A sweep is limited to {count} runs.",
+      sweepLearningRates: "Learning rates",
+      sweepLoraRanks: "LoRA ranks",
+      sweepEpochs: "Epochs",
+      sweepBatchSizes: "Batch sizes",
+      status: {
+        queued: "Queued",
+        scheduled: "Scheduled",
+        running: "Running",
+        done: "Done",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      },
+    },
     presets: {
       title: "Presets and capacity",
       description:
@@ -3900,11 +4044,84 @@ export const en = {
       trainingInProgress: "Training in progress",
       viewPastRuns: "View past training runs",
       viewingPastRun: "Viewing past run",
+      compare: "Compare saved runs side by side",
     },
     tabs: {
       configure: "Configure",
       currentRun: "Current Run",
       history: "History",
+      compare: "Compare",
+    },
+    comparison: {
+      title: "Run comparison",
+      description:
+        "Put two to four saved runs on one axis, compare the settings that differ, and mark the one worth keeping.",
+      selectionHint: "{count} of 4 selected",
+      loading: "Loading runs…",
+      loadError: "The runs could not be loaded.",
+      noRuns: "No saved runs to compare yet.",
+      selectRun: "Compare {run}",
+      finalLoss: "Final loss",
+      chooseTwo: "Select at least two runs to compare.",
+      chartTitle: "Loss curves",
+      winner: "Winner",
+      markWinner: "Mark as winner",
+      diffTitle: "What differs",
+      noDifferences: "These runs share every compared setting.",
+      field: "Setting",
+      datasetDrift:
+        "These runs name the same dataset but hashed different content. They are not a controlled comparison.",
+    },
+    exportModelCard: {
+      title: "Model card check",
+      description:
+        "Reads README.md or MODEL_CARD.md in the selected checkpoint before publishing or exporting.",
+      loading: "Checking the model card…",
+      error: "The model card could not be checked.",
+      missingCount: "{count} missing",
+      allPresent: "Complete",
+      present: "Found",
+      missing: "Missing",
+      baseModel: "Base model",
+      license: "License",
+      dataset: "Dataset description",
+      evaluation: "Evaluation numbers",
+      noCard:
+        "No README.md or MODEL_CARD.md was found in this checkpoint, so every check is missing.",
+      addHint:
+        "Add the missing facts to the card before publishing; this check never writes to it.",
+    },
+    chartEvents: {
+      checkpoint: "Checkpoint",
+      resume: "Resume",
+      lrChange: "LR change",
+      anomaly: "Anomaly",
+    },
+    postmortem: {
+      title: "Failure post-mortem",
+      oomTitle: "Out of memory",
+      oomFix:
+        "Lower the batch size, raise gradient accumulation, shorten the context length, or enable 4-bit loading, then resume from the last checkpoint.",
+      nanTitle: "Loss became NaN",
+      nanFix:
+        "Lower the learning rate, turn on gradient clipping, and resume from the last good checkpoint.",
+      diskTitle: "Ran out of disk space",
+      diskFix:
+        "Free space under the outputs folder, lower the checkpoint save frequency, or point the output directory at a larger disk.",
+      authTitle: "Access denied by the Hub",
+      authFix:
+        "Add or refresh your Hugging Face token, confirm access to the repository, then start the run again.",
+      datasetTitle: "The dataset could not be read",
+      datasetFix:
+        "Fix the reported rows or pick another dataset and columns, then start the run again.",
+      timeoutTitle: "The run timed out",
+      timeoutFix:
+        "Raise the wait limit for this step, reduce the dataset size, or check the machine's network and disk throughput.",
+      unknownTitle: "Unrecognised failure",
+      unknownFix:
+        "Read the reported log below, correct the failing setting in the trainer, and start the run again.",
+      openWizard: "Open in trainer",
+      logLabel: "What the run reported",
     },
     goToLibrary: "Go to Library",
     loadingRuntime: "Loading training runtime...",
@@ -4203,6 +4420,22 @@ export const en = {
       earlyStoppingPatience: "Early Stopping Patience",
       earlyStoppingPatienceTooltip:
         "Stop training after this many evaluations in a row without a lower eval loss, and keep the weights from the best evaluation. Needs evaluation (Eval Steps above 0). 0 to disable.",
+      earlyStopParentTitle: "Early stop against a parent run",
+      earlyStopParentHint:
+        "Stop this run when its loss has not beaten a completed run's recorded loss for a set number of steps.",
+      earlyStopParentSummary:
+        "Parent {parent}; must beat its loss by {delta} within {steps} steps or the run stops and saves a checkpoint.",
+      earlyStopParentRun: "Parent run",
+      earlyStopParentLoading: "Loading saved runs…",
+      earlyStopParentLoadError: "Saved runs could not be loaded.",
+      earlyStopParentNoRuns:
+        "A completed run with a recorded loss is needed before this guard can be used.",
+      earlyStopPatienceSteps: "Steps without an improvement",
+      earlyStopPatienceStepsTooltip:
+        "How many training steps may pass without beating the parent's recorded loss. The guard stops the run and keeps a resumable checkpoint when this window runs out.",
+      earlyStopMinDelta: "Minimum loss improvement",
+      earlyStopMinDeltaTooltip:
+        "The child run's loss must be lower than the parent's recorded loss by at least this amount to count as an improvement.",
       seed: "Seed",
       seedTooltip: "Random seed for reproducibility.",
       offloadLayers: "Offload layers",
@@ -4331,6 +4564,8 @@ export const en = {
     },
     history: {
       title: "History",
+      reproducibilityBundle: "Reproducibility bundle",
+      reproducibilityError: "The bundle could not be saved.",
       filesDeleted: "Files deleted",
       deleteArtifactsLabel: "Also delete adapter files on disk",
       deleteArtifactsDescription:
@@ -4380,6 +4615,21 @@ export const en = {
       copyPreviewLink: "Copy preview link",
       previewLinkCopied: "Preview link copied",
       previewLinkCopyFailed: "Couldn't copy the link",
+      searchPlaceholder: "Search runs, models, datasets, tags",
+      filterByTag: "Filter by tag",
+      allRuns: "All runs",
+      noMatches: "No runs match these filters.",
+      editAnnotations: "Edit tags and notes",
+      annotationsTitle: "Tags and notes",
+      annotationsDescription:
+        "Tags make a run searchable. Notes stay with the run on this machine.",
+      tagsLabel: "Tags",
+      tagsPlaceholder: "baseline, lr-test",
+      tagsHint: "Comma separated, up to 12.",
+      notesLabel: "Notes",
+      notesPlaceholder: "What did this run test?",
+      annotationsSaved: "Run updated",
+      annotationsError: "Couldn't update this run",
     },
     charts: {
       settings: "Chart Settings",
@@ -4457,6 +4707,9 @@ export const en = {
       stepsPerSecond: "{value} steps/s",
       noStepsPerSecond: "-- steps/s",
       tokens: "Tokens: {value}",
+      tokensPerSecond: "{value} tok/s",
+      finishAt: "Finishes {time}",
+      gpuHours: "{value} GPU-h",
       gpuMonitor: "GPU Monitor",
       live: "Live",
       utilization: "Utilization",

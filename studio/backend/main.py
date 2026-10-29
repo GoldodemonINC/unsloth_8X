@@ -1071,6 +1071,13 @@ async def lifespan(app: FastAPI):
 
     await asyncio.to_thread(shutdown_decisions)
 
+    from core.training import webhooks as _training_webhooks
+
+    try:
+        await asyncio.to_thread(_training_webhooks.wait_for_deliveries, 2.0)
+    except Exception as exc:
+        _lifespan_log.warning("training webhook drain failed at shutdown: %s", exc)
+
     await run_lifespan_shutdown(
         terminate_hub_downloads,
         lambda: clear_compiled_cache_unless_shared(app),

@@ -336,6 +336,23 @@ class TrainingStartRequest(BaseModel):
         le = 1000,
         description = "Stop after this many evaluations without a lower eval loss and keep the best weights. 0 = off",
     )
+    early_stop_parent_run_id: Optional[str] = Field(
+        None,
+        max_length = 128,
+        description = "Run whose recorded loss this run must beat. Off unless early_stop_patience_steps is set",
+    )
+    early_stop_patience_steps: int = Field(
+        0,
+        ge = 0,
+        le = 100000,
+        description = "Training steps allowed without beating the parent run's recorded loss. 0 = off",
+    )
+    early_stop_min_delta: float = Field(
+        0.0,
+        ge = 0,
+        allow_inf_nan = False,
+        description = "How much lower than the parent's loss the training loss must be to count as an improvement",
+    )
     drafter: Optional[DrafterTrainingConfig] = Field(
         None,
         description = "Train a speculative-decoding drafter (MTP head or EAGLE-3) after the fine-tune",
@@ -371,6 +388,20 @@ class TrainingStartRequest(BaseModel):
     def _reject_boolean_patience(cls, value: Any) -> Any:
         if isinstance(value, bool):
             raise ValueError("early_stopping_patience must be a number, not a boolean")
+        return value
+
+    @field_validator("early_stop_patience_steps", mode = "before")
+    @classmethod
+    def _reject_boolean_parent_patience(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("early_stop_patience_steps must be a number, not a boolean")
+        return value
+
+    @field_validator("early_stop_min_delta", mode = "before")
+    @classmethod
+    def _reject_boolean_parent_delta(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("early_stop_min_delta must be a number, not a boolean")
         return value
 
     @field_validator("eval_steps", mode = "before")
@@ -1082,6 +1113,8 @@ class TrainingRunSummary(BaseModel):
     project_name: Optional[str] = None
     dataset_name: str
     display_name: Optional[str] = None
+    tags: List[str] = Field(default_factory = list)
+    notes: Optional[str] = None
     started_at: str
     ended_at: Optional[str] = None
     total_steps: Optional[int] = None
@@ -1108,6 +1141,30 @@ class TrainingRunUpdateRequest(BaseModel):
     model_config = ConfigDict(extra = "forbid")
 
     display_name: Optional[str] = Field(None, max_length = 120)
+    tags: Optional[List[str]] = Field(None, max_length = 12)
+    notes: Optional[str] = Field(None, max_length = 2000)
+
+    @field_validator("tags")
+    @classmethod
+    def _clean_tags(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        if value is None:
+            return None
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for raw in value:
+            tag = " ".join(str(raw).split())
+            if not tag:
+                continue
+            if len(tag) > 32:
+                raise ValueError("Tags are limited to 32 characters")
+            folded = tag.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            cleaned.append(tag)
+        if len(cleaned) > 12:
+            raise ValueError("A run keeps at most 12 tags")
+        return cleaned
 
 
 class TrainingRunListResponse(BaseModel):

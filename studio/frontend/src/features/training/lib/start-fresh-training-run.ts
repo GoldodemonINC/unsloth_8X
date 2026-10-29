@@ -12,6 +12,7 @@ import { translate } from "@/i18n";
 import { primeNativeNotificationPermission } from "@/lib/native-notifications";
 import { toast } from "@/lib/toast";
 import { DatasetFormatError, checkDatasetFormat } from "../api/datasets-api";
+import { checkDiskPreflight } from "../api/disk-preflight-api";
 import { buildTrainingStartPayload } from "../api/mappers";
 import {
   TrainingStartError,
@@ -573,6 +574,29 @@ async function submitFreshTrainingRun(
     );
     if (!validation.ok) {
       return attempt.cancel(translate(validation.errorKey));
+    }
+    if (!attempt.config.selectedModel) {
+      return attempt.cancel(translate("studio.presets.needModel"));
+    }
+    const disk = await checkDiskPreflight({
+      model: attempt.config.selectedModel,
+      method: attempt.config.trainingMethod,
+      loadIn4Bit: attempt.config.trainingMethod === "qlora",
+      maxSeqLength: attempt.config.contextLength,
+      batchSize: attempt.config.batchSize,
+      gradientAccumulation: attempt.config.gradientAccumulation,
+      loraRank: attempt.config.loraRank,
+      maxSteps: attempt.config.maxSteps,
+      saveSteps: attempt.config.saveSteps,
+      modelKnownCached: attempt.config.modelKnownCached,
+    }).catch(() => null);
+    if (attempt.abortIfInputsChanged()) {
+      return false;
+    }
+    if (disk?.status === "over") {
+      return attempt.cancel(
+        disk.blockers[0] ?? translate("diskPreflight.over"),
+      );
     }
   }
 

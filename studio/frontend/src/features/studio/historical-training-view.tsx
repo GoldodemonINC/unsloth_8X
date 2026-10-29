@@ -4,18 +4,41 @@
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import {
+  type ResumeSafetyReport,
   type TrainingRunDetailResponse,
+  type TrainingSeriesPoint,
   type TrainingViewData,
+  checkTrainingRunResume,
   getTrainingRun,
+  isTrainingRunActive,
   onTrainingRunUpdated,
   parseBackendTrainingMethod,
   useTrainingActions,
+  useTrainingConfigStore,
+  useTrainingRuntimeStore,
 } from "@/features/training";
+import { detectLossAnomaly } from "@/features/training/lib/loss-anomaly";
+import {
+  type ReproducibilityEnvironment,
+  buildReproducibilityBundle,
+  reproducibilityBundleFilename,
+} from "@/features/training/lib/reproducibility-bundle";
+import { getCachedSystemInfo } from "@/hooks/use-system";
 import { translate, useT } from "@/i18n";
-import { PlayIcon } from "@hugeicons/core-free-icons";
+import { downloadBlobStreaming } from "@/lib/native-files";
+import { toast } from "@/lib/toast";
+import { Download04Icon, PlayIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
-import { type ReactElement, useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { type ReactElement, useEffect, useMemo, useState } from "react";
 import { ChartsSection } from "./sections/charts-section";
+import {
+  buildLossChartEvents,
+  resumedAtStep,
+} from "./sections/charts/loss-chart-events";
+import { fetchRunCheckpointSteps } from "./sections/charts/run-checkpoint-steps";
+import { FailurePostmortem } from "./sections/failure-postmortem";
+import { ResumeSafetyCard } from "./sections/resume-safety-card";
 import { ProgressSection } from "./sections/progress-section";
 import { mapRunConfigToOverride } from "./sections/run-config-override";
 
@@ -31,6 +54,16 @@ type HistoricalRunResult = {
   detail: TrainingRunDetailResponse | null;
   error: string | null;
 };
+
+function toSeries(steps: number[], values: number[]): TrainingSeriesPoint[] {
+  const points = steps
+    .map((step, index) => ({ step, value: values[index] }))
+    .filter(
+      (point): point is TrainingSeriesPoint =>
+        Number.isFinite(point.step) && Number.isFinite(point.value),
+    );
+  return [...points].sort((left, right) => left.step - right.step);
+}
 
 function mapToViewData(
   detail: TrainingRunDetailResponse,
@@ -113,13 +146,90 @@ export function HistoricalTrainingView({
   onResumeStarted,
 }: HistoricalTrainingViewProps): ReactElement {
   const t = useT();
+  const navigate = useNavigate();
   const [result, setResult] = useState<HistoricalRunResult | null>(null);
   const [resuming, setResuming] = useState(false);
+  const [checkpointSteps, setCheckpointSteps] = useState<number[]>([]);
+  const [bundling, setBundling] = useState(false);
+  const [resumeReport, setResumeReport] = useState<ResumeSafetyReport | null>(
+    null,
+  );
+  const [resumeCheckError, setResumeCheckError] = useState<string | null>(null);
+  const [resumeChecking, setResumeChecking] = useState(false);
   const { resumeTrainingRunFromHistory, startBlocked, stopRequested } =
     useTrainingActions();
   const currentResult = result?.runId === runId ? result : null;
   const detail = currentResult?.detail ?? null;
   const error = currentResult?.error ?? null;
+  const outputDir = detail?.run.output_dir ?? null;
+  const trainingRunActive = useTrainingRuntimeStore(isTrainingRunActive);
+
+  useEffect(() => {
+    let active = true;
+    setCheckpointSteps([]);
+    if (!outputDir) {
+      return;
+    }
+    void fetchRunCheckpointSteps(outputDir).then((steps) => {
+      if (active) {
+        setCheckpointSteps(steps);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [outputDir]);
+
+  useEffect(() => {
+    setResumeReport(null);
+    setResumeCheckError(null);
+    if (
+      !detail ||
+      !detail.run.can_resume ||
+      detail.run.status === "running" ||
+      !detail.run.output_dir
+    ) {
+      setResumeChecking(false);
+      return;
+    }
+    const controller = new AbortController();
+    setResumeChecking(true);
+    checkTrainingRunResume(runId, controller.signal)
+      .then((report) => {
+        if (!controller.signal.aborted) setResumeReport(report);
+      })
+      .catch((failure: unknown) => {
+        if (controller.signal.aborted) return;
+        setResumeCheckError(
+          failure instanceof Error
+            ? failure.message
+            : translate("resumeSafety.failed"),
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setResumeChecking(false);
+      });
+    return () => controller.abort();
+  }, [detail, runId]);
+
+  const chartEvents = useMemo(() => {
+    if (!detail) {
+      return [];
+    }
+    const lossHistory = toSeries(
+      detail.metrics.loss_step_history,
+      detail.metrics.loss_history,
+    );
+    return buildLossChartEvents({
+      checkpointSteps,
+      lrHistory: toSeries(
+        detail.metrics.lr_step_history,
+        detail.metrics.lr_history,
+      ),
+      anomalyStep: detectLossAnomaly(lossHistory)?.step ?? null,
+      resumeStep: resumedAtStep(detail.config, lossHistory),
+    });
+  }, [checkpointSteps, detail]);
 
   const handleResume = async () => {
     setResuming(true);
@@ -195,17 +305,84 @@ export function HistoricalTrainingView({
 
   const viewData = mapToViewData(detail, t);
   const configOverride = mapRunConfigToOverride(detail.config);
+  const downloadBundle = async () => {
+    setBundling(true);
+    try {
+      const system = getCachedSystemInfo();
+      const environment: ReproducibilityEnvironment | null = system
+        ? {
+            platform: system.platform,
+            python_version: system.python_version,
+            torch: system.ml_packages.torch ?? null,
+            transformers: system.ml_packages.transformers ?? null,
+            device_backend: system.device_backend,
+            gpu: system.gpu.devices[0]?.name ?? null,
+          }
+        : null;
+      const bundle = buildReproducibilityBundle(detail, { environment });
+      const content = new Blob([JSON.stringify(bundle, null, 2)], {
+        type: "application/json",
+      });
+      await downloadBlobStreaming(
+        content,
+        reproducibilityBundleFilename(detail.run.id),
+      );
+    } catch (bundleError) {
+      toast.error(t("studio.history.reproducibilityError"), {
+        description:
+          bundleError instanceof Error ? bundleError.message : undefined,
+      });
+    } finally {
+      setBundling(false);
+    }
+  };
+
+  const openInWizard = () => {
+    useTrainingConfigStore.getState().restoreRunConfig(detail.config);
+    useTrainingRuntimeStore.setState((state) => ({
+      selectedHistoryRunId: null,
+      configureRequest: state.configureRequest + 1,
+    }));
+    useTrainingConfigStore.getState().ensureDatasetChecked();
+    void navigate({ to: "/studio" });
+  };
 
   return (
     <div className="flex flex-col gap-6">
-      {detail.run.can_resume && (
-        <div className="flex justify-end">
+      {detail.run.status === "error" && (
+        <FailurePostmortem
+          message={detail.run.error_message}
+          onOpenWizard={trainingRunActive ? undefined : openInWizard}
+        />
+      )}
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="gap-1.5"
+          disabled={bundling}
+          onClick={() => void downloadBundle()}
+        >
+          {bundling ? (
+            <Spinner className="size-3.5" />
+          ) : (
+            <HugeiconsIcon icon={Download04Icon} className="size-3.5" />
+          )}
+          {t("studio.history.reproducibilityBundle")}
+        </Button>
+        {detail.run.can_resume && (
           <Button
             type="button"
             size="sm"
             variant="outline"
             className="gap-1.5"
-            disabled={startBlocked || resuming}
+            disabled={
+              startBlocked ||
+              resuming ||
+              resumeChecking ||
+              resumeReport?.ok === false
+            }
             onClick={() => void handleResume()}
           >
             {resuming ? (
@@ -219,8 +396,9 @@ export function HistoricalTrainingView({
                 ? t("studio.history.resuming")
                 : t("studio.history.resumeTraining")}
           </Button>
-        </div>
-      )}
+        )}
+      </div>
+      <ResumeSafetyCard report={resumeReport} error={resumeCheckError} />
       <ProgressSection
         runId={runId}
         data={viewData}
@@ -236,6 +414,7 @@ export function HistoricalTrainingView({
         lrHistory={viewData.lrHistory}
         gradNormHistory={viewData.gradNormHistory}
         evalLossHistory={viewData.evalLossHistory}
+        events={chartEvents}
       />
     </div>
   );

@@ -496,6 +496,23 @@ export function mergeTrainingConfig(
       persistedState.settingsBeforeDecision,
     ),
     trainAsDecision: persistedState.trainAsDecision === true,
+    earlyStopParentRunId:
+      typeof persistedState.earlyStopParentRunId === "string" &&
+      persistedState.earlyStopParentRunId.trim()
+        ? persistedState.earlyStopParentRunId.trim()
+        : null,
+    earlyStopPatienceSteps:
+      typeof persistedState.earlyStopPatienceSteps === "number" &&
+      Number.isFinite(persistedState.earlyStopPatienceSteps) &&
+      persistedState.earlyStopPatienceSteps > 0
+        ? Math.min(Math.floor(persistedState.earlyStopPatienceSteps), 100000)
+        : 0,
+    earlyStopMinDelta:
+      typeof persistedState.earlyStopMinDelta === "number" &&
+      Number.isFinite(persistedState.earlyStopMinDelta) &&
+      persistedState.earlyStopMinDelta > 0
+        ? persistedState.earlyStopMinDelta
+        : 0,
   };
   return {
     ...merged,

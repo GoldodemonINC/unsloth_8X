@@ -309,6 +309,16 @@ export function buildTrainingStartPayload(
       config.evalSteps > 0 && !isDecision && !isEmbedding
         ? normalizeEarlyStoppingPatience(config.earlyStoppingPatience)
         : 0,
+    early_stop_parent_run_id:
+      config.earlyStopPatienceSteps > 0 ? config.earlyStopParentRunId : null,
+    early_stop_patience_steps:
+      config.earlyStopParentRunId && config.earlyStopPatienceSteps > 0
+        ? Math.min(Math.floor(config.earlyStopPatienceSteps), 100000)
+        : 0,
+    early_stop_min_delta:
+      Number.isFinite(config.earlyStopMinDelta) && config.earlyStopMinDelta > 0
+        ? config.earlyStopMinDelta
+        : 0,
     weight_decay: config.weightDecay,
     // max_grad_norm omitted on purpose: the backend now honors an explicit value,
     // so hardcoding 0 here would pin every UI run to "clipping off" and override

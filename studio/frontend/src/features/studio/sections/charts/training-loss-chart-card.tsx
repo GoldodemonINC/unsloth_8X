@@ -10,7 +10,7 @@ import {
   ChartTooltipContent,
 } from "@/components/ui/chart";
 import type { ChartConfig } from "@/components/ui/chart";
-import { useT } from "@/i18n";
+import { type TranslationKey, useT } from "@/i18n";
 import type { ReactElement } from "react";
 import {
   CartesianGrid,
@@ -20,6 +20,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import type { LossChartEvent, LossChartEventKind } from "./loss-chart-events";
 import type { ScaleMode } from "./types";
 import {
   CHART_SYNC_ID,
@@ -40,6 +41,27 @@ interface LossChartPoint {
   displaySmoothed: number;
 }
 
+const EVENT_STROKE: Record<LossChartEventKind, string> = {
+  checkpoint: "var(--muted-foreground)",
+  resume: "var(--chart-3)",
+  lrChange: "var(--chart-2)",
+  anomaly: "var(--destructive)",
+};
+
+const EVENT_DASH: Record<LossChartEventKind, string> = {
+  checkpoint: "2 4",
+  resume: "5 3",
+  lrChange: "4 3",
+  anomaly: "1 2",
+};
+
+const EVENT_LABEL: Record<LossChartEventKind, TranslationKey> = {
+  checkpoint: "studio.chartEvents.checkpoint",
+  resume: "studio.chartEvents.resume",
+  lrChange: "studio.chartEvents.lrChange",
+  anomaly: "studio.chartEvents.anomaly",
+};
+
 export function TrainingLossChartCard({
   data,
   domain,
@@ -51,6 +73,7 @@ export function TrainingLossChartCard({
   showSmoothed,
   showAvgLine,
   scale,
+  events = [],
 }: {
   data: LossChartPoint[];
   domain: [number, number];
@@ -62,6 +85,7 @@ export function TrainingLossChartCard({
   showSmoothed: boolean;
   showAvgLine: boolean;
   scale: ScaleMode;
+  events?: readonly LossChartEvent[];
 }): ReactElement {
   const t = useT();
   const lossConfig = {
@@ -69,11 +93,34 @@ export function TrainingLossChartCard({
     displaySmoothed: { label: t("studio.charts.smoothed"), color: "#f59e0b" },
   } satisfies ChartConfig;
   const showPoint = data.length <= 1 ? { r: 3, strokeWidth: 0 } : false;
+  const visibleEvents = events.filter(
+    (event) =>
+      event.step >= visibleStepDomain[0] && event.step <= visibleStepDomain[1],
+  );
+  const presentKinds = [...new Set(visibleEvents.map((event) => event.kind))];
 
   return (
     <Card data-tour="studio-training-loss" size="sm">
       <CardHeader>
-        <CardTitle className="text-sm">{t("studio.charts.trainingLoss")}</CardTitle>
+        <CardTitle className="text-sm">
+          {t("studio.charts.trainingLoss")}
+        </CardTitle>
+        {presentKinds.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2.5">
+            {presentKinds.map((kind) => (
+              <span
+                key={kind}
+                className="inline-flex items-center gap-1 text-ui-10 text-muted-foreground"
+              >
+                <span
+                  className="size-1.5 rounded-full"
+                  style={{ backgroundColor: EVENT_STROKE[kind] }}
+                />
+                {t(EVENT_LABEL[kind])}
+              </span>
+            ))}
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         <ChartContainer config={lossConfig} className={CHART_CONTAINER_CLASS}>
@@ -157,6 +204,15 @@ export function TrainingLossChartCard({
                 }}
               />
             )}
+            {visibleEvents.map((event) => (
+              <ReferenceLine
+                key={`${event.kind}-${event.step}`}
+                x={event.step}
+                stroke={EVENT_STROKE[event.kind]}
+                strokeDasharray={EVENT_DASH[event.kind]}
+                strokeOpacity={event.kind === "anomaly" ? 0.9 : 0.55}
+              />
+            ))}
             {showRaw && (
               <Line
                 type="linear"

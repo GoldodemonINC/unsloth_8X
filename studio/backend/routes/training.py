@@ -177,6 +177,19 @@ class DatasetPreflightRequest(PydanticBaseModel):
     long_row_chars: int = PydanticField(default = 32_768, gt = 0, le = 10_000_000)
 
 
+class TrainingDiskPreflightRequest(PydanticBaseModel):
+    model: str = PydanticField(..., min_length = 1, max_length = 4096)
+    method: Literal["lora", "qlora", "full", "cpt"] = "lora"
+    load_in_4bit: bool = False
+    max_seq_length: int = PydanticField(2048, ge = 128, le = 131_072)
+    batch_size: int = PydanticField(1, ge = 1, le = 512)
+    gradient_accumulation: int = PydanticField(1, ge = 1, le = 512)
+    lora_rank: int = PydanticField(16, ge = 1, le = 1024)
+    max_steps: int = PydanticField(0, ge = 0)
+    save_steps: int = PydanticField(0, ge = 0)
+    model_known_cached: bool = False
+
+
 router = APIRouter()
 logger = get_logger(__name__)
 
@@ -185,6 +198,7 @@ _TRAINING_START_ERROR_RESPONSES = {
     409: {"description": "The requested start conflicts with offline, resume, or runtime state"},
     429: {"description": "Remote resource verification was rate-limited"},
     503: {"description": "Remote resource metadata is temporarily unavailable"},
+    507: {"description": "The run's estimated disk use exceeds free space"},
 }
 
 
@@ -1899,6 +1913,97 @@ def dataset_preflight(
         raise HTTPException(status_code = 400, detail = str(error)) from error
 
 
+def _disk_preflight_for_config(config: dict[str, Any]) -> dict[str, Any]:
+    from core.training import disk_preflight as disk
+    from core.training import fit as training_fit
+
+    params = 0
+    shape: dict[str, int] = {}
+    source = config.get("model_local_path") or config.get("model_name") or ""
+    if source:
+        try:
+            info = training_fit._config(source)
+            params = int(info["params"])
+            shape = {
+                "hidden_size": int(info["hidden"]),
+                "intermediate_size": int(info["intermediate"]),
+                "num_layers": int(info["layers"]),
+            }
+        except Exception:
+            params = 0
+    from utils.paths import outputs_root
+
+    method = str(config.get("training_type") or "LoRA/QLoRA")
+    method_key = {
+        "LoRA/QLoRA": "lora",
+        "Full Finetuning": "full",
+        "Continued Pretraining": "cpt",
+    }.get(method, "lora")
+    if method_key == "lora" and config.get("load_in_4bit"):
+        method_key = "qlora"
+    return disk.estimate(
+        {
+            "params": params,
+            **shape,
+            "method": method_key,
+            "load_in_4bit": bool(config.get("load_in_4bit")),
+            "batch_size": config.get("batch_size"),
+            "max_seq_length": config.get("max_seq_length"),
+            "lora_rank": config.get("lora_r"),
+            "max_steps": config.get("max_steps"),
+            "save_steps": config.get("save_steps"),
+            "model_known_cached": bool(config.get("model_known_cached"))
+            or bool(config.get("model_local_path")),
+            "output_dir": config.get("output_dir") or str(outputs_root()),
+        }
+    )
+
+
+@router.post("/disk/preflight")
+async def training_disk_preflight(
+    request: TrainingDiskPreflightRequest,
+    current_subject: str = Depends(get_current_subject),
+    via_api_key: bool = Depends(authenticated_via_api_key),
+) -> dict[str, Any]:
+    from core.training import disk_preflight as disk
+    from core.training import fit as training_fit
+
+    from utils.paths import outputs_root
+
+    params = 0
+    shape: dict[str, int] = {}
+    try:
+        info = await asyncio.to_thread(training_fit._config, request.model)
+        params = int(info["params"])
+        shape = {
+            "hidden_size": int(info["hidden"]),
+            "intermediate_size": int(info["intermediate"]),
+            "num_layers": int(info["layers"]),
+        }
+    except Exception:
+        params = 0
+    report = await asyncio.to_thread(
+        disk.estimate,
+        {
+            "params": params,
+            **shape,
+            "method": request.method,
+            "load_in_4bit": request.load_in_4bit,
+            "batch_size": request.batch_size,
+            "gradient_accumulation": request.gradient_accumulation,
+            "max_seq_length": request.max_seq_length,
+            "lora_rank": request.lora_rank,
+            "max_steps": request.max_steps,
+            "save_steps": request.save_steps,
+            "model_known_cached": request.model_known_cached,
+            "output_dir": str(outputs_root()),
+        },
+    )
+    from hub.utils.host_paths import redact_host_paths
+
+    return redact_host_paths(report, via_api_key = via_api_key)
+
+
 @router.post("/token-preview")
 async def token_preview(
     request: TokenPreviewRequest,
@@ -2263,6 +2368,36 @@ async def start_training(
                 get_resumable_run_by_output_dir,
                 resume_output_dir,
             )
+            if resume_run:
+                from core.training import resume_safety
+                from core.training.resume import training_run_config
+
+                artifact_report = await asyncio.to_thread(
+                    resume_safety.evaluate_resume,
+                    resume_output_dir,
+                    training_run_config(resume_run),
+                )
+                artifact_names = {
+                    "adapter_missing",
+                    "optimizer_state_missing",
+                    "trainer_state_missing",
+                }
+                named = next(
+                    (
+                        blocker
+                        for blocker in artifact_report["blockers"]
+                        if blocker["code"] in artifact_names
+                    ),
+                    None,
+                )
+                if named is not None:
+                    raise HTTPException(
+                        status_code = 409,
+                        detail = {
+                            "code": named["code"],
+                            "message": f"Resume blocked: {named['message']}",
+                        },
+                    )
             if not resume_run or not await asyncio.to_thread(can_resume_run, resume_run):
                 detail = "Resume checkpoint must belong to a stopped or errored run with complete saved trainer state."
                 # Only when the checkpoint itself is intact: can_resume_run refuses for several reasons, so asking
@@ -2505,6 +2640,9 @@ async def start_training(
             "eval_split": request.eval_split,
             "eval_steps": request.eval_steps,
             "early_stopping_patience": request.early_stopping_patience,
+            "early_stop_parent_run_id": request.early_stop_parent_run_id,
+            "early_stop_patience_steps": request.early_stop_patience_steps,
+            "early_stop_min_delta": request.early_stop_min_delta,
             "drafter": (
                 request.drafter.model_dump()
                 if request.drafter is not None and request.drafter.enabled
@@ -2623,6 +2761,104 @@ async def start_training(
                     "architectures)",
                     model_load_target,
                 )
+
+        from core.training import dataset_fingerprint, resume_safety
+
+        training_kwargs["dataset_fingerprint"] = await asyncio.to_thread(
+            dataset_fingerprint.fingerprint_config,
+            training_kwargs,
+        )
+        tokenizer_source = training_model_snapshot_path or model_preflight.model_local_path
+        training_kwargs["tokenizer_fingerprint"] = await asyncio.to_thread(
+            dataset_fingerprint.fingerprint_tokenizer,
+            tokenizer_source,
+        )
+
+        if request.early_stop_patience_steps > 0 or request.early_stop_parent_run_id:
+            if request.early_stop_patience_steps <= 0:
+                raise HTTPException(
+                    status_code = 422,
+                    detail = "A parent run needs early_stop_patience_steps above 0.",
+                )
+            if not request.early_stop_parent_run_id:
+                raise HTTPException(
+                    status_code = 422,
+                    detail = "Pick the parent run this run must beat.",
+                )
+            from core.training.parent_guard import parent_loss_points
+            from storage.studio_db import get_run, get_run_metrics
+
+            parent_run = await asyncio.to_thread(
+                get_run, request.early_stop_parent_run_id
+            )
+            if parent_run is None:
+                raise HTTPException(
+                    status_code = 404,
+                    detail = "The parent run for the early-stop guard no longer exists.",
+                )
+            if parent_run.get("status") == "running":
+                raise HTTPException(
+                    status_code = 422,
+                    detail = "The parent run is still training, so it has no complete loss to compare against.",
+                )
+            parent_metrics = await asyncio.to_thread(
+                get_run_metrics, request.early_stop_parent_run_id
+            )
+            parent_points = parent_loss_points(parent_metrics)
+            if not parent_points:
+                raise HTTPException(
+                    status_code = 422,
+                    detail = "The parent run recorded no loss curve, so the guard has nothing to compare against.",
+                )
+            training_kwargs["parent_guard"] = {
+                "run_id": parent_run["id"],
+                "label": parent_run.get("display_name") or parent_run["id"],
+                "points": parent_points,
+                "patience_steps": request.early_stop_patience_steps,
+                "min_delta": request.early_stop_min_delta,
+            }
+
+        if resume_output_dir and resume_run:
+            from core.training.resume import training_run_config
+
+            resume_report = await asyncio.to_thread(
+                resume_safety.evaluate_resume,
+                resume_output_dir,
+                training_run_config(resume_run),
+                training_kwargs["dataset_fingerprint"],
+                training_kwargs["tokenizer_fingerprint"],
+            )
+            if not resume_report["ok"]:
+                blocker = resume_report["blockers"][0]
+                raise HTTPException(
+                    status_code = 409,
+                    detail = {
+                        "code": blocker["code"],
+                        "message": f"Resume blocked: {blocker['message']}",
+                    },
+                )
+
+        disk_report = await asyncio.to_thread(
+            _disk_preflight_for_config,
+            training_kwargs,
+        )
+        if disk_report["status"] == "over":
+            breakdown = disk_report["breakdown"]
+            raise HTTPException(
+                status_code = 507,
+                detail = {
+                    "code": "training_disk_over_budget",
+                    "message": (
+                        f"Not enough disk for this run: about "
+                        f"{disk_report['required_gb']:.2f} GB required, "
+                        f"{disk_report['free_gb']:.2f} GB free on the outputs drive. "
+                        f"Base model {breakdown['base_weights_gb']:.2f} GB, "
+                        f"checkpoints {breakdown['checkpoints_gb']:.2f} GB, "
+                        f"final save {breakdown['final_save_gb']:.2f} GB, "
+                        f"reserve {breakdown['reserve_gb']:.2f} GB."
+                    ),
+                },
+            )
 
         # Training page has no trust_remote_code toggle.
         if not training_kwargs["trust_remote_code"]:

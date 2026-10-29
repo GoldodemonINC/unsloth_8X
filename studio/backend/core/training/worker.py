@@ -5605,12 +5605,16 @@ def _write_run_manifest(
                 "base_model": run_manifest.dataset_identity(
                     config.get("model_name") or config.get("model_path")
                 ),
-                "dataset": run_manifest.dataset_identity(
-                    config.get("dataset_snapshot_path")
-                    or config.get("hf_dataset")
-                    or config.get("uploaded_file")
-                ),
+                "dataset": {
+                    **run_manifest.dataset_identity(
+                        config.get("dataset_snapshot_path")
+                        or config.get("hf_dataset")
+                        or config.get("uploaded_file")
+                    ),
+                    "fingerprint": config.get("dataset_fingerprint"),
+                },
                 "dataset_revision": config.get("dataset_revision"),
+                "tokenizer_fingerprint": config.get("tokenizer_fingerprint"),
             },
             artifacts = {"output_dir": output_dir},
             policy = {

@@ -8,6 +8,7 @@ import { EvalLossChartCard } from "./charts/eval-loss-chart-card";
 import { GradNormChartCard } from "./charts/grad-norm-chart-card";
 import { LearningRateChartCard } from "./charts/learning-rate-chart-card";
 import { TrainingLossChartCard } from "./charts/training-loss-chart-card";
+import type { LossChartEvent } from "./charts/loss-chart-events";
 import type { TrainingChartSeries } from "./charts/types";
 import {
   MAX_RENDER_POINTS,
@@ -58,10 +59,12 @@ export function ChartsContent({
   metrics,
   isTraining,
   evalEnabled,
+  events = [],
 }: {
   metrics: TrainingChartSeries;
   isTraining: boolean;
   evalEnabled: boolean;
+  events?: readonly LossChartEvent[];
 }): ReactElement {
   const {
     windowSize,
@@ -292,6 +295,7 @@ export function ChartsContent({
         showSmoothed={showSmoothed}
         showAvgLine={showAvgLine}
         scale={lossScale}
+        events={events}
       />
       <GradNormChartCard
         data={displayGradData}

@@ -35,7 +35,7 @@ import {
   useTrainingConfigStore,
   useTrainingRuntimeStore,
 } from "@/features/training";
-import { useGpuUtilization } from "@/hooks";
+import { useGpuUtilization, useSystemInfo } from "@/hooks";
 import type { GpuUtilization } from "@/hooks/use-gpu-utilization";
 import { type TranslationKey, useT } from "@/i18n";
 import { toast } from "@/lib/toast";
@@ -58,11 +58,14 @@ import { type ReactElement, type ReactNode, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { ChartSettingsSheet } from "./charts/chart-settings-sheet";
 import {
+  formatClockTime,
   formatDuration,
   formatNumber,
+  gpuHoursConsumed,
   phaseColors,
   sessionEtaSeconds,
   sessionStepsPerSecond,
+  tokensPerSecond,
 } from "./progress-section-lib";
 import type { RunConfigOverride } from "./run-config-override";
 
@@ -165,6 +168,13 @@ export function ProgressSection({
     sessionStartStep,
     elapsed,
   );
+  const system = useSystemInfo({ enabled: !isHistorical });
+  const gpuCount = system.gpu.devices.length;
+  const throughput = tokensPerSecond(data.currentNumTokens, elapsed);
+  const gpuHours =
+    system.device_backend === "cpu" ? null : gpuHoursConsumed(elapsed, gpuCount);
+  const finishAt =
+    !isHistorical && eta != null ? formatClockTime(Date.now() + eta * 1000) : null;
   const showHalfwayHint =
     data.phase === "training" && pct >= 50 && pct < 100;
   const showCompletedHint = data.phase === "completed" && !data.isDecision;
@@ -442,6 +452,21 @@ export function ProgressSection({
             </span>
             {data.currentNumTokens != null && (
               <span>{t("studio.progress.tokens", { value: data.currentNumTokens })}</span>
+            )}
+            {throughput != null && (
+              <span>
+                {t("studio.progress.tokensPerSecond", {
+                  value: throughput.toFixed(1),
+                })}
+              </span>
+            )}
+            {finishAt != null && (
+              <span>{t("studio.progress.finishAt", { time: finishAt })}</span>
+            )}
+            {gpuHours != null && (
+              <span>
+                {t("studio.progress.gpuHours", { value: gpuHours.toFixed(2) })}
+              </span>
             )}
           </div>
         </div>

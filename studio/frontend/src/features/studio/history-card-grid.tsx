@@ -13,7 +13,17 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { fetchDeviceType, usePlatformStore } from "@/config/env";
 import { bumpInventoryVersion } from "@/features/hub";
 import type { TrainingRunSummary } from "@/features/training";
@@ -24,10 +34,12 @@ import {
   getTrainingRunDisplayTitle,
   getTrainingRunModelSubtitle,
   listTrainingRuns,
+  emitTrainingRunUpdated,
   onTrainingRunDeleted,
   onTrainingRunUpdated,
   onTrainingRunsChanged,
   shouldShowTrainingArtifactsDeleted,
+  updateTrainingRun,
   useTrainingActions,
 } from "@/features/training";
 import {
@@ -41,7 +53,11 @@ import {
 import { copyToClipboard } from "@/lib/copy-to-clipboard";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
-import { Delete02Icon } from "@hugeicons/core-free-icons";
+import {
+  Delete02Icon,
+  Search01Icon,
+  Tag01Icon,
+} from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
   type ReactElement,
@@ -251,6 +267,15 @@ export function HistoryCardGrid({
   const [deleteArtifacts, setDeleteArtifacts] = useState(false);
   const [resumeTarget, setResumeTarget] = useState<string | null>(null);
   const [manualFetchInFlight, setManualFetchInFlight] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [knownTags, setKnownTags] = useState<string[]>([]);
+  const [annotationTarget, setAnnotationTarget] =
+    useState<TrainingRunSummary | null>(null);
+  const [annotationTags, setAnnotationTags] = useState("");
+  const [annotationNotes, setAnnotationNotes] = useState("");
+  const [savingAnnotations, setSavingAnnotations] = useState(false);
+  const filtersRef = useRef<{ query?: string; tag?: string }>({});
   const { resumeTrainingRunFromHistory, startBlocked, stopRequested } =
     useTrainingActions();
   // Copy-link base: Cloudflare tunnel > LAN host:port > origin. The tunnel can now
@@ -278,10 +303,22 @@ export function HistoryCardGrid({
       setLoading(true);
       setError(null);
       try {
-        const result = await listTrainingRuns(limit, offset, controller.signal);
+        const result = await listTrainingRuns(
+          limit,
+          offset,
+          controller.signal,
+          filtersRef.current,
+        );
         if (fetchIdRef.current !== id) return;
         setRuns((prev) => (append ? [...prev, ...result.runs] : result.runs));
         setTotal(result.total);
+        setKnownTags((prev) => {
+          const next = new Set(prev);
+          for (const run of result.runs) {
+            for (const tag of run.tags ?? []) next.add(tag);
+          }
+          return [...next].sort((left, right) => left.localeCompare(right));
+        });
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (fetchIdRef.current !== id) return;
@@ -298,13 +335,17 @@ export function HistoryCardGrid({
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
+      filtersRef.current = {
+        query: query.trim() || undefined,
+        tag: activeTag ?? undefined,
+      };
       void fetchRuns(0);
-    }, 0);
+    }, 250);
     return () => {
       window.clearTimeout(timer);
       userControllerRef.current?.abort();
     };
-  }, [fetchRuns]);
+  }, [fetchRuns, query, activeTag]);
 
   useEffect(() => {
     const offUpdated = onTrainingRunUpdated((updated) => {
@@ -340,7 +381,12 @@ export function HistoryCardGrid({
       const pid = ++pollIdRef.current;
       try {
         const limit = Math.max(PAGE_SIZE, visibleCount);
-        const result = await listTrainingRuns(limit, 0, controller.signal);
+        const result = await listTrainingRuns(
+          limit,
+          0,
+          controller.signal,
+          filtersRef.current,
+        );
         if (pollIdRef.current !== pid) return; // stale poll
         setRuns(result.runs);
         setTotal(result.total);
@@ -409,30 +455,114 @@ export function HistoryCardGrid({
     }
   };
 
-  if (!loading && error && runs.length === 0) {
-    return (
-      <div
-        className="flex flex-col items-center gap-2 py-16 text-center"
-        aria-label={t("studio.history.title")}
-      >
-        <p className="text-sm text-destructive">{error}</p>
-        <Button variant="outline" size="sm" onClick={() => void fetchRuns(0)}>
-          {t("studio.history.retry")}
-        </Button>
+  const openAnnotations = (run: TrainingRunSummary) => {
+    setAnnotationTags((run.tags ?? []).join(", "));
+    setAnnotationNotes(run.notes ?? "");
+    setAnnotationTarget(run);
+  };
+
+  const saveAnnotations = async () => {
+    const target = annotationTarget;
+    if (!target) return;
+    setSavingAnnotations(true);
+    try {
+      const updated = await updateTrainingRun(target.id, {
+        tags: annotationTags
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        notes: annotationNotes.trim() ? annotationNotes.trim() : null,
+      });
+      emitTrainingRunUpdated(updated);
+      setAnnotationTarget(null);
+      toast.success(t("studio.history.annotationsSaved"));
+    } catch (err) {
+      toast.error(t("studio.history.annotationsError"), {
+        description: err instanceof Error ? err.message : undefined,
+      });
+    } finally {
+      setSavingAnnotations(false);
+    }
+  };
+
+  const hasFilters = query.trim().length > 0 || activeTag !== null;
+  const toolbar = (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1 sm:max-w-sm">
+          <HugeiconsIcon
+            icon={Search01Icon}
+            className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+          />
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("studio.history.searchPlaceholder")}
+            aria-label={t("studio.history.searchPlaceholder")}
+            className="pl-9"
+          />
+        </div>
+        <div
+          className="flex flex-wrap items-center gap-1.5"
+          role="group"
+          aria-label={t("studio.history.filterByTag")}
+        >
+          <Button
+            size="xs"
+            variant={activeTag === null ? "default" : "outline"}
+            className="h-7 px-2.5 text-ui-11"
+            aria-pressed={activeTag === null}
+            onClick={() => setActiveTag(null)}
+          >
+            {t("studio.history.allRuns")}
+          </Button>
+          {knownTags.map((tag) => (
+            <Button
+              key={tag}
+              size="xs"
+              variant={activeTag === tag ? "default" : "outline"}
+              className="h-7 px-2.5 text-ui-11"
+              aria-pressed={activeTag === tag}
+              onClick={() => setActiveTag(activeTag === tag ? null : tag)}
+            >
+              #{tag}
+            </Button>
+          ))}
+        </div>
       </div>
-    );
-  }
+    </div>
+  );
 
   if (!loading && runs.length === 0) {
     return (
-      <div
-        className="flex flex-col items-center gap-2 py-16 text-center"
-        aria-label={t("studio.history.title")}
-      >
-        <p className="text-sm text-muted-foreground">
-          {t("studio.history.emptyDescription")}
-        </p>
-      </div>
+      <>
+        {toolbar}
+        <div
+          className="flex flex-col items-center gap-2 py-16 text-center"
+          aria-label={t("studio.history.title")}
+        >
+          <p
+            className={cn(
+              "text-sm",
+              error ? "text-destructive" : "text-muted-foreground",
+            )}
+          >
+            {error ??
+              (hasFilters
+                ? t("studio.history.noMatches")
+                : t("studio.history.emptyDescription"))}
+          </p>
+          {error && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void fetchRuns(0)}
+            >
+              {t("studio.history.retry")}
+            </Button>
+          )}
+        </div>
+      </>
     );
   }
 
@@ -444,6 +574,7 @@ export function HistoryCardGrid({
 
   return (
     <div className="contents" aria-label={t("studio.history.title")}>
+      {toolbar}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3 4xl:grid-cols-4">
         {runs.map((run) => {
           const wasContinued =
@@ -495,18 +626,28 @@ export function HistoryCardGrid({
               >
                 <span
                   id={`${cardId}-status`}
-                  className="flex items-center justify-between pr-6"
+                  className="flex items-center justify-between gap-2 pr-6"
                 >
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-ui-10 font-semibold",
-                      badge.className,
-                    )}
-                  >
-                    {isRunning && <Spinner className="size-2.5" />}
-                    {formatStatusLabel(
-                      wasContinued ? "resumed_later" : run.status,
-                      t,
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <span
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-ui-10 font-semibold",
+                        badge.className,
+                      )}
+                    >
+                      {isRunning && <Spinner className="size-2.5" />}
+                      {formatStatusLabel(
+                        wasContinued ? "resumed_later" : run.status,
+                        t,
+                      )}
+                    </span>
+                    {(run.tags ?? []).length > 0 && (
+                      <span className="max-w-24 truncate rounded-full bg-[color-mix(in_oklab,var(--foreground)_calc(6%*var(--contrast-wash-gain,1)),transparent)] px-1.5 py-0.5 text-ui-10 font-medium text-muted-foreground">
+                        #{run.tags[0]}
+                        {(run.tags ?? []).length > 1
+                          ? ` +${(run.tags ?? []).length - 1}`
+                          : ""}
+                      </span>
                     )}
                   </span>
                   {artifactsMissing && (
@@ -638,6 +779,17 @@ export function HistoryCardGrid({
               {!isRunning && (
                 <button
                   type="button"
+                  className="absolute right-9 top-3 z-10 rounded-md p-1 text-muted-foreground/50 opacity-0 transition-opacity hover:bg-accent hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+                  aria-label={t("studio.history.editAnnotations")}
+                  title={t("studio.history.editAnnotations")}
+                  onClick={() => openAnnotations(run)}
+                >
+                  <HugeiconsIcon icon={Tag01Icon} className="size-3.5" />
+                </button>
+              )}
+              {!isRunning && (
+                <button
+                  type="button"
                   className="absolute right-3 top-3 z-10 rounded-md p-1 text-muted-foreground/50 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
                   aria-label={t("studio.history.deleteRun")}
                   onClick={() => setDeleteTarget(run.id)}
@@ -733,6 +885,65 @@ export function HistoryCardGrid({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+      <Dialog
+        open={annotationTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setAnnotationTarget(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("studio.history.annotationsTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("studio.history.annotationsDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-4">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">
+                {t("studio.history.tagsLabel")}
+              </span>
+              <Input
+                value={annotationTags}
+                onChange={(event) => setAnnotationTags(event.target.value)}
+                placeholder={t("studio.history.tagsPlaceholder")}
+                maxLength={400}
+              />
+              <span className="text-xs text-muted-foreground">
+                {t("studio.history.tagsHint")}
+              </span>
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">
+                {t("studio.history.notesLabel")}
+              </span>
+              <Textarea
+                value={annotationNotes}
+                onChange={(event) => setAnnotationNotes(event.target.value)}
+                placeholder={t("studio.history.notesPlaceholder")}
+                maxLength={2000}
+                className="min-h-24 rounded-xl"
+              />
+            </label>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setAnnotationTarget(null)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              onClick={() => void saveAnnotations()}
+              disabled={savingAnnotations}
+            >
+              {savingAnnotations
+                ? t("studio.history.loading")
+                : t("common.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -7,11 +7,14 @@ import {
   useTrainingRuntimeStore,
 } from "@/features/training";
 import type { TrainingViewData } from "@/features/training";
+import { detectLossAnomaly } from "@/features/training/lib/loss-anomaly";
 import { cn } from "@/lib/utils";
 import type { ReactElement } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { ChartsSection } from "./sections/charts-section";
+import { buildLossChartEvents } from "./sections/charts/loss-chart-events";
+import { FailurePostmortem } from "./sections/failure-postmortem";
 import { type AppliedLayerLr, LayerLrPanel } from "./sections/layer-lr-panel";
 import { OffloadPanel } from "./sections/offload-panel";
 import { ProgressSection } from "./sections/progress-section";
@@ -190,6 +193,22 @@ export function LiveTrainingView(): ReactElement {
     evalLossHistory: runtime.evalLossHistory,
   };
 
+  const chartEvents = useMemo(
+    () =>
+      buildLossChartEvents({
+        lrHistory: runtime.lrHistory,
+        anomalyStep: detectLossAnomaly(runtime.lossHistory)?.step ?? null,
+        resumeStep:
+          runtime.sessionStartStep > 0 ? runtime.sessionStartStep : null,
+      }),
+    [runtime.lossHistory, runtime.lrHistory, runtime.sessionStartStep],
+  );
+  const openInWizard = () => {
+    useTrainingRuntimeStore.setState((state) => ({
+      configureRequest: state.configureRequest + 1,
+    }));
+  };
+
   const isPreparingPhase =
     runtime.phase === "downloading_model" ||
     runtime.phase === "downloading_dataset" ||
@@ -211,6 +230,12 @@ export function LiveTrainingView(): ReactElement {
           showOverlay && "blur",
         )}
       >
+        {runtime.error && (
+          <FailurePostmortem
+            message={runtime.error}
+            onOpenWizard={openInWizard}
+          />
+        )}
         <div data-tour="studio-training-progress">
           <ProgressSection
             runId={runtime.jobId}
@@ -237,6 +262,7 @@ export function LiveTrainingView(): ReactElement {
           lrHistory={viewData.lrHistory}
           gradNormHistory={viewData.gradNormHistory}
           evalLossHistory={viewData.evalLossHistory}
+          events={chartEvents}
         />
       </div>
       {showOverlay ? (

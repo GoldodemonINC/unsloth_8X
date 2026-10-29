@@ -36,6 +36,7 @@ import {
   loadBenchmarks,
   runBenchmark,
 } from "../api";
+import { BenchmarkTrend } from "./benchmark-trend";
 import { LABS_PATH_INPUT_CLASS, LabsPanel } from "./labs-panel";
 
 const NOISE = 0.015;
@@ -429,6 +430,7 @@ export function BenchmarksPanel(): ReactElement {
           </h3>
           <Badge variant="outline">{records.length}</Badge>
         </div>
+        <BenchmarkTrend records={records} />
         {records.length === 0 ? (
           <p className="text-ui-11 text-muted-foreground">
             {t("labs.benchmarks.noHistory")}

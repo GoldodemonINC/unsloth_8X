@@ -151,6 +151,9 @@ export const initialTrainingConfigState: TrainingConfigState = {
     autoEvalSuites: [...DEFAULT_ADVANCED_TRAINING.autoEvalSuites],
   },
   ...DEFAULT_HYPERPARAMS,
+  earlyStopParentRunId: null,
+  earlyStopPatienceSteps: 0,
+  earlyStopMinDelta: 0,
 };
 export function hasSeparateStreamingEvalSplit(
   state: Pick<

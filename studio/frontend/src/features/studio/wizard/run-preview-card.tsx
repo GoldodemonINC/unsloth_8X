@@ -28,6 +28,7 @@ import {
   countEnabledAdvancedFeatures,
   countNonDefaultAdvancedSettings,
 } from "./advanced-settings-summary";
+import { DiskPreflightCard } from "./disk-preflight-card";
 import type { ParamMode } from "./training-param-mode";
 
 const LEARNING_RATE_ZERO_RE = /\.?0+e/;
@@ -553,6 +554,8 @@ export function RunPreviewCard({
       </section>
 
       <ResourceNoticeList notices={resourceNotices} />
+
+      <DiskPreflightCard />
 
       <TransformersUpgradeNotice />
 

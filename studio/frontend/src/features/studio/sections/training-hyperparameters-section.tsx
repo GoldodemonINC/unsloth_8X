@@ -28,6 +28,7 @@ import { ChevronDownStandardIcon } from "@/lib/chevron-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { type ReactElement, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
+import { EarlyStopParentGuard } from "./early-stop-parent-guard";
 import { ParamsRow, ParamsSliderRow } from "./params-section-controls";
 import { TrainingMemoryParams } from "./training-memory-params";
 
@@ -409,6 +410,7 @@ export function TrainingHyperparametersSection({
                 />
               </ParamsRow>
             )}
+            <EarlyStopParentGuard />
             <ParamsRow
               label={t("studio.params.seed")}
               tooltip={t("studio.params.seedTooltip")}

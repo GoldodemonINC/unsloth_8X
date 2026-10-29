@@ -12,6 +12,8 @@ export {
   useTrainingRuntimeStore,
 } from "./stores/training-runtime-store";
 export { useTrainingActions } from "./hooks/use-training-actions";
+export { useTrainingQueueDriver } from "./hooks/use-training-queue-driver";
+export { useTrainingQueueStore } from "./stores/training-queue-store";
 
 export {
   getTrainingRunDisplayTitle,
@@ -76,13 +78,21 @@ export type {
   TrainingRunMetrics,
   TrainingRunDetailResponse,
   TrainingRunDeleteResponse,
+  ResumeSafetyReport,
+  DatasetFingerprint,
 } from "./types/history";
 export {
   listTrainingRuns,
   getTrainingRun,
+  checkTrainingRunResume,
   deleteTrainingRun,
   renameTrainingRun,
+  updateTrainingRun,
   HistoryRequestError,
+} from "./api/history-api";
+export type {
+  TrainingRunFilters,
+  TrainingRunPatch,
 } from "./api/history-api";
 export {
   onTrainingRunUpdated,

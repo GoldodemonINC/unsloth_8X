@@ -37,6 +37,7 @@ import {
   findMergedFormat,
 } from "../constants";
 import { getExportLogLineClass } from "../lib/log-style";
+import { ModelCardLintCard } from "./model-card-lint-card";
 import {
   type ExportDestination,
   selectExportProgressPercent,
@@ -99,6 +100,7 @@ export interface ExportRunPanelProps {
   exportMethod: ExportMethod | null;
   quantLevels: string[];
   checkpoint: string | null;
+  modelCardPath?: string | null;
   baseModelName: string;
   isAdapter: boolean;
   destination: ExportDestination;
@@ -129,6 +131,7 @@ export function ExportRunPanel(props: ExportRunPanelProps) {
     exportMethod,
     quantLevels,
     checkpoint,
+    modelCardPath,
     baseModelName,
     isAdapter,
     destination,
@@ -411,6 +414,7 @@ export function ExportRunPanel(props: ExportRunPanelProps) {
                   </div>
                 </div>
           )}
+          <ModelCardLintCard path={modelCardPath ?? null} />
         </>
       )}
 

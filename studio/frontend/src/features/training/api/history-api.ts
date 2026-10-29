@@ -4,6 +4,7 @@
 import { authFetch } from "@/features/auth";
 import { readFastApiError } from "@/lib/format-fastapi-error";
 import type {
+  ResumeSafetyReport,
   TrainingRunDeleteResponse,
   TrainingRunDetailResponse,
   TrainingRunListResponse,
@@ -64,15 +65,28 @@ async function parseJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
+export interface TrainingRunFilters {
+  query?: string;
+  tag?: string;
+}
+
 export async function listTrainingRuns(
   limit = 50,
   offset = 0,
   signal?: AbortSignal,
+  filters: TrainingRunFilters = {},
 ): Promise<TrainingRunListResponse> {
-  const response = await authFetch(
-    `/api/train/runs?limit=${limit}&offset=${offset}`,
-    { signal },
-  );
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
+  const query = filters.query?.trim();
+  const tag = filters.tag?.trim();
+  if (query) params.set("q", query);
+  if (tag) params.set("tag", tag);
+  const response = await authFetch(`/api/train/runs?${params.toString()}`, {
+    signal,
+  });
   return parseJson<TrainingRunListResponse>(response);
 }
 
@@ -87,6 +101,17 @@ export async function getTrainingRun(
   return parseJson<TrainingRunDetailResponse>(response);
 }
 
+export async function checkTrainingRunResume(
+  runId: string,
+  signal?: AbortSignal,
+): Promise<ResumeSafetyReport> {
+  const response = await authFetch(
+    `/api/train/runs/${encodeURIComponent(runId)}/resume-check`,
+    { method: "POST", signal },
+  );
+  return parseJson<ResumeSafetyReport>(response);
+}
+
 export async function deleteTrainingRun(
   runId: string,
   options?: { deleteArtifacts?: boolean; signal?: AbortSignal },
@@ -99,19 +124,37 @@ export async function deleteTrainingRun(
   return parseJson<TrainingRunDeleteResponse>(response);
 }
 
-export async function renameTrainingRun(
+export interface TrainingRunPatch {
+  displayName?: string | null;
+  tags?: string[];
+  notes?: string | null;
+}
+
+export async function updateTrainingRun(
   runId: string,
-  displayName: string | null,
+  patch: TrainingRunPatch,
   signal?: AbortSignal,
 ): Promise<TrainingRunSummary> {
+  const body: Record<string, unknown> = {};
+  if ("displayName" in patch) body.display_name = patch.displayName;
+  if ("tags" in patch) body.tags = patch.tags;
+  if ("notes" in patch) body.notes = patch.notes;
   const response = await authFetch(
     `/api/train/runs/${encodeURIComponent(runId)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ display_name: displayName }),
+      body: JSON.stringify(body),
       signal,
     },
   );
   return parseJson<TrainingRunSummary>(response);
+}
+
+export async function renameTrainingRun(
+  runId: string,
+  displayName: string | null,
+  signal?: AbortSignal,
+): Promise<TrainingRunSummary> {
+  return updateTrainingRun(runId, { displayName }, signal);
 }

@@ -90,6 +90,7 @@ from utils.helper_precache_settings import (
     helper_model_disabled_by_env,
     set_helper_precache_enabled,
 )
+from utils.webhook_settings import get_webhook_settings, set_webhook_settings
 from utils import first_token_timeout, sandbox_memory_limit, systemone_settings, tool_result_limit
 from utils.download_transport_settings import (
     get_download_transport_mode,
@@ -761,6 +762,62 @@ class HelperPrecacheResponse(BaseModel):
     enabled: bool
     default_enabled: bool = DEFAULT_HELPER_PRECACHE_ENABLED
     disabled_by_env: bool
+
+
+class WebhookSignatureInfo(BaseModel):
+    algorithm: str
+    header: str
+    signed_content: str
+
+
+class WebhookDeliveryInfo(BaseModel):
+    delivery_id: str
+    event: str
+    run_id: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    attempts: int = 0
+    ok: bool = False
+    status_code: Optional[int] = None
+    error: Optional[str] = None
+    response: Optional[str] = None
+    duration_ms: int = 0
+    signed: bool = False
+    anomaly_kind: Optional[str] = None
+    test: bool = False
+
+
+class WebhookSettingsResponse(BaseModel):
+    enabled: bool
+    url: str
+    has_secret: bool
+    secret_unavailable: bool = False
+    signature: WebhookSignatureInfo
+    deliveries: list[WebhookDeliveryInfo] = []
+
+
+class WebhookSettingsPayload(BaseModel):
+    enabled: bool
+    url: str = Field(max_length = 2048)
+    secret: Optional[str] = Field(default = None, max_length = 512)
+
+
+class WebhookTestPayload(BaseModel):
+    url: Optional[str] = Field(default = None, max_length = 2048)
+    secret: Optional[str] = Field(default = None, max_length = 512)
+
+
+class WebhookTestResponse(BaseModel):
+    ok: bool
+    url: str
+    status_code: Optional[int] = None
+    attempts: int
+    error: Optional[str] = None
+    duration_ms: int
+    signed: bool
+    signature_header: Optional[str] = None
+    signature_verified: bool
+    delivery_id: str
 
 
 class DownloadTransportPayload(BaseModel):
@@ -1616,6 +1673,78 @@ def update_helper_precache(
             log = logger,
         ) from exc
     return _helper_precache_response(enabled)
+
+
+def _webhook_settings_response() -> WebhookSettingsResponse:
+    from core.training import webhooks
+
+    settings = get_webhook_settings()
+    return WebhookSettingsResponse(
+        **settings,
+        deliveries = webhooks.get_deliveries(),
+    )
+
+
+@_owner_settings_router.get("/webhooks", response_model = WebhookSettingsResponse)
+def get_training_webhooks(
+    current_subject: str = Depends(get_current_subject),
+) -> WebhookSettingsResponse:
+    return _webhook_settings_response()
+
+
+@_owner_settings_router.put("/webhooks", response_model = WebhookSettingsResponse)
+def update_training_webhooks(
+    payload: WebhookSettingsPayload, current_subject: str = Depends(get_current_subject)
+) -> WebhookSettingsResponse:
+    try:
+        if payload.secret is None:
+            set_webhook_settings(enabled = payload.enabled, url = payload.url)
+        else:
+            set_webhook_settings(enabled = payload.enabled, url = payload.url, secret = payload.secret)
+    except ValueError as exc:
+        raise log_and_http_error(
+            exc,
+            400,
+            str(exc),
+            event = "settings.update_webhooks_failed",
+            log = logger,
+        ) from exc
+    logger.info("settings.webhooks_updated subject=%s enabled=%s", current_subject, payload.enabled)
+    return _webhook_settings_response()
+
+
+@_owner_settings_router.post("/webhooks/test", response_model = WebhookTestResponse)
+def test_training_webhooks(
+    payload: WebhookTestPayload, current_subject: str = Depends(get_current_subject)
+) -> WebhookTestResponse:
+    from core.training import webhooks
+
+    stored = get_webhook_settings()
+    url = payload.url.strip() if isinstance(payload.url, str) and payload.url.strip() else stored["url"]
+    if not url:
+        raise HTTPException(status_code = 400, detail = "Set a webhook URL before sending a test.")
+    secret = payload.secret if payload.secret is not None else ""
+    if payload.secret is None:
+        from utils.webhook_settings import get_webhook_config
+
+        secret = get_webhook_config()["secret"]
+    try:
+        result = webhooks.send_test_event(url = url, secret = secret)
+    except ValueError as exc:
+        raise log_and_http_error(
+            exc,
+            400,
+            str(exc),
+            event = "settings.test_webhooks_failed",
+            log = logger,
+        ) from exc
+    logger.info(
+        "settings.webhooks_test subject=%s ok=%s status=%s",
+        current_subject,
+        result["ok"],
+        result["status_code"],
+    )
+    return WebhookTestResponse(**{key: result[key] for key in WebhookTestResponse.model_fields})
 
 
 def _decision_description(checkpoint, mlx: bool) -> str:

@@ -66,6 +66,32 @@ export function sessionEtaSeconds(
   return Math.round((elapsedSeconds * remaining) / sessionSteps);
 }
 
+export function formatClockTime(epochMs: number | null): string | null {
+  if (epochMs === null || !Number.isFinite(epochMs)) return null;
+  return new Date(epochMs).toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export function tokensPerSecond(
+  tokens: number | null | undefined,
+  elapsedSeconds: number | null,
+): number | null {
+  if (tokens == null || !Number.isFinite(tokens) || tokens <= 0) return null;
+  if (elapsedSeconds == null || elapsedSeconds <= 0) return null;
+  return tokens / elapsedSeconds;
+}
+
+export function gpuHoursConsumed(
+  elapsedSeconds: number | null,
+  gpuCount: number,
+): number | null {
+  if (elapsedSeconds == null || elapsedSeconds <= 0) return null;
+  if (!Number.isFinite(gpuCount) || gpuCount < 1) return null;
+  return (elapsedSeconds / 3600) * gpuCount;
+}
+
 export function formatNumber(value: number | null | undefined, digits: number): string {
   if (value == null || !Number.isFinite(value)) return "--";
   return value.toFixed(digits);

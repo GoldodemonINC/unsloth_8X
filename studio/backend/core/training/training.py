@@ -319,6 +319,8 @@ def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
         "dataset_local_path": values.get("dataset_local_path"),
         "dataset_snapshot_path": values.get("dataset_snapshot_path"),
         "dataset_revision": values.get("dataset_revision"),
+        "dataset_fingerprint": values.get("dataset_fingerprint"),
+        "tokenizer_fingerprint": values.get("tokenizer_fingerprint"),
         "local_datasets": values.get("local_datasets"),
         "local_eval_datasets": values.get("local_eval_datasets"),
         "moe_expert_scope": values.get("moe_expert_scope"),
@@ -330,6 +332,9 @@ def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
         "eval_split": values.get("eval_split"),
         "eval_steps": values.get("eval_steps", 0.00),
         "early_stopping_patience": values.get("early_stopping_patience", 0),
+        "early_stop_parent_run_id": values.get("early_stop_parent_run_id"),
+        "early_stop_patience_steps": values.get("early_stop_patience_steps", 0),
+        "early_stop_min_delta": values.get("early_stop_min_delta", 0.0),
         "drafter": values.get("drafter"),
         "dataset_streaming": values.get("dataset_streaming", False),
         "dataset_slice_start": values.get("dataset_slice_start"),
@@ -415,6 +420,14 @@ def _build_training_worker_config(values: dict[str, Any]) -> dict[str, Any]:
     # The parent's detected backend: the worker's apply_gpu_ids() uses it without probing torch.
     config["device_backend"] = device_backend
     return config
+
+
+def _build_parent_guard(payload: Optional[dict]):
+    if not payload:
+        return None
+    from .parent_guard import ParentLossGuard, ParentLossReference
+
+    return ParentLossGuard(ParentLossReference.from_payload(payload))
 
 
 _HF_TMP_CHECKPOINT_RE = re.compile(r"^tmp-checkpoint-\d+$")
@@ -1325,6 +1338,7 @@ class TrainingBackend:
         self._db_total_steps_set: bool = False
         self._db_config: Optional[dict] = None
         self._db_started_at: Optional[str] = None
+        self._parent_guard = None
 
         # Xet -> HTTP model-load fallback state (config kept for the respawn).
         self._last_full_config: Optional[dict] = None
@@ -1350,6 +1364,7 @@ class TrainingBackend:
             getattr(self, name).clear()
         self.current_job_id = self.current_start_request_id = None
         self._status_start_request_id = self._output_dir = None
+        self._parent_guard = None
         self.eval_enabled = False
 
     def _require_start_request_account(self, start_request_id):
@@ -1763,6 +1778,7 @@ class TrainingBackend:
         # Reserve before lifecycle locking and validation: routes call start_training from worker threads,
         # so this compare-and-set stops two requests reaching the spawn.
         debug_simulated = bool(kwargs.pop("debug_simulated", False))
+        parent_guard_payload = kwargs.pop("parent_guard", None)
         # A simulated run names no model, dataset or output path, so there is nothing to validate.
         if not debug_simulated:
             validate_job_paths(kwargs, cached_resources = True)
@@ -1790,6 +1806,7 @@ class TrainingBackend:
                     start_request_id = start_request_id,
                     spawn_already_reserved = True,
                     debug_simulated = debug_simulated,
+                    parent_guard_payload = parent_guard_payload,
                     **kwargs,
                 )
 
@@ -1802,6 +1819,7 @@ class TrainingBackend:
         start_request_id: Optional[str] = None,
         spawn_already_reserved: bool = False,
         debug_simulated: bool = False,
+        parent_guard_payload: Optional[dict] = None,
         **kwargs,
     ) -> bool:
         """Spawn a subprocess to run the full training pipeline. All kwargs are serialized into a
@@ -1836,6 +1854,7 @@ class TrainingBackend:
         # Clear a stale crash flag so the watchdog can't treat this fresh setup as a death.
         self._pump_running = False
 
+        parent_guard = None
         if debug_simulated:
             from .debug_simulation import simulated_worker_config
 
@@ -1846,6 +1865,7 @@ class TrainingBackend:
             hf_token = hf_token_arg(
                 config["hf_token"], allow_ambient_token = config.get("allow_ambient", True)
             )
+            parent_guard = _build_parent_guard(parent_guard_payload)
 
             _apply_cache_pins(config)
             from .provenance import initialize_resource_provenance
@@ -2093,6 +2113,7 @@ class TrainingBackend:
             self._db_total_steps_set = False
             self._db_config = _sanitize_db_config(config)
             self._db_started_at = datetime.now(timezone.utc).isoformat()
+            self._parent_guard = parent_guard
             # Start each job Xet-first; keep config so a stall can respawn over HTTP.
             self._last_full_config = config
             self._last_hf_cache_env = cache_env
@@ -3531,6 +3552,17 @@ class TrainingBackend:
         elif db_action == "finalize":
             self._finalize_run_in_db(**db_action_kwargs)
 
+        if etype in ("complete", "error") and not self._db_run_created:
+            status = db_action_kwargs.get("status") or (
+                "completed" if etype == "complete" else "error"
+            )
+            self._dispatch_terminal_webhook(
+                run_id = db_action_kwargs.get("expected_job_id") or self.current_job_id,
+                status = status,
+                error_message = db_action_kwargs.get("error_message"),
+                output_dir = db_action_kwargs.get("output_dir") or self._output_dir,
+            )
+
         # Bound how long a worker that will not exit can hold the UI at 100%. Outside the lock:
         # _start_stop_watchdog takes it and it is not reentrant.
         if etype in ("complete", "error"):
@@ -3542,7 +3574,127 @@ class TrainingBackend:
             )
 
         if etype == "progress":
+            self._observe_webhook_progress(event)
             self._log_training_progress()
+
+    def _observe_webhook_progress(self, event: dict) -> None:
+        run_id = self.current_job_id
+        raw_loss = event.get("loss")
+        if not run_id or raw_loss is None:
+            return
+        try:
+            loss = float(raw_loss)
+        except (TypeError, ValueError):
+            return
+        metrics = {
+            "step": event.get("step"),
+            "loss": loss if math.isfinite(loss) else None,
+            "total_steps": event.get("total_steps", self._progress.total_steps),
+            "epoch": event.get("epoch"),
+            "duration_seconds": event.get("elapsed_seconds"),
+            "eval_loss": event.get("eval_loss"),
+            "peak_memory_gb": self._progress.peak_memory_gb,
+        }
+        try:
+            from core.training import webhooks
+
+            webhooks.observe_progress(
+                run_id = run_id,
+                step = event.get("step"),
+                loss = loss,
+                metrics = metrics,
+                parent_guard = self._parent_guard,
+            )
+            guard = self._parent_guard
+            if guard is not None and guard.triggered:
+                self._request_parent_guard_stop(guard.signal)
+        except Exception:
+            logger.warning("Training webhook anomaly check failed", exc_info = True)
+
+    def _request_parent_guard_stop(self, signal: Optional[dict]) -> None:
+        if not signal:
+            return
+        with self._lock:
+            run_id = self.current_job_id
+            if (
+                not run_id
+                or self._should_stop
+                or self._cancel_requested
+                or self._run_finished_locked()
+            ):
+                return
+            self._should_stop = True
+            self._needs_xet_respawn = False
+            self._progress.status_message = (
+                f"Early stop: loss did not beat parent run {signal['parent_label']} "
+                f"within {signal['patience_steps']} steps"
+            )
+            stop_queue = self._stop_queue
+        if stop_queue is not None:
+            try:
+                stop_queue.put({"type": "stop", "save": True})
+            except (OSError, ValueError):
+                pass
+        logger.info(
+            "Parent guard stopping run %s at step %s: loss %.6f did not beat %s "
+            "(step %s, loss %.6f) within %s steps",
+            run_id,
+            signal["step"],
+            signal["loss"],
+            signal["parent_label"],
+            signal["parent_step"],
+            signal["parent_loss"],
+            signal["patience_steps"],
+        )
+        self._start_stop_watchdog(cancel = False, expected_job_id = run_id)
+
+    def _dispatch_terminal_webhook(
+        self,
+        *,
+        run_id: Optional[str],
+        status: str,
+        error_message: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        final_step: Optional[int] = None,
+        final_loss: Optional[float] = None,
+        duration: Optional[float] = None,
+        loss_history: Optional[list] = None,
+    ) -> None:
+        try:
+            from core.training import webhooks
+
+            series = loss_history if loss_history is not None else self.loss_history
+            finite = [float(value) for value in series if isinstance(value, (int, float))]
+            finite = [value for value in finite if math.isfinite(value)]
+            last_eval = self.eval_loss_history[-1] if self.eval_loss_history else None
+            loss = final_loss if final_loss is not None else self._progress.loss
+            if loss is not None and not math.isfinite(loss):
+                loss = None
+            learning_rate = self._progress.learning_rate
+            if learning_rate is not None and not math.isfinite(learning_rate):
+                learning_rate = None
+            metrics = {
+                "step": int(final_step if final_step is not None else self._progress.step or 0),
+                "loss": loss,
+                "eval_loss": last_eval,
+                "best_loss": min(finite) if finite else None,
+                "total_steps": int(self._progress.total_steps or 0),
+                "epoch": self._progress.epoch,
+                "learning_rate": learning_rate,
+                "duration_seconds": (
+                    duration if duration is not None else self._progress.elapsed_seconds
+                ),
+                "peak_memory_gb": self._progress.peak_memory_gb,
+            }
+            webhooks.notify_terminal(
+                run_id = run_id,
+                status = {"error": "failed"}.get(status, status),
+                metrics = metrics,
+                output_dir = output_dir,
+                error_message = error_message,
+            )
+        except Exception:
+            logger.warning("Training webhook dispatch failed", exc_info = True)
 
     def _persist_output_dir(self) -> None:
         # Re-queue the claimed batch at the front so it retries on the next flush.
@@ -3731,7 +3883,7 @@ class TrainingBackend:
                         resume_blocked = resume_blocked,
                         config_json = config_json,
                     )
-                    return
+                    break
                 except Exception:
                     if attempt + 1 < _DB_FINALIZE_RETRIES:
                         time.sleep(_DB_FINALIZE_RETRY_S)
@@ -3744,6 +3896,16 @@ class TrainingBackend:
                         status,
                         exc_info = True,
                     )
+            self._dispatch_terminal_webhook(
+                run_id = run_id,
+                status = status,
+                error_message = error_message,
+                output_dir = None if clear_output_dir else output_dir,
+                final_step = final_step,
+                final_loss = final_loss,
+                duration = duration,
+                loss_history = loss_history,
+            )
 
     def _flush_metrics_to_db(self, run_id: Optional[str] = None) -> None:
         """Flush buffered metrics to the DB and update live progress. The target run id,

@@ -1,0 +1,118 @@
+{
+  "caseTable": "loss anomaly window parity",
+  "segmentRule": "count+value repeats a value; count+from+to ramps inclusively; values appends explicit points",
+  "cases": [
+    {
+      "name": "spike after the old window boundary",
+      "why": "A spike at step 2001 must still alert; the old 2000-point buffer stopped checking once it filled.",
+      "segments": [
+        {
+          "count": 2000,
+          "value": 0.1
+        },
+        {
+          "values": [20.0]
+        },
+        {
+          "count": 10,
+          "value": 0.1
+        }
+      ],
+      "chart": {
+        "kind": "spike",
+        "severity": "warning",
+        "step": 2001
+      },
+      "alert": {
+        "kind": "spike",
+        "severity": "warning",
+        "step": 2001,
+        "fired_at": 2008,
+        "count": 1
+      }
+    },
+    {
+      "name": "spike between two checks",
+      "why": "A spike on a non-check step is delayed to the next check, not lost.",
+      "segments": [
+        {
+          "count": 28,
+          "value": 0.1
+        },
+        {
+          "values": [20.0]
+        },
+        {
+          "count": 9,
+          "value": 0.1
+        }
+      ],
+      "chart": {
+        "kind": "spike",
+        "severity": "warning",
+        "step": 29
+      },
+      "alert": {
+        "kind": "spike",
+        "severity": "warning",
+        "step": 29,
+        "fired_at": 38,
+        "count": 1
+      }
+    },
+    {
+      "name": "divergence cut by the old window",
+      "why": "The full history diverges while the last 2000 points look like a flat plateau.",
+      "segments": [
+        {
+          "count": 5000,
+          "value": 0.1
+        },
+        {
+          "count": 3000,
+          "from": 0.1,
+          "to": 0.4
+        },
+        {
+          "count": 2000,
+          "value": 0.4
+        }
+      ],
+      "chart": {
+        "kind": "divergence",
+        "severity": "critical",
+        "step": 10000
+      },
+      "alert": {
+        "kind": "divergence",
+        "severity": "critical",
+        "step": 6308,
+        "fired_at": 6308,
+        "count": 1
+      },
+      "oldWindowKind": "plateau"
+    },
+    {
+      "name": "converged tail after an early plateau",
+      "why": "The plateau alerts once while it is true; the final chart is clean and the alert must not repeat.",
+      "segments": [
+        {
+          "count": 48,
+          "value": 0.8
+        },
+        {
+          "count": 5000,
+          "value": 0.05
+        }
+      ],
+      "chart": null,
+      "alert": {
+        "kind": "plateau",
+        "severity": "warning",
+        "step": 48,
+        "fired_at": 48,
+        "count": 1
+      }
+    }
+  ]
+}

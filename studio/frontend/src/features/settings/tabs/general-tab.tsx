@@ -84,6 +84,7 @@ import { NotificationFrequencySelect } from "../components/notification-frequenc
 import { SettingsRow } from "../components/settings-row";
 import { SettingsSection } from "../components/settings-section";
 import { StudioVersionSection } from "../components/studio-version-section";
+import { WebhookSettingsSection } from "../components/webhook-settings-section";
 import { useDesktopBooleanSetting } from "../hooks/use-desktop-boolean-setting";
 import { KEYBOARD_SHORTCUTS_STORAGE_KEY } from "../stores/keyboard-shortcuts-store";
 import { INTERFACE_SCALE_STORAGE_KEY } from "../stores/interface-scale-store";
@@ -836,6 +837,8 @@ export function GeneralTab() {
           />
         </SettingsRow>
       </SettingsSection>
+
+      <WebhookSettingsSection />
         </>
       ) : null}
 

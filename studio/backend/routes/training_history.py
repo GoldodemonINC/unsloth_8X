@@ -35,6 +35,7 @@ from storage.studio_db import (
     list_other_run_output_dirs,
     list_runs,
     update_run_display_name,
+    update_run_metadata,
 )
 from utils.models.checkpoints import has_preview_model, preview_ref
 from utils.paths import outputs_root, resolve_output_dir
@@ -273,12 +274,14 @@ def _purge_staged_output_dir(run_id: str, original: Path, staged: Path) -> bool:
 async def list_training_runs(
     limit: int = Query(50, ge = 1, le = 200),
     offset: int = Query(0, ge = 0),
+    q: Optional[str] = Query(None, max_length = 200),
+    tag: Optional[str] = Query(None, max_length = 32),
     current_subject: str = Depends(get_current_subject),
     no_credential: bool = Depends(authenticated_without_credential),
     via_api_key: bool = Depends(authenticated_via_api_key),
 ):
     """List training runs, newest first."""
-    result = list_runs(limit = limit, offset = offset)
+    result = list_runs(limit = limit, offset = offset, query = q, tag = tag)
     sharing_on = get_preview_sharing_enabled() and not no_credential
     runs = await asyncio.to_thread(
         _summaries_from_rows,
@@ -335,6 +338,103 @@ async def get_training_run_detail(
     )
 
 
+@router.get("/runs/{run_id}/model-card/lint")
+async def lint_training_run_model_card(
+    run_id: str,
+    current_subject: str = Depends(get_current_subject),
+    via_api_key: bool = Depends(authenticated_via_api_key),
+) -> dict:
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")
+    output_dir = run.get("output_dir")
+    if not output_dir:
+        report = {
+            "card_found": False,
+            "source_path": None,
+            "reason": "This run has no saved output directory to read a model card from.",
+            "ok": False,
+            "missing": ["base_model", "license", "dataset", "evaluation"],
+            "checks": [
+                {"id": check_id, "status": "missing", "evidence": None}
+                for check_id in ("base_model", "license", "dataset", "evaluation")
+            ],
+        }
+    else:
+        resolved = _canonical_output_dir(output_dir)
+        if resolved is None:
+            raise HTTPException(
+                status_code = 400,
+                detail = "The run output directory is outside the outputs folder.",
+            )
+        from core.training.model_card_lint import lint_model_card_path
+
+        report = await asyncio.to_thread(lint_model_card_path, resolved)
+    from hub.utils.host_paths import redact_host_paths
+
+    return redact_host_paths(report, via_api_key = via_api_key)
+
+
+@router.get("/model-card/lint")
+async def lint_checkpoint_model_card(
+    path: str = Query(..., min_length = 1, max_length = 4096),
+    current_subject: str = Depends(get_current_subject),
+    via_api_key: bool = Depends(authenticated_via_api_key),
+) -> dict:
+    resolved = _canonical_output_dir(path)
+    if resolved is None:
+        raise HTTPException(
+            status_code = 400,
+            detail = "The checkpoint path is outside the outputs folder.",
+        )
+    from core.training.model_card_lint import lint_model_card_path
+
+    report = await asyncio.to_thread(lint_model_card_path, resolved)
+    from hub.utils.host_paths import redact_host_paths
+
+    return redact_host_paths(report, via_api_key = via_api_key)
+
+
+@router.post("/runs/{run_id}/resume-check")
+async def check_training_run_resume(
+    run_id: str,
+    current_subject: str = Depends(get_current_subject),
+    via_api_key: bool = Depends(authenticated_via_api_key),
+) -> dict:
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")
+    if run.get("status") == "running":
+        raise HTTPException(status_code = 409, detail = "A running run cannot be resumed")
+
+    from core.training import dataset_fingerprint, resume_safety
+    from core.training.resume import training_run_config
+
+    config = training_run_config(run)
+    current_dataset = await asyncio.to_thread(
+        dataset_fingerprint.fingerprint_config,
+        config,
+    )
+    current_tokenizer = await asyncio.to_thread(
+        dataset_fingerprint.fingerprint_tokenizer,
+        config.get("model_snapshot_path") or config.get("model_local_path"),
+    )
+    report = await asyncio.to_thread(
+        resume_safety.evaluate_resume,
+        run.get("output_dir"),
+        config,
+        current_dataset,
+        current_tokenizer,
+    )
+    report["run_id"] = run_id
+    report["stored_dataset_fingerprint"] = config.get("dataset_fingerprint")
+    report["stored_tokenizer_fingerprint"] = config.get("tokenizer_fingerprint")
+
+    from hub.utils.host_paths import redact_host_paths
+
+    return redact_host_paths(report, via_api_key = via_api_key)
+
+
 @router.patch("/runs/{run_id}", response_model = TrainingRunSummary)
 async def update_training_run(
     run_id: str,
@@ -343,7 +443,7 @@ async def update_training_run(
     no_credential: bool = Depends(authenticated_without_credential),
     via_api_key: bool = Depends(authenticated_via_api_key),
 ):
-    """Update mutable fields on a training run (currently only display_name)."""
+    """Update mutable fields on a training run: display name, tags and notes."""
     run = get_run(run_id)
     if run is None:
         raise HTTPException(status_code = 404, detail = f"Run {run_id} not found")
@@ -353,6 +453,15 @@ async def update_training_run(
         if next_display is not None:
             next_display = next_display.strip() or None
         update_run_display_name(run_id, next_display)
+
+    annotations: dict = {}
+    if "tags" in payload.model_fields_set:
+        annotations["tags"] = json.dumps(payload.tags or [], ensure_ascii = False)
+    if "notes" in payload.model_fields_set:
+        next_notes = (payload.notes or "").strip()
+        annotations["notes"] = next_notes or None
+    if annotations:
+        update_run_metadata(run_id, annotations)
 
     refreshed = get_run(run_id)
     if refreshed is None:

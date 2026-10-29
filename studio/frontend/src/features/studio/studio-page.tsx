@@ -26,7 +26,9 @@ import { HistoricalTrainingView } from "./historical-training-view";
 import { HistoryCardGrid } from "./history-card-grid";
 import { useTrainingCacheReconciliation } from "./hooks/use-training-cache-reconciliation";
 import { LiveTrainingView } from "./live-training-view";
+import { RunComparisonBoard } from "./run-comparison-board";
 import { DatasetPreviewDialog } from "./sections/dataset-preview-dialog";
+import { TrainingQueueCard } from "./sections/training-queue-card";
 import { StudioModeNav } from "./studio-mode-nav";
 import { TrainSubNav } from "./studio-navigation";
 import {
@@ -264,6 +266,9 @@ export function StudioPage(): ReactElement {
                         />
                       </div>
                     </div>
+                    <div className="mt-8">
+                      <TrainingQueueCard />
+                    </div>
                   </div>
                 </TabsContent>
                 <TabsContent value="current-run" className="mt-0">
@@ -285,6 +290,9 @@ export function StudioPage(): ReactElement {
                       onResumeStarted={handleResumeStarted}
                     />
                   )}
+                </TabsContent>
+                <TabsContent value="compare" className="mt-0">
+                  <RunComparisonBoard />
                 </TabsContent>
               </>
             )}

@@ -33,6 +33,7 @@ export function TrainSubNav({
       disabled: !showTrainingView,
     },
     { value: "history", label: t("studio.tabs.history"), disabled: false },
+    { value: "compare", label: t("studio.tabs.compare"), disabled: false },
   ];
   return (
     <TabsList
