@@ -12,11 +12,11 @@ def test_a_written_manifest_carries_the_license_and_a_notice(tmp_path: Path) -> 
 
     document = run_manifest.read_manifest(tmp_path)
     assert document is not None
-    assert document["license"]["name"] == "NRC-2"
+    assert document["license"]["name"] == "NRC-3"
     assert document["license"]["upstream_unchanged"] is True
 
     notice = (tmp_path / nrc_license.LICENSE_FILE).read_text(encoding = "utf-8")
-    assert "NRC-2" in notice
+    assert "NRC-3" in notice
     assert "rebranded" in notice.lower()
     assert "at scale" in notice
     assert "keep that source's license" in notice
@@ -69,5 +69,5 @@ def test_a_saved_custom_pipeline_carries_the_license(
         {"name": "two merges", "source": "model", "stages": []}
     )
 
-    assert record["license"]["name"] == "NRC-2"
+    assert record["license"]["name"] == "NRC-3"
     assert (tmp_path / nrc_license.LICENSE_FILE).is_file()

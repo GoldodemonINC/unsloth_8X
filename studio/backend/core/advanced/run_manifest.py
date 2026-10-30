@@ -339,7 +339,7 @@ def manifest_path(directory: str | Path) -> Path:
 def write_manifest(directory: str | Path, manifest: Mapping[str, Any]) -> Path:
     """Write the manifest atomically, so a reader never sees a half document.
 
-    Every produced folder also gets the NRC-2 notice beside its weights: the
+    Every produced folder also gets the NRC-3 notice beside its weights: the
     manifest already travels with the run, and the notice is what a reader sees
     without opening JSON. A stage that supplies its own ``license`` block keeps
     it; only a missing one is filled in.

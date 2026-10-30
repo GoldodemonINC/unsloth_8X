@@ -1,7 +1,7 @@
-# SPDX-License-Identifier: NRC-2
-# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
+# SPDX-License-Identifier: NRC-3
+# Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-3.md
 
-"""The NRC-2 notice that travels with a produced checkpoint.
+"""The NRC-3 notice that travels with a produced checkpoint.
 
 A finished merge or expansion is a folder that leaves this machine, and by then
 nothing in it says what the terms are. ``run_manifest.json`` already records the
@@ -19,16 +19,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-LICENSE_NAME = "NRC-2"
-LICENSE_VERSION = "2.0"
+LICENSE_NAME = "NRC-3"
+LICENSE_VERSION = "1.0"
 LICENSE_TITLE = "Non-Rebranding Commons"
-LICENSE_FILE = "LICENSE-NRC-2.txt"
-LICENSE_DOCUMENT = "LICENSE-NRC-2.md"
+LICENSE_FILE = "LICENSE-NRC-3.txt"
+LICENSE_DOCUMENT = "LICENSE-NRC-3.md"
 
-NOTICE_TEXT = """NRC-2 License 2.0 (Non-Rebranding Commons)
+NOTICE_TEXT = """NRC-3 License 1.0 (Non-Rebranding Commons)
 X8 / Unsloth Studio
 
-This folder was produced by X8. The NRC-2 terms cover the X8 original
+This folder was produced by X8. The NRC-3 terms cover the X8 original
 additions and this run record. Weights, tokenizers and datasets inherited from
 a source checkpoint or dataset keep that source's license; nothing here
 relicenses them.
@@ -36,20 +36,25 @@ relicenses them.
 You may:
   - use, modify and self-host this freely, including commercially and inside a
     company, with no fee and no permission;
-  - share it, including modified copies, if you keep this notice and say what
-    you changed;
-  - publish your changes, teach with it, write about it and mirror it for
-    research.
+  - share it, including modified copies, if you keep this notice and the file
+    headers and say what you changed;
+  - publish your changed source, teach with it, write about it and mirror it
+    for research.
 
 You may not, without written permission:
-  - present a rebranded copy as your own product under a different name, logo
-    or separate interface;
-  - redistribute it to the public at scale from a company, whether through a
-    package registry, an app store, a hosted service or a shipped product;
-  - stack more than three licenses onto a public distribution of it. This
-    license counts as one of the three, so a fourth needs permission.
+  - present a rebranded copy as your own product, under a different name, logo
+    or interface, or under the project's name with a qualifier that suggests it
+    is an official version;
+  - run it as a hosted service for other people, whether or not you charge for
+    it;
+  - distribute packaged builds to the public at scale, or include it in a
+    product or service you sell;
+  - strip this notice, a file header, or the license block in
+    run_manifest.json;
+  - call a copy official or endorsed, or attribute results to the project that
+    it did not produce.
 
-The full terms are in LICENSE-NRC-2.md at the project root. This notice is a
+The full terms are in LICENSE-NRC-3.md at the project root. This notice is a
 summary; where the two differ, the document governs.
 """
 

@@ -17,7 +17,7 @@ The upstream project is the fastest way to fine-tune open models on one GPU. Thi
 | **Fit check** | Sizes a run from the card before anything starts, so an out-of-memory job is caught at plan time. |
 | **Labs engines** | CMT, Scale-before-training, Benchmarks, Artifacts, Pipelines, the shrink repair preset and Cleanup — each backed by tests, behind a single switch. |
 | **Run records** | Every merge, scale, CMT and pipeline output writes `run_manifest.json` and a copy of the license notice beside the checkpoint. |
-| **Licensing** | Additions original to this fork are under [NRC-2](LICENSE-NRC-2.md); inherited code keeps its upstream license. |
+| **Licensing** | Additions original to this fork are under [NRC-3](LICENSE-NRC-3.md); inherited code keeps its upstream license. |
 
 ### The two Scaler directions
 
@@ -140,11 +140,11 @@ This repository carries three sets of terms, and they do not overlap:
 
 - **Unsloth Core** (`unsloth/`) is **Apache-2.0**, as inherited from upstream.
 - **The Studio application** (`studio/`) is **AGPL-3.0** — see [studio/LICENSE.AGPL-3.0](studio/LICENSE.AGPL-3.0).
-- **Original additions in this fork** — the Labs engines, the trainer surface and the run records — are under **[NRC-2](LICENSE-NRC-2.md)**. Files that carry the `NRC-2` header are the ones covered; the Scaler lives in upstream-licensed files and keeps those terms.
+- **Original additions in this fork** — the Labs engines, the trainer surface and the run records — are under **[NRC-3](LICENSE-NRC-3.md)**. Files that carry the `NRC-3` header are the ones covered; the Scaler lives in upstream-licensed files and keeps those terms.
 
-NRC-2 permits private, internal and commercial use, modification, and sharing with attribution. It reserves three things: relaunching the work as a rebranded product with its own name, logo or separate interface, broad public distribution of it (or a modified copy) at scale from a company, and stacking more than three licenses onto a public distribution of it — this license counts as one of the three. Code inherited from upstream, and every model weight, tokenizer or dataset, keeps whatever license came with it.
+NRC-3 permits private, internal and commercial use, modification, and sharing with attribution. It reserves five things, and each needs written permission: relaunching the work as a rebranded product (a different name, logo or interface, a near-miss name, or an "official" claim), running it as a hosted service for other people, public distribution of packaged builds at scale — by a person or a company, not only a company — folding it into a product or service you sell, and stripping its notices or relicensing it. Publishing your changed source on a code host stays allowed. Code inherited from upstream, and every model weight, tokenizer or dataset, keeps whatever license came with it, and this license adds nothing to those parts.
 
-Produced checkpoints carry a `LICENSE-NRC-2.txt` beside their `run_manifest.json`, so a folder keeps those terms wherever it is copied.
+Produced checkpoints carry a `LICENSE-NRC-3.txt` beside their `run_manifest.json`, so a folder keeps those terms wherever it is copied.
 
 ---
 

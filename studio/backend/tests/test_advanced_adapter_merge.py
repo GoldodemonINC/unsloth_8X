@@ -1,5 +1,5 @@
-# SPDX-License-Identifier: NRC-2
-# Copyright 2026-present the X8 authors. See /LICENSE-NRC-2.md
+# SPDX-License-Identifier: NRC-3
+# Copyright 2026-present the X8 authors. See /LICENSE-NRC-3.md
 
 """Tests for merging LoRA adapters.
 

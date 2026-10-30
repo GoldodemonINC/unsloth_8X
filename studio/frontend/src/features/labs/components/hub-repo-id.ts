@@ -1,5 +1,5 @@
-// SPDX-License-Identifier: NRC-2
-// Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-2.md
+// SPDX-License-Identifier: NRC-3
+// Copyright 2026-present the X8 authors. All rights reserved. See /LICENSE-NRC-3.md
 
 /** `owner/name`, the only shape the Hub resolves as a repository. */
 export const REPO_ID_RE =
