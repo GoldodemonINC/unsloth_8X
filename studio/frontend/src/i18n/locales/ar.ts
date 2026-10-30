@@ -1768,6 +1768,16 @@ export const ar = {
         loadError: "فشل تحميل إعدادات نموذج LLM المساعد.",
         saveError: "فشل حفظ إعدادات نموذج LLM المساعد.",
       },
+      webhooks: {
+        failureInvalid: "عنوان نهاية غير صالح",
+        failureUnresolvable: "تعذّر حل اسم المضيف",
+        failureBlocked: "يُحل المضيف إلى عنوان محظور",
+        failureProxy: "اعتراض الطلب عبر وسيط",
+        failureCertificate: "رُفض شهادة TLS",
+        failureHttp: "أعاد الخادم حالة خطأ",
+        failureTransport: "فشل الاتصال أو انتهت المهلة",
+        failureOther: "فشلت العملية",
+      },
       modelAutoSwitch: {
         sectionTitle: "التبديل التلقائي للنموذج (OpenAI API)",
         enable: "تبديل النموذج حسب الطلب",

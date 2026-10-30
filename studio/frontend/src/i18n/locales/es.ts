@@ -1779,6 +1779,16 @@ export const es = {
         loadError: "No se pudo cargar la configuración del LLM auxiliar.",
         saveError: "No se pudo guardar la configuración del LLM auxiliar.",
       },
+      webhooks: {
+        failureInvalid: "URL del endpoint no válida",
+        failureUnresolvable: "No se pudo resolver el nombre del host",
+        failureBlocked: "El host resuelve a una dirección bloqueada",
+        failureProxy: "Un proxy interceptó la solicitud",
+        failureCertificate: "Certificado TLS rechazado",
+        failureHttp: "El servidor respondió con un estado de error",
+        failureTransport: "La conexión falló o expiró",
+        failureOther: "Entrega fallida",
+      },
       modelAutoSwitch: {
         sectionTitle: "Cambio automático de modelo (API de OpenAI)",
         enable: "Cambiar de modelo según la solicitud",

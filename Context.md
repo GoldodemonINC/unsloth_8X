@@ -85,7 +85,10 @@ IPv4-mapped IPv6 is unmapped first.
 **Classification reaches API consumers.** `WebhookDeliveryInfo` in
 `studio/backend/routes/settings.py` projects `failure_kind`, so
 `GET /api/settings/webhooks` distinguishes a certificate failure from a timeout in
-JSON. No UI consumes it yet and no text is special-cased in the frontend.
+JSON, and the delivery history consumes it: `webhook-settings-section.tsx`
+renders the wording for the row's kind (`settings.general.webhooks.failureInvalid`
+… `failureTransport`, present in every locale), an unknown or absent kind falls
+back to the raw `error`, and a failure with neither falls back to `failureOther`.
 
 **The suite states each behavior once.** `test_webhooks.py` is written as a contract:
 repeated cases became parametrized tables with one row per case — the four delivery

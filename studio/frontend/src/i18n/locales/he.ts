@@ -1865,6 +1865,16 @@ export const he = {
         loadError: "טעינת הגדרות מודל העזר נכשלה.",
         saveError: "שמירת הגדרות מודל העזר נכשלה.",
       },
+      webhooks: {
+        failureInvalid: "כתובת ה-URL של היעד אינה חוקית",
+        failureUnresolvable: "לא ניתן היה לפתור את שם המארח",
+        failureBlocked: "המארח מפנה לכתובת חסומה",
+        failureProxy: "מתווך חטף את הבקשה",
+        failureCertificate: "אישור ה-TLS נדחה",
+        failureHttp: "השרת השיב במצב שגיאה",
+        failureTransport: "החיבור נכשל או פג הזמן",
+        failureOther: "המסירה נכשלה",
+      },
       modelAutoSwitch: {
         sectionTitle: "החלפת מודל אוטומטית (OpenAI API)",
         enable: "החלף מודל לפי בקשה",

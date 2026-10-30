@@ -1764,6 +1764,16 @@ export const ja = {
         loadError: "Helper LLM 設定の読み込みに失敗しました。",
         saveError: "Helper LLM 設定の保存に失敗しました。",
       },
+      webhooks: {
+        failureInvalid: "エンドポイント URL が無効です",
+        failureUnresolvable: "ホスト名を解決できませんでした",
+        failureBlocked: "ホストがブロックされたアドレスに解決されます",
+        failureProxy: "プロキシがリクエストを傍受しました",
+        failureCertificate: "TLS 証明書が拒否されました",
+        failureHttp: "サーバーがエラーステータスで応答しました",
+        failureTransport: "接続に失敗したかタイムアウトしました",
+        failureOther: "配信に失敗しました",
+      },
       modelAutoSwitch: {
         sectionTitle: "モデル自動切り替え (OpenAI API)",
         enable: "リクエストごとにモデルを切り替え",

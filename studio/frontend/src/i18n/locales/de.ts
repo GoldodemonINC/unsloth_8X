@@ -1782,6 +1782,16 @@ export const de = {
         saveError:
           "Helfer-LLM-Einstellungen konnten nicht gespeichert werden.",
       },
+      webhooks: {
+        failureInvalid: "Ungültige Endpunkt-URL",
+        failureUnresolvable: "Hostname konnte nicht aufgelöst werden",
+        failureBlocked: "Hostname löst in eine gesperrte Adresse auf",
+        failureProxy: "Proxy hat die Anfrage abgefangen",
+        failureCertificate: "TLS-Zertifikat abgelehnt",
+        failureHttp: "Server hat mit einem Fehlerstatus geantwortet",
+        failureTransport: "Verbindung fehlgeschlagen oder Zeitüberschreitung",
+        failureOther: "Zustellung fehlgeschlagen",
+      },
       modelAutoSwitch: {
         sectionTitle: "Automatischer Modellwechsel (OpenAI API)",
         enable: "Modell je Anfrage wechseln",

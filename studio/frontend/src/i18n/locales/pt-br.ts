@@ -1775,6 +1775,16 @@ export const ptBR = {
         loadError: "Falha ao carregar as configurações do LLM Auxiliar.",
         saveError: "Falha ao salvar as configurações do LLM Auxiliar.",
       },
+      webhooks: {
+        failureInvalid: "URL do endpoint inválida",
+        failureUnresolvable: "Não foi possível resolver o nome do host",
+        failureBlocked: "O host resolve para um endereço bloqueado",
+        failureProxy: "Um proxy interceptou a solicitação",
+        failureCertificate: "Certificado TLS rejeitado",
+        failureHttp: "O servidor respondeu com um status de erro",
+        failureTransport: "A conexão falhou ou expirou",
+        failureOther: "Entrega falhou",
+      },
       modelAutoSwitch: {
         sectionTitle: "Troca automática de modelo (API OpenAI)",
         enable: "Trocar de modelo por requisição",

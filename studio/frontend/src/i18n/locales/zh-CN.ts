@@ -1751,6 +1751,16 @@ export const zhCN = {
         loadError: "加载辅助 LLM 设置失败。",
         saveError: "保存辅助 LLM 设置失败。",
       },
+      webhooks: {
+        failureInvalid: "端点 URL 无效",
+        failureUnresolvable: "无法解析主机名",
+        failureBlocked: "主机解析到被阻止的地址",
+        failureProxy: "代理拦截了请求",
+        failureCertificate: "TLS 证书被拒绝",
+        failureHttp: "服务器返回错误状态",
+        failureTransport: "连接失败或超时",
+        failureOther: "投递失败",
+      },
       modelAutoSwitch: {
         sectionTitle: "模型自动切换（OpenAI API）",
         enable: "按请求切换模型",

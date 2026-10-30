@@ -18,6 +18,23 @@ const cardUrl = new URL(
 );
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+type Delivery = {
+  deliveryId: string;
+  event: string;
+  runId: string | null;
+  status: string | null;
+  createdAt: string | null;
+  attempts: number;
+  ok: boolean;
+  statusCode: number | null;
+  error: string | null;
+  failureKind: string | null;
+  durationMs: number;
+  signed: boolean;
+  anomalyKind: string | null;
+  test: boolean;
+};
+
 type Settings = {
   enabled: boolean;
   url: string;
@@ -28,7 +45,7 @@ type Settings = {
     header: string;
     signedContent: string;
   };
-  deliveries: [];
+  deliveries: Delivery[];
 };
 
 type TestResult = {
@@ -313,6 +330,26 @@ function settings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
+function delivery(overrides: Partial<Delivery>): Delivery {
+  return {
+    deliveryId: "delivery-1",
+    event: "training.anomaly",
+    runId: "run-1",
+    status: null,
+    createdAt: null,
+    attempts: 1,
+    ok: false,
+    statusCode: null,
+    error: null,
+    failureKind: null,
+    durationMs: 12,
+    signed: false,
+    anomalyKind: null,
+    test: false,
+    ...overrides,
+  };
+}
+
 function testResult(overrides: Partial<TestResult> = {}): TestResult {
   return {
     ok: true,
@@ -431,4 +468,70 @@ test("changing the endpoint or secret clears a settled test result", async () =>
   );
   tree = card.render();
   assert.doesNotMatch(content(tree), /Signed request/);
+});
+
+test("every failure kind renders its own wording instead of the raw error", async () => {
+  const rows: [kind: string, wording: string][] = [
+    ["invalid", "Invalid endpoint URL"],
+    ["unresolvable", "Host name could not be resolved"],
+    ["blocked", "Host resolves to a blocked address"],
+    ["proxy", "Proxy intercepted the request"],
+    ["certificate", "TLS certificate rejected"],
+    ["http", "Server returned an error status"],
+  ];
+  const card = start(
+    settings({
+      deliveries: rows.map(([kind]) =>
+        delivery({
+          deliveryId: `delivery-${kind}`,
+          failureKind: kind,
+          error: `raw ${kind} message`,
+        }),
+      ),
+    }),
+    testResult(),
+  );
+  const tree = await card.settle();
+
+  for (const [kind, wording] of rows) {
+    assert.match(content(tree), new RegExp(wording), kind);
+    assert.doesNotMatch(content(tree), new RegExp(`raw ${kind} message`), kind);
+  }
+});
+
+test("transport gets its wording, and an unknown or absent kind falls back to the raw error", async () => {
+  const card = start(
+    settings({
+      deliveries: [
+        delivery({
+          deliveryId: "delivery-transport",
+          failureKind: "transport",
+          error: "raw transport message",
+        }),
+        delivery({
+          deliveryId: "delivery-unknown",
+          failureKind: "future-kind",
+          error: "raw future message",
+        }),
+        delivery({
+          deliveryId: "delivery-absent",
+          failureKind: null,
+          error: "raw absent message",
+        }),
+        delivery({
+          deliveryId: "delivery-silent",
+          failureKind: null,
+          error: null,
+        }),
+      ],
+    }),
+    testResult(),
+  );
+  const tree = await card.settle();
+
+  assert.match(content(tree), /Connection failed or timed out/);
+  assert.doesNotMatch(content(tree), /raw transport message/);
+  assert.match(content(tree), /raw future message/);
+  assert.match(content(tree), /raw absent message/);
+  assert.match(content(tree), /Delivery failed/);
 });

@@ -1781,6 +1781,16 @@ export const fr = {
         loadError: "Échec du chargement des paramètres du LLM assistant.",
         saveError: "Échec de l'enregistrement des paramètres du LLM assistant.",
       },
+      webhooks: {
+        failureInvalid: "URL du point de terminaison invalide",
+        failureUnresolvable: "Le nom d'hôte n'a pas pu être résolu",
+        failureBlocked: "L'hôte résout vers une adresse bloquée",
+        failureProxy: "Un proxy a intercepté la requête",
+        failureCertificate: "Certificat TLS rejeté",
+        failureHttp: "Le serveur a répondu avec un code d'erreur",
+        failureTransport: "La connexion a échoué ou expiré",
+        failureOther: "Livraison échouée",
+      },
       modelAutoSwitch: {
         sectionTitle: "Changement automatique de modèle (API OpenAI)",
         enable: "Changer de modèle par requête",

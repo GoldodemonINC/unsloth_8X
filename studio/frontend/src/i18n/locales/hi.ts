@@ -1773,6 +1773,16 @@ export const hi = {
         loadError: "Helper LLM सेटिंग्स लोड करने में विफल।",
         saveError: "Helper LLM सेटिंग्स सहेजने में विफल।",
       },
+      webhooks: {
+        failureInvalid: "अमान्य एंडपॉइंट URL",
+        failureUnresolvable: "होस्ट नाम हल नहीं हो सका",
+        failureBlocked: "होस्ट एक अवरुद्ध पते पर हल होता है",
+        failureProxy: "प्रॉक्सी ने अनुरोध अवरुद्ध किया",
+        failureCertificate: "TLS प्रमाणपत्र अस्वीकृत",
+        failureHttp: "सर्वर ने त्रुटि स्थिति के साथ उत्तर दिया",
+        failureTransport: "कनेक्शन विफल रहा या समय समाप्त हुआ",
+        failureOther: "डिलीवरी विफल रही",
+      },
       modelAutoSwitch: {
         sectionTitle: "मॉडल ऑटो-स्विच (OpenAI API)",
         enable: "अनुरोध के अनुसार मॉडल बदलें",

@@ -1774,6 +1774,16 @@ export const ru = {
         loadError: "Не удалось загрузить настройки вспомогательной LLM.",
         saveError: "Не удалось сохранить настройки вспомогательной LLM.",
       },
+      webhooks: {
+        failureInvalid: "Недействительный URL конечной точки",
+        failureUnresolvable: "Не удалось разрешить имя хоста",
+        failureBlocked: "Хост разрешается в заблокированный адрес",
+        failureProxy: "Запрос перехвачен прокси",
+        failureCertificate: "Сертификат TLS отклонён",
+        failureHttp: "Сервер ответил статусом ошибки",
+        failureTransport: "Соединение не удалось или истёк таймаут",
+        failureOther: "Доставка не удалась",
+      },
       modelAutoSwitch: {
         sectionTitle: "Автопереключение модели (OpenAI API)",
         enable: "Переключать модель по запросу",

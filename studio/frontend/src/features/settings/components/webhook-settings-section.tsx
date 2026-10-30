@@ -29,12 +29,35 @@ const PROBLEM_KEYS: Record<WebhookUrlProblem, TranslationKey> = {
   malformed: "settings.general.webhooks.invalidMalformed",
 };
 
+const FAILURE_KIND_KEYS: Partial<Record<string, TranslationKey>> = {
+  invalid: "settings.general.webhooks.failureInvalid",
+  unresolvable: "settings.general.webhooks.failureUnresolvable",
+  blocked: "settings.general.webhooks.failureBlocked",
+  proxy: "settings.general.webhooks.failureProxy",
+  certificate: "settings.general.webhooks.failureCertificate",
+  http: "settings.general.webhooks.failureHttp",
+  transport: "settings.general.webhooks.failureTransport",
+};
+
 function deliveryTime(value: string | null): string {
   if (!value) {
     return "";
   }
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function failureText(
+  t: ReturnType<typeof useT>,
+  delivery: WebhookSettings["deliveries"][number],
+): string {
+  const key = delivery.failureKind
+    ? FAILURE_KIND_KEYS[delivery.failureKind]
+    : undefined;
+  if (key) {
+    return t(key);
+  }
+  return delivery.error ?? t("settings.general.webhooks.failureOther");
 }
 
 function TestResultBlock({
@@ -117,7 +140,7 @@ function DeliveryRow({
       ) : null}
       {delivery.ok ? null : (
         <span className="max-w-full truncate text-destructive">
-          {delivery.error ?? "—"}
+          {failureText(t, delivery)}
         </span>
       )}
       <span className="ml-auto text-muted-foreground">

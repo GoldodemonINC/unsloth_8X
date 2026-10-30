@@ -1919,6 +1919,16 @@ export const sv = {
         loadError: "Det gick inte att läsa in inställningarna för hjälp-LLM.",
         saveError: "Det gick inte att spara inställningarna för hjälp-LLM.",
       },
+      webhooks: {
+        failureInvalid: "Ogiltig slutpunkts-URL",
+        failureUnresolvable: "Värdnamnet kunde inte lösa upp",
+        failureBlocked: "Värten löser upp till en blockerad adress",
+        failureProxy: "En proxy fångade upp förfrågan",
+        failureCertificate: "TLS-certifikatet avvisades",
+        failureHttp: "Servern svarade med ett felstatus",
+        failureTransport: "Anslutningen misslyckades eller tog timeout",
+        failureOther: "Leverans misslyckades",
+      },
       modelAutoSwitch: {
         sectionTitle: "Automatiskt modellbyte (OpenAI API)",
         enable: "Byt modell enligt begäran",

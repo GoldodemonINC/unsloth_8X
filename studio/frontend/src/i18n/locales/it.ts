@@ -1685,6 +1685,16 @@ export const it = {
         saveError:
           "Salvataggio delle impostazioni dell'LLM di supporto non riuscito.",
       },
+      webhooks: {
+        failureInvalid: "URL del punto di destinazione non valido",
+        failureUnresolvable: "Impossibile risolvere il nome host",
+        failureBlocked: "L'host risolve su un indirizzo bloccato",
+        failureProxy: "Un proxy ha intercettato la richiesta",
+        failureCertificate: "Certificato TLS rifiutato",
+        failureHttp: "Il server ha risposto con uno stato di errore",
+        failureTransport: "Connessione fallita o scaduta",
+        failureOther: "Consegna non riuscita",
+      },
       modelAutoSwitch: {
         sectionTitle: "Cambio automatico del modello (API OpenAI)",
         enable: "Cambia modello in base alla richiesta",

@@ -1766,6 +1766,16 @@ export const ko = {
         loadError: "Helper LLM 설정을 불러오지 못했습니다.",
         saveError: "Helper LLM 설정을 저장하지 못했습니다.",
       },
+      webhooks: {
+        failureInvalid: "잘못된 엔드포인트 URL",
+        failureUnresolvable: "호스트 이름을 확인할 수 없습니다",
+        failureBlocked: "호스트가 차단된 주소로 확인됩니다",
+        failureProxy: "프록시가 요청을 가로채었습니다",
+        failureCertificate: "TLS 인증서가 거부되었습니다",
+        failureHttp: "서버가 오류 상태로 응답했습니다",
+        failureTransport: "연결이 실패했거나 시간 초과되었습니다",
+        failureOther: "전달에 실패했습니다",
+      },
       modelAutoSwitch: {
         sectionTitle: "모델 자동 전환 (OpenAI API)",
         enable: "요청에 따라 모델 전환",

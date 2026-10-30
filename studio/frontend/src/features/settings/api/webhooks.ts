@@ -25,6 +25,8 @@ type ApiDelivery = {
   // biome-ignore lint/style/useNamingConvention: API schema
   status_code: number | null;
   error: string | null;
+  // biome-ignore lint/style/useNamingConvention: API schema
+  failure_kind: string | null;
   response: string | null;
   // biome-ignore lint/style/useNamingConvention: API schema
   duration_ms: number;
@@ -73,6 +75,7 @@ export type WebhookDelivery = {
   ok: boolean;
   statusCode: number | null;
   error: string | null;
+  failureKind: string | null;
   durationMs: number;
   signed: boolean;
   anomalyKind: string | null;
@@ -116,6 +119,7 @@ function fromDelivery(delivery: ApiDelivery): WebhookDelivery {
     ok: delivery.ok,
     statusCode: delivery.status_code,
     error: delivery.error,
+    failureKind: delivery.failure_kind,
     durationMs: delivery.duration_ms,
     signed: delivery.signed,
     anomalyKind: delivery.anomaly_kind,
