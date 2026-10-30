@@ -614,6 +614,26 @@ def test_the_retention_bound_stays_above_every_detector_window():
             setattr(loss_anomaly, window, original)
 
 
+def test_the_import_refusal_names_the_offending_window_and_its_value():
+    assert loss_anomaly.retention_refusal() is None
+    for window in (
+        "BASELINE_WINDOW",
+        "RECENT_WINDOW",
+        "PLATEAU_WINDOW",
+        "SPIKE_BASELINE",
+    ):
+        moved = loss_anomaly.MAX_RETAINED_POINTS
+        original = getattr(loss_anomaly, window)
+        setattr(loss_anomaly, window, moved)
+        try:
+            refusal = loss_anomaly.retention_refusal()
+            required = loss_anomaly.retained_points_floor()
+        finally:
+            setattr(loss_anomaly, window, original)
+        assert refusal is not None, window
+        assert f"{window} = {moved} requires {required} retained points" in refusal, refusal
+        assert f"MAX_RETAINED_POINTS = {loss_anomaly.MAX_RETAINED_POINTS}" in refusal, refusal
+
 def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
     monkeypatch,
 ):

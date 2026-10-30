@@ -16,7 +16,7 @@ Files this work owns:
   pinned transport, proxy refusal, the retry loop, delivery records and threads.
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
-- `studio/backend/tests/test_webhooks.py` — 98 tests covering all of the above.
+- `studio/backend/tests/test_webhooks.py` — 99 tests covering all of the above.
 - `studio/backend/tests/test_end_to_end_webhook.py` — the end-to-end path: eviction
   past the bound, detection at the absolute step, signed delivery to a loopback
   sink, and the disabled gate.
@@ -33,17 +33,22 @@ and NaN all still fire and attribute correctly deep into a long stream (proven a
 200,000 steps, and measured flat at 1.85 MB of retained state from 10k to 1M steps).
 
 **The bound is now tied to the windows, not to a lucky literal.**
-`retained_points_floor()` derives the smallest safe bound from the window constants;
-today it computes 7,211 against the shipped 8,192. Three relations make that floor
-necessary: the recent-window eviction loop reads one position behind the window
-start, the divergence baseline must finish filling before `base` overtakes it, and
-the spike baseline needs its full look-back below the first scanned index. Lowering
-the bound below the floor — or raising any window constant past the bound — fails at
-import with `AssertionError: MAX_RETAINED_POINTS is smaller than the detector windows
-need`. The check is an `if`/`raise`, not an `assert`, so it holds under `python -O`
+`_floor_terms()` holds the four window-to-bound relations and `retained_points_floor()`
+takes the largest of them; today that is 7,211 against the shipped 8,192. Three
+relations make that floor necessary: the recent-window eviction loop reads one
+position behind the window start, the divergence baseline must finish filling before
+`base` overtakes it, and the spike baseline needs its full look-back below the first
+scanned index. Lowering the bound below the floor — or raising any window constant
+past the bound — fails at import with an `AssertionError` that names the offending
+window and its value, for example `BASELINE_WINDOW = 6000 requires 12011 retained
+points, which exceeds MAX_RETAINED_POINTS = 8192`, instead of always blaming the
+bound; `retention_refusal()` builds that message and returns `None` while the bound
+is safe. The check is an `if`/`raise`, not an `assert`, so it holds under `python -O`
 exactly as under a normal interpreter. `test_the_retention_bound_stays_above_every_detector_window`
 fails on a broken bound and, independently, fails if any single term is dropped from
-the floor while the runtime check would still pass.
+the floor while the runtime check would still pass, and
+`test_the_import_refusal_names_the_offending_window_and_its_value` walks each window
+in turn and checks that the message names it.
 
 **Failure classification by kind, not by message matching.** Every delivery outcome
 carries a `failure_kind` drawn from a fixed set (`invalid`, `unresolvable`, `blocked`,
@@ -106,9 +111,10 @@ owner.
 
 - `loss_anomaly.py` holds `MAX_RETAINED_POINTS = 8192`, the windows
   (`BASELINE_WINDOW = 3600`, `RECENT_WINDOW = 3600`, `PLATEAU_WINDOW = 2600`,
-  `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `retained_points_floor()` and the
-  import-time refusal. It keeps no global state — a `LossAnomalyTracker` and a
-  `RetainedSeries` are made per run by its caller.
+  `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `_floor_terms()`,
+  `retained_points_floor()`, `retention_refusal()` and the import-time refusal. It
+  keeps no global state — a `LossAnomalyTracker` and a `RetainedSeries` are made per
+  run by its caller.
 - `webhook_payload.py` holds the four wire-header names beside `build_payload`, so
   the events side and the transport side both depend on the contract instead of on
   each other.
@@ -141,7 +147,7 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 
 ## Verification
 
-`127 passed`: 98 in `studio/backend/tests/test_webhooks.py`, 2 in
+`128 passed`: 99 in `studio/backend/tests/test_webhooks.py`, 2 in
 `studio/backend/tests/test_end_to_end_webhook.py`, plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
@@ -160,5 +166,5 @@ files in the working tree.
 
 ## Next task
 
-1. Make the import refusal name the offending window and its value (today's message
-   always blames `MAX_RETAINED_POINTS`, even when a window constant is what moved).
+None open: the refusal now names the offending window and its value, as described in
+the bound section above.

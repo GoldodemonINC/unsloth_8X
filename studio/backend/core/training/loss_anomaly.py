@@ -16,16 +16,31 @@ SPIKE_BASELINE = 20
 CHECK_EVERY = 10
 
 
+def _floor_terms() -> list[tuple[str, int, int]]:
+    return [
+        ("RECENT_WINDOW", RECENT_WINDOW, RECENT_WINDOW + CHECK_EVERY),
+        ("BASELINE_WINDOW", BASELINE_WINDOW, 2 * BASELINE_WINDOW + CHECK_EVERY + 1),
+        ("PLATEAU_WINDOW", PLATEAU_WINDOW, PLATEAU_WINDOW + CHECK_EVERY),
+        ("SPIKE_BASELINE", SPIKE_BASELINE, SPIKE_BASELINE + CHECK_EVERY + 1),
+    ]
+
+
 def retained_points_floor() -> int:
-    recent_removal = RECENT_WINDOW + CHECK_EVERY
-    prefix_fill = 2 * BASELINE_WINDOW + CHECK_EVERY + 1
-    plateau_window = PLATEAU_WINDOW + CHECK_EVERY
-    spike_baseline = SPIKE_BASELINE + CHECK_EVERY + 1
-    return max(recent_removal, prefix_fill, plateau_window, spike_baseline)
+    return max(required for _, _, required in _floor_terms())
 
 
-if MAX_RETAINED_POINTS < retained_points_floor():
-    raise AssertionError("MAX_RETAINED_POINTS is smaller than the detector windows need")
+def retention_refusal() -> Optional[str]:
+    window, value, required = max(_floor_terms(), key = lambda term: term[2])
+    if required <= MAX_RETAINED_POINTS:
+        return None
+    return (
+        f"{window} = {value} requires {required} retained points, "
+        f"which exceeds MAX_RETAINED_POINTS = {MAX_RETAINED_POINTS}"
+    )
+
+
+if (refusal := retention_refusal()) is not None:
+    raise AssertionError(refusal)
 
 
 def _median(values: list[float]) -> float:
