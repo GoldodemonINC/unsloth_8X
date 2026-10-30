@@ -173,9 +173,14 @@ def estimate(
 ) -> dict[str, Any]:
     """Estimate what one job of *kind* needs, in bytes, with its reasoning.
 
-    ``sources`` is a path or a list of paths. Streaming stages are sized from the
-    largest tensor, not the whole checkpoint, because they never hold both
-    parents at once.
+    ``sources`` may be paths or a mapping of paths. For streaming stages, RAM
+    uses the largest available tensor-size estimate, or a fraction of the
+    checkpoint size when tensor sizes cannot be read. ``memory`` supplies the
+    host profile; a missing or empty profile triggers a probe. On a host with
+    no GPUs, CPU-capable jobs have zero estimated VRAM; GPU-only jobs retain
+    their VRAM estimate and receive a note.
+
+    Raises ValueError for an unknown job kind.
     """
     model = _COST_MODEL.get(kind)
     if model is None:

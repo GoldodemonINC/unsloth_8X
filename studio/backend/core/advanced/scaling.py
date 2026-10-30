@@ -775,6 +775,19 @@ def growth_policy(
     target_params: Optional[float] = None,
     added_params: Optional[float] = None,
 ) -> dict[str, Any]:
+    """Report growth targets, limits, and warnings in parameter counts.
+
+    With a known nonzero base, ``added_params`` takes precedence over an
+    absolute ``target_params``. If neither is supplied, the default adds 10%
+    (at least one parameter), capped at the growth ceiling. The returned
+    ``requested_params`` is unclamped; ``target_params`` is clamped to the
+    base and ceiling. ``over_cap`` describes the request, while ``below_floor``
+    and ``refusal`` mark a clamped target that adds nothing. ``measured_note``
+    describes targets below the measured growth range, including no growth.
+
+    An unknown or zero base is treated as zero: added parameters are ignored,
+    and the requested target is returned without clamping or a floor refusal.
+    """
     base = int(base_params or 0)
     cap = base + CAP_ADDED_PARAMS
     floor_params = int(math.ceil(base * GROWTH_FLOOR))
@@ -830,6 +843,11 @@ def plan(
 
     ``direction`` is inferred from the target when omitted: a target below the base
     checkpoint is a shrink, anything else is growth.
+
+    Growth defaults to 10% above the base and clamps requests to the base and
+    growth ceiling. The returned plan reports refusals and whether it is runnable;
+    an unavailable engine is reported as a refusal. Invalid methods, directions,
+    conflicting targets, or an unreadable checkpoint config raise ValueError.
     """
     if method not in METHODS:
         raise ValueError(f"method must be one of {METHODS}, got {method!r}.")

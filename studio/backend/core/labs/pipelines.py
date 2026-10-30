@@ -225,6 +225,17 @@ def _plan_merge(stage: dict[str, Any], spec: Mapping[str, Any], current: Optiona
 
 
 def _plan_scale(stage: dict[str, Any], spec: Mapping[str, Any], current: Optional[int]) -> Optional[int]:
+    """Update a scale stage and return its projected parameter count.
+
+    ``current`` is the running count from preceding stages. A factor takes
+    precedence over a single absolute or added target; with no target, growth
+    defaults to the shared policy's 10% increase. A blocked stage retains and
+    returns ``current``. If projection fails, the target is used as the count.
+
+    Raises PipelineError for nonnumeric targets or both added and absolute
+    targets. A missing count, invalid method, non-growing factor, policy
+    refusal, or request above the ceiling is recorded as a blocked stage.
+    """
     method = str(spec.get("method") or "depth")
     if method not in METHODS:
         return _blocked(stage, f"method must be one of {', '.join(METHODS)}.", current)
