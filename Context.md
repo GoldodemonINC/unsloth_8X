@@ -97,6 +97,15 @@ Assertions name bounds (`prefix_count`, `entries()`) instead of reaching into he
 internals. The flat-retention, floor-invariant and 200k-attribution tests are
 unchanged.
 
+Expected values that come from the module's shipped constants are
+hand-computed literals with one owner: `_BOUND`, `_FLOOR`, `_BELOW_FLOOR`,
+`_BASELINE_WINDOW`, and a single `_WINDOW_REQUIREMENTS` table shared by both
+retention tests. A module constant used as an expectation
+(`MAX_RETAINED_POINTS`, the window bounds, `FAILURE_PROXY`/`FAILURE_CERTIFICATE`,
+`MAX_TRACKED_RUNS`) is specification rather than computed output and is read from
+the module deliberately; exactly one assertion pins the module's bound to the
+file's literal.
+
 **The unused delivery parameters are gone.** `webhook_delivery.deliver` had a
 `record: bool` flag that no caller ever passed and a `timeout` override that no
 caller ever set, so the entry is now always appended, the timeout is always
