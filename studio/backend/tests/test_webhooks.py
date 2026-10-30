@@ -620,35 +620,35 @@ def test_the_retention_bound_stays_above_every_detector_window():
 
 
 def test_the_import_refusal_names_the_offending_window_and_its_value():
+    assert loss_anomaly.MAX_RETAINED_POINTS == 8192
     assert loss_anomaly._retention_refusal() is None
-    for window in (
-        "BASELINE_WINDOW",
-        "RECENT_WINDOW",
-        "PLATEAU_WINDOW",
-        "SPIKE_BASELINE",
-    ):
+    expectations = {
+        "BASELINE_WINDOW": 16395,
+        "RECENT_WINDOW": 8202,
+        "PLATEAU_WINDOW": 8202,
+        "SPIKE_BASELINE": 8203,
+    }
+    for window, required in expectations.items():
         moved = loss_anomaly.MAX_RETAINED_POINTS
         original = getattr(loss_anomaly, window)
         setattr(loss_anomaly, window, moved)
         try:
             refusal = loss_anomaly._retention_refusal()
-            required = loss_anomaly.retained_points_floor()
         finally:
             setattr(loss_anomaly, window, original)
         assert refusal is not None, window
         assert f"floor {required} required by {window} = {moved}" in refusal, refusal
-        assert f"MAX_RETAINED_POINTS = {loss_anomaly.MAX_RETAINED_POINTS}" in refusal, refusal
+        assert "MAX_RETAINED_POINTS = 8192" in refusal, refusal
 
-    floor = loss_anomaly.retained_points_floor()
     original = loss_anomaly.MAX_RETAINED_POINTS
-    loss_anomaly.MAX_RETAINED_POINTS = floor - 1
+    loss_anomaly.MAX_RETAINED_POINTS = 7210
     try:
         refusal = loss_anomaly._retention_refusal()
     finally:
         loss_anomaly.MAX_RETAINED_POINTS = original
     assert refusal is not None
-    assert refusal.startswith(f"MAX_RETAINED_POINTS = {floor - 1}"), refusal
-    assert f"required by BASELINE_WINDOW = {loss_anomaly.BASELINE_WINDOW}" in refusal, refusal
+    assert refusal.startswith("MAX_RETAINED_POINTS = 7210"), refusal
+    assert "required by BASELINE_WINDOW = 3600" in refusal, refusal
 
 
 def _import_loss_anomaly_copy(
@@ -694,7 +694,7 @@ def _import_loss_anomaly_copy(
 def test_the_shipped_module_imports_clean_through_the_import_system(tmp_path):
     code, stdout, stderr = _import_loss_anomaly_copy(tmp_path)
     assert code == 0, stderr
-    assert stdout == f"IMPORTED:{loss_anomaly.retained_points_floor()}"
+    assert stdout == "IMPORTED:7211"
 
 
 @pytest.mark.parametrize(
