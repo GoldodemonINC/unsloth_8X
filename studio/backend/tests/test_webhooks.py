@@ -354,18 +354,26 @@ def test_a_second_resolution_cannot_redirect_delivery_to_an_internal_address(
     assert sink.requests[0]["headers"]["host"] == "rebind.example"
 
 
-def test_a_host_that_resolves_to_link_local_fails_once_without_backoff(sink, monkeypatch):
+@pytest.mark.parametrize(
+    "url, address",
+    [
+        ("http://metadata.example/hook", 80),
+        ("https://metadata.example/hook", 443),
+    ],
+    ids = ["http", "https"],
+)
+def test_a_blocked_resolution_fails_once_without_backoff(url, address, sink, monkeypatch):
     sleeps: list[float] = []
     monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
         webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", address))
         ],
     )
 
-    result = webhooks.send_test_event(url = "http://metadata.example/hook", secret = "topsecret")
+    result = webhooks.send_test_event(url = url, secret = "topsecret")
 
     assert result["ok"] is False
     assert result["attempts"] == 1
@@ -409,37 +417,6 @@ def test_https_delivery_verifies_the_host_name_while_connecting_to_the_pinned_ad
         sent["body"],
         sent["headers"]["x-unsloth-signature-256"],
     )
-
-
-def test_https_delivery_rejects_a_certificate_that_only_matches_the_pinned_address(
-    tmp_path, monkeypatch
-):
-    _restore_stdlib_ssl(monkeypatch)
-    ca, cert, key = _mint_certificate(
-        tmp_path, [x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))], "127.0.0.1"
-    )
-    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
-    receiver = _Sink(certfile = cert, keyfile = key)
-    try:
-        monkeypatch.setattr(
-            webhook_delivery.socket,
-            "getaddrinfo",
-            lambda *_args, **_kwargs: [
-                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
-            ],
-        )
-        result = webhooks.send_test_event(
-            url = f"https://webhook.example:{receiver.port}/hook",
-            secret = "topsecret",
-            max_attempts = 1,
-        )
-    finally:
-        receiver.close()
-
-    assert result["ok"] is False
-    assert "certificate verify failed" in (result["error"] or "").lower()
-    assert receiver.requests == []
-
 
 def test_a_blocked_resolution_on_https_fails_once_without_retrying(monkeypatch):
     sleeps: list[float] = []
@@ -599,22 +576,6 @@ def test_a_certificate_failure_is_reported_once_without_backoff_through_the_rout
     )
     assert recorded["failure_kind"] == webhook_delivery.FAILURE_CERTIFICATE
 
-
-def test_a_spike_is_detected_deep_into_a_stream_after_old_points_are_dropped():
-    run_id = "run-deep-spike"
-    values = [2.0] * 20008 + [9.0] + [2.0] * 9
-    anomaly = None
-    for step, loss in enumerate(values):
-        found = webhooks.observe_progress(run_id = run_id, step = step, loss = loss)
-        if found is not None:
-            anomaly = found
-
-    assert anomaly is not None
-    assert anomaly["kind"] == "spike"
-    assert anomaly["step"] == 20008
-    assert len(webhooks._progress[run_id]["points"]) == loss_anomaly.MAX_RETAINED_POINTS
-
-
 def test_divergence_is_detected_deep_into_a_stream_after_old_points_are_dropped():
     run_id = "run-deep-divergence"
     values = [2.0] * 24000 + [2.0 + 2.0 * offset / 6000 for offset in range(6000)]
@@ -637,9 +598,9 @@ def test_a_long_run_retains_a_flat_amount_of_state():
     tracker = state["tracker"]
     assert state["total"] == 30000
     assert len(state["points"]) == loss_anomaly.MAX_RETAINED_POINTS
-    assert len(tracker.prefix.low) + len(tracker.prefix.high) <= loss_anomaly.BASELINE_WINDOW
-    assert len(tracker.last.side) <= loss_anomaly.RECENT_WINDOW
-    assert len(tracker.plateau.side) <= loss_anomaly.PLATEAU_WINDOW
+    assert tracker.prefix_count <= loss_anomaly.BASELINE_WINDOW
+    assert tracker.last.entries() <= loss_anomaly.RECENT_WINDOW
+    assert tracker.plateau.entries() <= loss_anomaly.PLATEAU_WINDOW
 
 
 def test_the_retention_bound_stays_above_every_detector_window():
@@ -1148,40 +1109,67 @@ def test_progress_entry_point_handles_nonfinite_and_short_runs(
         )
 
 
-def test_an_unreachable_endpoint_is_recorded_after_bounded_retries(settings_store):
-    webhook_settings.set_webhook_settings(
-        enabled = True, url = "http://127.0.0.1:1/hook", secret = ""
-    )
-    assert webhooks.notify_terminal(
-        run_id = "run-bad-endpoint", status = "failed", metrics = {"step": 0}
-    )
-    webhooks.wait_for_deliveries(5)
-    delivery = next(
-        item for item in webhooks.get_deliveries() if item["run_id"] == "run-bad-endpoint"
-    )
-    assert delivery["ok"] is False
-    assert delivery["attempts"] == 3
-    assert delivery["status_code"] is None
-    assert delivery["error"]
-
-
-def test_a_refused_request_is_not_retried(settings_store):
-    refused = _Sink(statuses = (404,))
+@pytest.mark.parametrize(
+    "endpoint, run_id, expected",
+    [
+        (
+            "unreachable",
+            "run-unreachable",
+            {"ok": False, "attempts": 3, "status": None, "requests": 0},
+        ),
+        (
+            (404,),
+            "run-refused",
+            {"ok": False, "attempts": 1, "status": 404, "requests": 1},
+        ),
+        (
+            (500, 200),
+            "run-retry-success",
+            {"ok": True, "attempts": 2, "status": 200, "requests": 2},
+        ),
+        (
+            (500,),
+            "run-retry-fail",
+            {"ok": False, "attempts": 3, "status": 500, "requests": 3},
+        ),
+    ],
+    ids = ["unreachable", "refused", "retry-then-success", "retry-exhausted"],
+)
+def test_the_delivery_outcome_is_recorded_at_the_final_attempt(
+    endpoint, run_id, expected, settings_store
+):
+    if endpoint == "unreachable":
+        sink = None
+        webhook_settings.set_webhook_settings(
+            enabled = True, url = "http://127.0.0.1:1/hook", secret = ""
+        )
+    else:
+        sink = _Sink(statuses = endpoint)
+        _configure(settings_store, sink)
     try:
-        _configure(settings_store, refused)
         assert webhooks.notify_terminal(
-            run_id = "run-refused", status = "completed", metrics = {"step": 1}
+            run_id = run_id, status = "completed", metrics = {"step": 1}
         )
         webhooks.wait_for_deliveries(5)
-        assert len(refused.requests) == 1
-        delivery = next(
-            item for item in webhooks.get_deliveries() if item["run_id"] == "run-refused"
-        )
-        assert delivery["ok"] is False
-        assert delivery["attempts"] == 1
-        assert delivery["status_code"] == 404
+        if sink is not None:
+            assert len(sink.requests) == expected["requests"]
+        history = [
+            item for item in webhooks.get_deliveries() if item["run_id"] == run_id
+        ]
+        assert len(history) == 1
+        delivery = history[0]
+        assert delivery["ok"] is expected["ok"]
+        assert delivery["attempts"] == expected["attempts"]
+        assert delivery["status_code"] == expected["status"]
+        assert bool(delivery["error"]) is (not expected["ok"])
+        if sink is not None and len(sink.requests) > 1:
+            delivery_ids = {
+                json.loads(request["body"])["delivery_id"] for request in sink.requests
+            }
+            assert len(delivery_ids) == 1
     finally:
-        refused.close()
+        if sink is not None:
+            sink.close()
 
 
 def test_a_hanging_endpoint_cannot_block_the_caller(settings_store):
@@ -1202,45 +1190,6 @@ def test_a_hanging_endpoint_cannot_block_the_caller(settings_store):
         assert delivery["attempts"] == 3
     finally:
         hanging.close()
-
-
-def test_retry_until_success_and_retry_until_give_up(settings_store):
-    success = _Sink(statuses = (500, 200))
-    try:
-        _configure(settings_store, success)
-        assert webhooks.notify_terminal(
-            run_id = "run-retry-success", status = "completed", metrics = {"step": 1}
-        )
-        webhooks.wait_for_deliveries(5)
-        assert len(success.requests) == 2
-        delivery = next(
-            item
-            for item in webhooks.get_deliveries()
-            if item["run_id"] == "run-retry-success"
-        )
-        assert delivery["ok"] is True
-        assert delivery["attempts"] == 2
-        assert delivery["status_code"] == 200
-    finally:
-        success.close()
-
-    failure = _Sink(statuses = (500,))
-    try:
-        _configure(settings_store, failure)
-        assert webhooks.notify_terminal(
-            run_id = "run-retry-fail", status = "completed", metrics = {"step": 1}
-        )
-        webhooks.wait_for_deliveries(5)
-        assert len(failure.requests) == 3
-        delivery = next(
-            item for item in webhooks.get_deliveries() if item["run_id"] == "run-retry-fail"
-        )
-        assert delivery["ok"] is False
-        assert delivery["attempts"] == 3
-        assert delivery["status_code"] == 500
-    finally:
-        failure.close()
-
 
 def _client(monkeypatch) -> TestClient:
     app = FastAPI()
@@ -1330,26 +1279,6 @@ def test_terminal_alert_survives_a_failed_database_finalize(monkeypatch):
     assert captured[0]["metrics"]["step"] == 5
     assert captured[0]["error_message"] == "boom"
 
-
-def test_settings_route_saves_without_leaking_the_secret(settings_store, sink, monkeypatch):
-    _configure(settings_store, sink, enabled = False)
-    client = _client(monkeypatch)
-
-    response = client.put(
-        "/api/settings/webhooks",
-        json = {"enabled": True, "url": sink.url, "secret": "new-secret"},
-    )
-    assert response.status_code == 200
-    body = response.json()
-    assert body["enabled"] is True
-    assert body["url"] == sink.url
-    assert body["has_secret"] is True
-    assert "secret" not in body
-    assert body["signature"]["algorithm"] == "hmac-sha256"
-
-    assert webhook_settings.get_webhook_config()["secret"] == "new-secret"
-
-
 def test_settings_route_refuses_a_non_http_endpoint(settings_store, monkeypatch):
     webhook_settings.set_webhook_settings(enabled = False, url = "http://127.0.0.1:1/hook")
     client = _client(monkeypatch)
@@ -1379,36 +1308,30 @@ def test_test_route_reports_the_real_http_result(settings_store, sink, monkeypat
     assert any(item["test"] for item in history)
 
 
-def test_a_run_finalized_twice_alerts_once(settings_store, sink):
+@pytest.mark.parametrize(
+    "run_id, first_status, expected_event",
+    [
+        ("run-double-finalize", "completed", "training.completed"),
+        ("run-status-retry", "failed", "training.failed"),
+    ],
+    ids = ["same status twice", "different status second"],
+)
+def test_only_the_first_terminal_status_for_a_run_is_sent(
+    run_id, first_status, expected_event, settings_store, sink
+):
     _configure(settings_store, sink)
     assert webhooks.notify_terminal(
-        run_id = "run-double-finalize", status = "completed", metrics = {"step": 3}
+        run_id = run_id, status = first_status, metrics = {"step": 2}
     )
     assert (
         webhooks.notify_terminal(
-            run_id = "run-double-finalize", status = "completed", metrics = {"step": 3}
+            run_id = run_id, status = "completed", metrics = {"step": 4}
         )
         is False
     )
     webhooks.wait_for_deliveries(5)
     assert len(sink.requests) == 1
-    assert json.loads(sink.requests[0]["body"])["event"] == "training.completed"
-
-
-def test_a_second_terminal_status_for_the_same_run_is_not_sent(settings_store, sink):
-    _configure(settings_store, sink)
-    assert webhooks.notify_terminal(
-        run_id = "run-status-retry", status = "failed", metrics = {"step": 2}
-    )
-    assert (
-        webhooks.notify_terminal(
-            run_id = "run-status-retry", status = "completed", metrics = {"step": 4}
-        )
-        is False
-    )
-    webhooks.wait_for_deliveries(5)
-    assert len(sink.requests) == 1
-    assert json.loads(sink.requests[0]["body"])["event"] == "training.failed"
+    assert json.loads(sink.requests[0]["body"])["event"] == expected_event
 
 
 def test_concurrent_runs_are_not_cross_wired_or_left_running(settings_store, sink):
@@ -1457,33 +1380,6 @@ def test_an_in_flight_delivery_is_drained_within_the_shutdown_budget(settings_st
         assert delivery["ok"] is True
     finally:
         slow.close()
-
-
-def test_retry_success_records_one_outcome_at_the_final_status(settings_store):
-    success = _Sink(statuses = (500, 200))
-    try:
-        _configure(settings_store, success)
-        assert webhooks.notify_terminal(
-            run_id = "run-retry-record", status = "completed", metrics = {"step": 1}
-        )
-        webhooks.wait_for_deliveries(5)
-        assert len(success.requests) == 2
-        delivery_ids = {
-            json.loads(request["body"])["delivery_id"] for request in success.requests
-        }
-        assert len(delivery_ids) == 1
-        history = [
-            item
-            for item in webhooks.get_deliveries()
-            if item["run_id"] == "run-retry-record"
-        ]
-        assert len(history) == 1
-        assert history[0]["ok"] is True
-        assert history[0]["attempts"] == 2
-        assert history[0]["status_code"] == 200
-    finally:
-        success.close()
-
 
 def test_an_anomaly_that_stays_true_alerts_once(settings_store, sink):
     _configure(settings_store, sink)
@@ -1535,6 +1431,13 @@ def test_the_secret_is_stored_once_and_masked_everywhere_else(
         assert secret not in response.text
     assert secret not in json.dumps(webhooks.get_deliveries())
     assert secret not in json.dumps(recorder.events)
+    saved_body = saved.json()
+    assert saved_body["enabled"] is True
+    assert saved_body["url"] == sink.url
+    assert saved_body["has_secret"] is True
+    assert "secret" not in saved_body
+    assert saved_body["signature"]["algorithm"] == "hmac-sha256"
+    assert webhook_settings.get_webhook_config()["secret"] == secret
     assert "secret" not in settings_store[webhook_settings.SETTINGS_KEY]
     from storage import credential_secrets
 
@@ -1569,21 +1472,24 @@ def test_the_secret_is_encrypted_in_the_settings_database(settings_store, encryp
     )
 
 
-def test_the_settings_route_migrates_a_legacy_secret_on_read(
+def test_a_legacy_secret_migrates_on_either_read_path(
     settings_store, encrypted_store, monkeypatch
 ):
-    secret = "legacy-through-get"
-    settings_store[webhook_settings.SETTINGS_KEY] = {
+    secret = "legacy-plaintext-secret"
+    legacy = {
         "enabled": True,
         "url": "http://127.0.0.1:9/hook",
         "secret": secret,
     }
     client = _client(monkeypatch)
+
+    settings_store[webhook_settings.SETTINGS_KEY] = dict(legacy)
     response = client.get("/api/settings/webhooks")
     assert response.status_code == 200
     assert response.json()["has_secret"] is True
     assert secret not in response.text
     assert "secret" not in settings_store[webhook_settings.SETTINGS_KEY]
+    assert secret.encode("utf-8") not in encrypted_store.read_bytes()
     from storage import credential_secrets
 
     assert (
@@ -1592,6 +1498,11 @@ def test_the_settings_route_migrates_a_legacy_secret_on_read(
         )
         == secret
     )
+
+    settings_store[webhook_settings.SETTINGS_KEY] = dict(legacy)
+    assert webhook_settings.get_webhook_config()["secret"] == secret
+    assert "secret" not in settings_store[webhook_settings.SETTINGS_KEY]
+    assert secret.encode("utf-8") not in encrypted_store.read_bytes()
 
 
 def test_saving_without_a_secret_keeps_the_encrypted_one(settings_store, encrypted_store):
@@ -1604,33 +1515,12 @@ def test_saving_without_a_secret_keeps_the_encrypted_one(settings_store, encrypt
     assert saved["has_secret"] is True
     assert webhook_settings.get_webhook_config()["secret"] == "keep-me"
 
-
-def test_a_legacy_plaintext_secret_migrates_and_is_deleted(settings_store, encrypted_store):
-    secret = "legacy-plaintext-secret"
-    settings_store[webhook_settings.SETTINGS_KEY] = {
-        "enabled": True,
-        "url": "http://127.0.0.1:9/hook",
-        "secret": secret,
-    }
-    assert webhook_settings.get_webhook_config()["secret"] == secret
-    assert "secret" not in settings_store[webhook_settings.SETTINGS_KEY]
-    assert secret.encode("utf-8") not in encrypted_store.read_bytes()
-    from storage import credential_secrets
-
-    assert (
-        credential_secrets.get_secret(
-            webhook_settings.SECRET_KIND, webhook_settings.SECRET_SCOPE
-        )
-        == secret
-    )
-
-
-def test_an_undecryptable_secret_sends_unsigned_without_crashing(
-    settings_store, sink, encrypted_store
+def test_an_unreadable_secret_is_reported_sends_unsigned_and_recovers(
+    settings_store, encrypted_store, sink, monkeypatch
 ):
-    webhook_settings.set_webhook_settings(
-        enabled = True, url = sink.url, secret = "damaged-secret"
-    )
+    broken = "damaged-secret"
+    recovered = "recovered-route-secret"
+    _configure(settings_store, sink, secret = broken)
     conn = sqlite3.connect(encrypted_store)
     try:
         row = conn.execute("SELECT ciphertext FROM credential_secrets").fetchone()
@@ -1662,23 +1552,6 @@ def test_an_undecryptable_secret_sends_unsigned_without_crashing(
     )
     assert delivery["signed"] is False
     assert delivery["ok"] is True
-
-
-def test_the_settings_route_reports_an_unreadable_secret_and_recovers(
-    settings_store, encrypted_store, sink, monkeypatch
-):
-    broken = "broken-route-secret"
-    recovered = "recovered-route-secret"
-    _configure(settings_store, sink, secret = broken)
-    conn = sqlite3.connect(encrypted_store)
-    try:
-        row = conn.execute("SELECT ciphertext FROM credential_secrets").fetchone()
-        damaged = bytearray(row[0])
-        damaged[-1] ^= 1
-        conn.execute("UPDATE credential_secrets SET ciphertext = ?", (bytes(damaged),))
-        conn.commit()
-    finally:
-        conn.close()
 
     client = _client(monkeypatch)
     loaded = client.get("/api/settings/webhooks")

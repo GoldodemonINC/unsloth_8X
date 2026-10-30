@@ -16,7 +16,7 @@ Files this work owns:
   pinned transport, proxy refusal, the retry loop, delivery records and threads.
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
-- `studio/backend/tests/test_webhooks.py` — 107 tests covering all of the above.
+- `studio/backend/tests/test_webhooks.py` — 103 tests covering all of the above.
 
 ## What changed, and why
 
@@ -72,6 +72,21 @@ IPv4-mapped IPv6 is unmapped first.
 `GET /api/settings/webhooks` distinguishes a certificate failure from a timeout in
 JSON. No UI consumes it yet and no text is special-cased in the frontend.
 
+**The suite states each behavior once.** `test_webhooks.py` is written as a contract:
+repeated cases became parametrized tables with one row per case — the four delivery
+outcomes (unreachable, 404, 500-then-200, 500), the two terminal-claim shapes, the
+http/https blocked resolution, and both legacy-secret read paths — and three tests
+that only restated coverage a broader case already held were deleted (the
+pinned-address certificate case, the 20k spike, the retry-record duplicate).
+Assertions name bounds (`prefix_count`, `entries()`) instead of reaching into heap
+internals. The flat-retention, floor-invariant and 200k-attribution tests are
+unchanged.
+
+**The unused delivery flag is gone.** `webhook_delivery.deliver` had a `record: bool`
+parameter that no caller ever passed; the entry is now always appended, and the
+single-use `_record` helper was inlined into the one place that wrote to the ring
+buffer.
+
 ## How the module operates now
 
 Four modules, one direction of flow: `webhooks` imports `webhook_delivery`,
@@ -116,7 +131,7 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 
 ## Verification
 
-`134 passed`: 107 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
+`130 passed`: 103 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
 case, proxied-send refusal, and route-level assertions for surfaced errors.

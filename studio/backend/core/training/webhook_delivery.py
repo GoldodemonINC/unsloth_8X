@@ -219,11 +219,6 @@ def _post(
     return _Attempt(None, None, last_error, FAILURE_TRANSPORT)
 
 
-def _record(record: dict) -> None:
-    with _delivery_lock:
-        _deliveries.append(record)
-
-
 def get_deliveries() -> list[dict]:
     with _delivery_lock:
         return list(reversed(_deliveries))
@@ -237,7 +232,6 @@ def deliver(
     secret: str,
     timeout: Optional[float] = None,
     max_attempts: Optional[int] = None,
-    record: bool = True,
 ) -> dict:
     timeout = REQUEST_TIMEOUT_S if timeout is None else timeout
     max_attempts = MAX_ATTEMPTS if max_attempts is None else max_attempts
@@ -306,8 +300,8 @@ def deliver(
         "anomaly_kind": (payload.get("anomaly") or {}).get("kind"),
         "test": bool(payload.get("test")),
     }
-    if record:
-        _record(entry)
+    with _delivery_lock:
+        _deliveries.append(entry)
     entry["signature_header"] = signature or None
     entry["signature_verified"] = (
         verify_signature(secret, timestamp, body, signature) if signature else False
