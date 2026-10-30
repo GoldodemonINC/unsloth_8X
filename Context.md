@@ -17,6 +17,9 @@ Files this work owns:
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
 - `studio/backend/tests/test_webhooks.py` — 98 tests covering all of the above.
+- `studio/backend/tests/test_end_to_end_webhook.py` — the end-to-end path: eviction
+  past the bound, detection at the absolute step, signed delivery to a loopback
+  sink, and the disabled gate.
 
 ## What changed, and why
 
@@ -138,7 +141,8 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 
 ## Verification
 
-`125 passed`: 98 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
+`127 passed`: 98 in `studio/backend/tests/test_webhooks.py`, 2 in
+`studio/backend/tests/test_end_to_end_webhook.py`, plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
 case, proxied-send refusal, and route-level assertions for surfaced errors.
@@ -158,6 +162,3 @@ files in the working tree.
 
 1. Make the import refusal name the offending window and its value (today's message
    always blames `MAX_RETAINED_POINTS`, even when a window constant is what moved).
-2. Drive a post-eviction anomaly through the full delivery path to a local sink as a
-   permanent test — exercised by hand after the split (8,414 points, spike at 8,400,
-   signed delivery to a loopback sink), but the suites still do not cover it.
