@@ -10,6 +10,8 @@ import math
 import socket
 import sqlite3
 import ssl
+import subprocess
+import sys
 import threading
 from pathlib import Path
 import time
@@ -644,6 +646,83 @@ def test_the_import_refusal_names_the_offending_window_and_its_value():
     assert refusal is not None
     assert refusal.startswith(f"MAX_RETAINED_POINTS = {floor - 1}"), refusal
     assert f"required by BASELINE_WINDOW = {loss_anomaly.BASELINE_WINDOW}" in refusal, refusal
+
+def _import_loss_anomaly_copy(
+    tmp_path: Path, mutation: tuple[str, str] | None = None, optimize: bool = False
+) -> tuple[int, str, str]:
+    source = Path(loss_anomaly.__file__).read_text(encoding = "utf-8")
+    if mutation is not None:
+        before, after = mutation
+        assert before in source, before
+        source = source.replace(before, after, 1)
+    module_copy = tmp_path / "loss_anomaly.py"
+    module_copy.write_text(source, encoding = "utf-8")
+    importer = tmp_path / "importer.py"
+    importer.write_text(
+        "\n".join(
+            [
+                'import importlib.util',
+                'import sys',
+                "spec = importlib.util.spec_from_file_location('mutated_loss_anomaly', sys.argv[1])",
+                'module = importlib.util.module_from_spec(spec)',
+                'try:',
+                '    spec.loader.exec_module(module)',
+                'except AssertionError as error:',
+                "    print('REFUSED:' + str(error))",
+                '    raise SystemExit(7)',
+                "print('IMPORTED:' + str(module.retained_points_floor()))",
+            ]
+        ),
+        encoding = "utf-8",
+    )
+    command = [sys.executable]
+    if optimize:
+        command.append("-O")
+    result = subprocess.run(
+        command + [str(importer), str(module_copy)],
+        capture_output = True,
+        text = True,
+        timeout = 60,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr
+
+
+
+def test_the_shipped_module_imports_clean_through_the_import_system(tmp_path):
+    code, stdout, stderr = _import_loss_anomaly_copy(tmp_path)
+    assert code == 0, stderr
+    assert stdout == f"IMPORTED:{loss_anomaly.retained_points_floor()}"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected", "optimize"),
+    [
+        (
+            ("BASELINE_WINDOW = 3600", "BASELINE_WINDOW = 6000"),
+            "MAX_RETAINED_POINTS = 8192 is below the floor 12011 required by BASELINE_WINDOW = 6000",
+            False,
+        ),
+        (
+            ("RECENT_WINDOW = 3600", "RECENT_WINDOW = 9000"),
+            "MAX_RETAINED_POINTS = 8192 is below the floor 9010 required by RECENT_WINDOW = 9000",
+            False,
+        ),
+        (
+            ("MAX_RETAINED_POINTS = 8192", "MAX_RETAINED_POINTS = 5000"),
+            "MAX_RETAINED_POINTS = 5000 is below the floor 7211 required by BASELINE_WINDOW = 3600",
+            False,
+        ),
+        (
+            ("PLATEAU_WINDOW = 2600", "PLATEAU_WINDOW = 9000"),
+            "MAX_RETAINED_POINTS = 8192 is below the floor 9010 required by PLATEAU_WINDOW = 9000",
+            True,
+        ),
+    ],
+)
+def test_a_broken_relation_refuses_on_a_real_import(tmp_path, mutation, expected, optimize):
+    code, stdout, stderr = _import_loss_anomaly_copy(tmp_path, mutation, optimize)
+    assert code == 7, stderr
+    assert stdout == f"REFUSED:{expected}"
 
 def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
     monkeypatch,

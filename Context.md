@@ -16,7 +16,7 @@ Files this work owns:
   pinned transport, proxy refusal, the retry loop, delivery records and threads.
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
-- `studio/backend/tests/test_webhooks.py` — 99 tests covering all of the above.
+- `studio/backend/tests/test_webhooks.py` — 104 tests covering all of the above.
 - `studio/backend/tests/test_end_to_end_webhook.py` — the end-to-end path: eviction
   past the bound, detection at the absolute step, signed delivery to a loopback
   sink, and the disabled gate.
@@ -51,7 +51,11 @@ fails on a broken bound and, independently, fails if any single term is dropped 
 the floor while the runtime check would still pass, and
 `test_the_import_refusal_names_the_offending_window_and_its_value` walks each window
 in turn and checks that the message names it, then lowers the bound and checks that
-the message leads with the bound.
+the message leads with the bound. The raise itself is pinned by
+`test_the_shipped_module_imports_clean_through_the_import_system` and
+`test_a_broken_relation_refuses_on_a_real_import`: they copy the real file into a
+temp directory and import it through a genuine subprocess (one row under `python
+-O`), so deleting the `if`/`raise` or downgrading it to an `assert` fails the suite.
 
 **Failure classification by kind, not by message matching.** Every delivery outcome
 carries a `failure_kind` drawn from a fixed set (`invalid`, `unresolvable`, `blocked`,
@@ -150,11 +154,17 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 
 ## Verification
 
-`128 passed`: 99 in `studio/backend/tests/test_webhooks.py`, 2 in
+`133 passed`: 104 in `studio/backend/tests/test_webhooks.py`, 2 in
 `studio/backend/tests/test_end_to_end_webhook.py`, plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
 case, proxied-send refusal, and route-level assertions for surfaced errors.
+
+A bounded backend run over the webhook surface and every `routes/settings` importer —
+53 files, 3,858 tests — passes 3,783 with 70 skipped and the same 35 failures as the
+pre-change baseline (identical failure set: symlink privilege, the Unix-only
+`resource` module, HOME/XDG path assertions), so none of this thread's changes moved
+that surface.
 
 ## Not part of this work
 
