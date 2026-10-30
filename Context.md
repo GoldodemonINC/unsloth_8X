@@ -90,7 +90,9 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 `134 passed`: 107 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
-case, proxied-send refusal, and route-level assertions for surfaced errors.## Not part of this work
+case, proxied-send refusal, and route-level assertions for surfaced errors.
+
+## Not part of this work
 
 The NRC-2 → NRC-3 licence rename is not part of the webhook work described here,
 but it is no longer sitting uncommitted: this session committed it as `ee59feed3`
