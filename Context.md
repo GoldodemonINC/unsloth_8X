@@ -248,6 +248,14 @@ pre-change baseline (identical failure set: symlink privilege, the Unix-only
 `resource` module, HOME/XDG path assertions), so none of this thread's changes moved
 that surface.
 
+Review round on PR #20: `134 passed` across `test_advanced_resources.py`,
+`test_advanced_routes.py`, `test_advanced_scaling_routes.py`, `test_labs_autoscale.py`,
+`test_labs.py`, `test_labs_artifacts.py` and `test_advanced_scaling.py`, then
+`17 passed` in `test_labs_cmt.py` and `test_labs_repair.py` — the suites that reach
+`_start_job`, whose signature grew. No comments were added and line endings stayed
+uniform; `git add` reports 126 insertions and 9 deletions across the six files, so
+nothing was rewritten wholesale.
+
 ## Performance: `observe_progress` at 10k, 50k, 100k steps
 
 One point per training step over a decaying-loss curve, min of three runs each,
@@ -306,6 +314,9 @@ on branch `x8-growth-policy`, pushed to the `x8` remote, and open as PR #20
 against `x8-main` with no auto-merge:
 https://github.com/GoldodemonINC/unsloth_8X/pull/20
 
+Two further commits ride the same branch: `eaa37fbeb` records the `observe_progress`
+benchmark below, and `297bedb42` answers the review.
+
 The index is clean. The other 43 entries in `git status` belong to concurrent
 sessions — 24 modified files under `studio/frontend/` (that session owns the
 frontend gate matrix), plus untracked `.playtest-library/`, `AGENTS.md`,
@@ -317,8 +328,13 @@ suites and the eight labs and advanced suites. No backend lint gate is wired —
 ruff is configured in the root `pyproject.toml` but is not installed in either
 virtualenv.
 
-If this thread continues, PR #20 needs a review and a merge first. The one open
-engineering item is the front-trim decision recorded under Performance: batching
-the 8,192-slot memmove needs `test_end_to_end_webhook.py` relaxed or
-`RetainedSeries` moved to a deque, and the measured saving does not justify
-either.
+PR #20 has had one review: three findings, all three answered — two corrections to
+this file (one of them already fixed in `eaa37fbeb` before the review ran) and the
+RAM sizing Major in `297bedb42`. It is waiting on re-review and a merge.
+
+Two engineering items are open and deliberately deferred. The `disk` multiplier on the
+`scale` row has the same under-reservation the `ram` fix just closed: the review asked
+for RAM, and disk would size from `growth_ratio` the same way, but that is a separate
+decision. The front-trim decision recorded under Performance needs
+`test_end_to_end_webhook.py` relaxed or `RetainedSeries` moved to a deque, and the
+measured saving does not justify either.
