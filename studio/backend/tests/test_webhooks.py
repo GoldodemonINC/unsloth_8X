@@ -601,19 +601,22 @@ def test_a_long_run_retains_a_flat_amount_of_state():
 
 
 def test_the_retention_bound_stays_above_every_detector_window():
-    assert loss_anomaly.MAX_RETAINED_POINTS >= loss_anomaly.retained_points_floor()
-    for window in (
-        "BASELINE_WINDOW",
-        "RECENT_WINDOW",
-        "PLATEAU_WINDOW",
-        "SPIKE_BASELINE",
-    ):
+    assert loss_anomaly.MAX_RETAINED_POINTS == 8192
+    assert loss_anomaly.retained_points_floor() == 7211
+    expectations = {
+        "BASELINE_WINDOW": 16395,
+        "RECENT_WINDOW": 8202,
+        "PLATEAU_WINDOW": 8202,
+        "SPIKE_BASELINE": 8203,
+    }
+    for window, required in expectations.items():
         original = getattr(loss_anomaly, window)
         setattr(loss_anomaly, window, loss_anomaly.MAX_RETAINED_POINTS)
         try:
-            assert loss_anomaly.retained_points_floor() > loss_anomaly.MAX_RETAINED_POINTS, window
+            floor = loss_anomaly.retained_points_floor()
         finally:
             setattr(loss_anomaly, window, original)
+        assert floor == required, window
 
 
 def test_the_import_refusal_names_the_offending_window_and_its_value():
@@ -646,6 +649,7 @@ def test_the_import_refusal_names_the_offending_window_and_its_value():
     assert refusal is not None
     assert refusal.startswith(f"MAX_RETAINED_POINTS = {floor - 1}"), refusal
     assert f"required by BASELINE_WINDOW = {loss_anomaly.BASELINE_WINDOW}" in refusal, refusal
+
 
 def _import_loss_anomaly_copy(
     tmp_path: Path, mutation: tuple[str, str] | None = None, optimize: bool = False
@@ -687,7 +691,6 @@ def _import_loss_anomaly_copy(
     return result.returncode, result.stdout.strip(), result.stderr
 
 
-
 def test_the_shipped_module_imports_clean_through_the_import_system(tmp_path):
     code, stdout, stderr = _import_loss_anomaly_copy(tmp_path)
     assert code == 0, stderr
@@ -723,6 +726,7 @@ def test_a_broken_relation_refuses_on_a_real_import(tmp_path, mutation, expected
     code, stdout, stderr = _import_loss_anomaly_copy(tmp_path, mutation, optimize)
     assert code == 7, stderr
     assert stdout == f"REFUSED:{expected}"
+
 
 def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
     monkeypatch,
