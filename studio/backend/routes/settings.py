@@ -780,6 +780,7 @@ class WebhookDeliveryInfo(BaseModel):
     ok: bool = False
     status_code: Optional[int] = None
     error: Optional[str] = None
+    failure_kind: Optional[str] = None
     response: Optional[str] = None
     duration_ms: int = 0
     signed: bool = False

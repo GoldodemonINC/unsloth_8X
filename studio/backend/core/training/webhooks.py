@@ -6,25 +6,73 @@ from __future__ import annotations
 import hashlib
 import heapq
 import hmac
+import http.client
 import json
 import math
+import socket
+import ssl
 import threading
 import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
-from urllib import error as urlerror
+from typing import Any, Iterable, NamedTuple, Optional
 from urllib import request as urlrequest
+from urllib.parse import urlsplit
 
-from utils.webhook_settings import get_webhook_config, validate_webhook_url
+from utils.webhook_settings import (
+    ALLOWED,
+    LOOPBACK,
+    classify_webhook_host,
+    get_webhook_config,
+    validate_webhook_url,
+)
 
 MAX_ATTEMPTS = 3
 REQUEST_TIMEOUT_S = 5.0
 RETRY_DELAYS = (0.5, 1.5)
 MAX_DELIVERIES = 25
 MAX_TERMINAL_KEYS = 100
+MAX_TRACKED_RUNS = 8
+MAX_RETAINED_POINTS = 8192
+BASELINE_WINDOW = 3600
+RECENT_WINDOW = 3600
+PLATEAU_WINDOW = 2600
+SPIKE_BASELINE = 20
 CHECK_EVERY = 10
+
+
+def retained_points_floor() -> int:
+    recent_removal = RECENT_WINDOW + CHECK_EVERY
+    prefix_fill = 2 * BASELINE_WINDOW + CHECK_EVERY + 1
+    plateau_window = PLATEAU_WINDOW + CHECK_EVERY
+    spike_baseline = SPIKE_BASELINE + CHECK_EVERY + 1
+    return max(recent_removal, prefix_fill, plateau_window, spike_baseline)
+
+
+if MAX_RETAINED_POINTS < retained_points_floor():
+    raise AssertionError("MAX_RETAINED_POINTS is smaller than the detector windows need")
+
+FAILURE_INVALID = "invalid"
+FAILURE_UNRESOLVABLE = "unresolvable"
+FAILURE_BLOCKED = "blocked"
+FAILURE_PROXY = "proxy"
+FAILURE_CERTIFICATE = "certificate"
+FAILURE_HTTP = "http"
+FAILURE_TRANSPORT = "transport"
+
+
+class _Refusal(NamedTuple):
+    kind: str
+    message: str
+
+
+class _Attempt(NamedTuple):
+    status_code: Optional[int]
+    body: Optional[str]
+    error: Optional[str]
+    kind: Optional[str]
+
 
 SIGNATURE_HEADER = "X-Unsloth-Signature-256"
 EVENT_HEADER = "X-Unsloth-Event"
@@ -52,6 +100,28 @@ def _median(values: list[float]) -> float:
     if len(ordered) % 2 == 0:
         return (ordered[middle - 1] + ordered[middle]) / 2
     return ordered[middle]
+
+
+class _RetainedSeries:
+    def __init__(self, points: list[tuple[float, float]], base: int, total: int):
+        self.points = points
+        self.base = base
+        self.total = total
+
+    def __len__(self) -> int:
+        return self.total
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            start, stop, step = index.indices(self.total)
+            start = max(start, self.base)
+            stop = max(stop, self.base)
+            return self.points[start - self.base : stop - self.base : step]
+        if index < 0:
+            index += self.total
+        if index < self.base:
+            raise IndexError(index)
+        return self.points[index - self.base]
 
 
 class _PrefixMedian:
@@ -144,7 +214,7 @@ class _WindowMedian:
     def entries(self) -> int:
         return len(self.low) + len(self.high)
 
-    def rebuild(self, points: list[tuple[float, float]], start: int, end: int) -> None:
+    def rebuild(self, points: "_RetainedSeries", start: int, end: int) -> None:
         self.low.clear()
         self.high.clear()
         self.side.clear()
@@ -171,18 +241,20 @@ class _LossAnomalyTracker:
         self.plateau_min: deque[tuple[int, float]] = deque()
         self.plateau_max: deque[tuple[int, float]] = deque()
 
-    def advance(self, points: list[tuple[float, float]]) -> None:
+    def advance(self, points: "_RetainedSeries | list[tuple[float, float]]") -> None:
+        if not isinstance(points, _RetainedSeries):
+            points = _RetainedSeries(list(points), 0, len(points))
         total = len(points)
         if self.nan_step is not None:
             return
 
-        third = total // 3
-        while self.prefix_count < third:
+        third = min(total // 3, BASELINE_WINDOW)
+        while self.prefix_count < third and self.prefix_count >= points.base:
             self.prefix.add(points[self.prefix_count][1])
             self.prefix_count += 1
 
-        last_start = total - third
-        plateau_length = min(total, max(10, total // 4))
+        last_start = max(total - third, total - RECENT_WINDOW)
+        plateau_length = min(total, max(10, min(total // 4, PLATEAU_WINDOW)))
         plateau_start = total - plateau_length
 
         for index in range(self.spike_scanned, total):
@@ -203,7 +275,7 @@ class _LossAnomalyTracker:
 
             if index >= 5:
                 baseline = _median(
-                    [previous for _step, previous in points[max(0, index - 20) : index]]
+                    [previous for _step, previous in points[max(0, index - SPIKE_BASELINE) : index]]
                 )
                 if math.isfinite(baseline) and baseline > 0:
                     ratio = value / baseline
@@ -241,7 +313,7 @@ class _LossAnomalyTracker:
             self.plateau.rebuild(points, self.plateau_start, total)
         self.spike_scanned = total
 
-    def _refresh_last_sums(self, points: list[tuple[float, float]], total: int) -> None:
+    def _refresh_last_sums(self, points: "_RetainedSeries", total: int) -> None:
         self.last_sum = 0.0
         self.last_sum_iy = 0.0
         for offset, index in enumerate(range(self.last_start, total)):
@@ -250,7 +322,11 @@ class _LossAnomalyTracker:
             self.last_sum_iy += offset * value
         self.last_sums_at = total
 
-    def detect(self, points: list[tuple[float, float]]) -> Optional[dict]:
+    def detect(
+        self, points: "_RetainedSeries | list[tuple[float, float]]"
+    ) -> Optional[dict]:
+        if not isinstance(points, _RetainedSeries):
+            points = _RetainedSeries(list(points), 0, len(points))
         total = len(points)
         if total < 8:
             return None
@@ -334,8 +410,9 @@ def detect_loss_anomaly(points: Iterable[tuple[float, float]]) -> Optional[dict]
         return None
 
     tracker = _LossAnomalyTracker()
-    tracker.advance(ordered)
-    return tracker.detect(ordered)
+    retained = _RetainedSeries(ordered, 0, len(ordered))
+    tracker.advance(retained)
+    return tracker.detect(retained)
 
 
 def _canonical_body(payload: dict) -> bytes:
@@ -401,23 +478,146 @@ def build_payload(
     }
 
 
-def _post(
-    url: str, body: bytes, headers: dict[str, str], timeout: float
-) -> tuple[Optional[int], Optional[str], Optional[str]]:
-    request = urlrequest.Request(url, data = body, headers = headers, method = "POST")
-    try:
-        with urlrequest.urlopen(request, timeout = timeout) as response:
-            status = int(response.status)
-            text = response.read(512).decode("utf-8", errors = "replace")
-            return status, text, None
-    except urlerror.HTTPError as exc:
+class _PinnedConnection(http.client.HTTPConnection):
+    def __init__(self, host, port, *, sockaddr, timeout, context = None):
+        super().__init__(host, port, timeout = timeout)
+        self._pinned = sockaddr
+        self._context = context
+
+    def connect(self):
+        family, address = self._pinned
+        sock = socket.socket(family, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
         try:
-            text = exc.read(512).decode("utf-8", errors = "replace")
-        except Exception:
-            text = None
-        return int(exc.code), text, f"HTTP {exc.code}"
-    except Exception as exc:
-        return None, None, str(exc) or exc.__class__.__name__
+            sock.connect(address)
+            self.sock = (
+                self._context.wrap_socket(sock, server_hostname = self.host)
+                if self._context is not None
+                else sock
+            )
+        except BaseException:
+            sock.close()
+            raise
+
+
+def _resolve_endpoint(url: str) -> tuple[list[tuple[int, tuple]], Optional[_Refusal]]:
+    parts = urlsplit(url)
+    host = parts.hostname
+    if not host:
+        return [], _Refusal(FAILURE_INVALID, "Webhook URL has no host")
+    try:
+        port = parts.port
+    except ValueError:
+        return [], _Refusal(FAILURE_INVALID, "Webhook URL has an invalid port")
+    if port is None:
+        port = 443 if parts.scheme.lower() == "https" else 80
+    try:
+        infos = socket.getaddrinfo(host, port, type = socket.SOCK_STREAM)
+    except OSError as exc:
+        return [], _Refusal(
+            FAILURE_UNRESOLVABLE, str(exc) or "Webhook host could not be resolved"
+        )
+    endpoints: list[tuple[int, tuple]] = []
+    for family, _kind, _protocol, _canonical, sockaddr in infos:
+        category = classify_webhook_host(sockaddr[0])
+        if category not in {LOOPBACK, ALLOWED}:
+            return [], _Refusal(
+                FAILURE_BLOCKED, f"Webhook host resolves to a {category} address"
+            )
+        endpoints.append((family, sockaddr))
+    if not endpoints:
+        return [], _Refusal(
+            FAILURE_UNRESOLVABLE, "Webhook host resolved to no address"
+        )
+    return endpoints, None
+
+
+def _proxy_blocked_reason(url: str) -> Optional[_Refusal]:
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        if (
+            not host
+            or classify_webhook_host(host) == LOOPBACK
+            or urlrequest.proxy_bypass(host)
+        ):
+            return None
+        scheme = parts.scheme.lower()
+        proxies = urlrequest.getproxies()
+        proxy = proxies.get(scheme) or proxies.get("all")
+        if not proxy:
+            return None
+        parsed = urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+        label = parsed.hostname or proxy
+        if parsed.port:
+            label = f"{label}:{parsed.port}"
+        environment = urlrequest.getproxies_environment()
+        if environment.get(scheme) or environment.get("all"):
+            variable = f"{scheme.upper()}_PROXY" if environment.get(scheme) else "ALL_PROXY"
+            return _Refusal(
+                FAILURE_PROXY,
+                "Webhook delivery is direct-only so the verified address is always used; "
+                f"{variable} {label} is configured for this machine and was not used. "
+                f"Add {host} to NO_PROXY to deliver directly.",
+            )
+        return _Refusal(
+            FAILURE_PROXY,
+            "Webhook delivery is direct-only so the verified address is always used; "
+            f"this machine's system proxy {label} is configured and was not used. "
+            "NO_PROXY is not read for the system proxy on this platform; "
+            f"add {host} to the operating system's proxy bypass list to deliver directly.",
+        )
+    except Exception:
+        return None
+
+
+def _post(
+    url: str,
+    endpoints: list[tuple[int, tuple]],
+    body: bytes,
+    headers: dict[str, str],
+    timeout: float,
+) -> _Attempt:
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    secure = parts.scheme.lower() == "https"
+    default_port = 443 if secure else 80
+    port = parts.port or default_port
+    target = parts.path or "/"
+    if parts.query:
+        target = f"{target}?{parts.query}"
+    authority = f"[{host}]" if ":" in host else host
+    if port != default_port:
+        authority = f"{authority}:{port}"
+    request_headers = dict(headers)
+    request_headers["Host"] = authority
+    context = ssl.create_default_context() if secure else None
+    last_error: Optional[str] = None
+    for family, sockaddr in endpoints:
+        connection = _PinnedConnection(
+            host,
+            port,
+            sockaddr = (family, sockaddr),
+            timeout = timeout,
+            context = context,
+        )
+        try:
+            connection.request("POST", target, body = body, headers = request_headers)
+            response = connection.getresponse()
+            text = response.read(512).decode("utf-8", errors = "replace")
+            return _Attempt(int(response.status), text, None, FAILURE_HTTP)
+        except ssl.SSLCertVerificationError as exc:
+            return _Attempt(
+                None,
+                None,
+                str(exc) or "certificate verification failed",
+                FAILURE_CERTIFICATE,
+            )
+        except Exception as exc:
+            last_error = str(exc) or exc.__class__.__name__
+        finally:
+            connection.close()
+    return _Attempt(None, None, last_error, FAILURE_TRANSPORT)
 
 
 def _record(record: dict) -> None:
@@ -461,17 +661,33 @@ def _deliver(
     status_code: Optional[int] = None
     response_text: Optional[str] = None
     last_error: Optional[str] = None
+    failure_kind: Optional[str] = None
     ok = False
-    for attempt in range(1, max_attempts + 1):
-        attempts = attempt
-        status_code, response_text, last_error = _post(url, body, headers, timeout)
-        if status_code is not None and 200 <= status_code < 300:
-            ok = True
-            break
-        if status_code is not None and 400 <= status_code < 500 and status_code not in {408, 425, 429}:
-            break
-        if attempt < max_attempts:
-            time.sleep(RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)])
+    endpoints, resolution_refusal = _resolve_endpoint(url)
+    refusal = resolution_refusal or _proxy_blocked_reason(url)
+    if refusal is not None:
+        attempts = 1
+        last_error = refusal.message
+        failure_kind = refusal.kind
+    else:
+        for attempt in range(1, max_attempts + 1):
+            attempts = attempt
+            outcome = _post(url, endpoints, body, headers, timeout)
+            status_code = outcome.status_code
+            response_text = outcome.body
+            last_error = outcome.error
+            failure_kind = outcome.kind
+            if status_code is not None and 200 <= status_code < 300:
+                ok = True
+                break
+            if outcome.kind == FAILURE_CERTIFICATE:
+                break
+            if status_code is not None and 300 <= status_code < 400:
+                break
+            if status_code is not None and 400 <= status_code < 500 and status_code not in {408, 425, 429}:
+                break
+            if attempt < max_attempts:
+                time.sleep(RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)])
 
     record_data = payload.get("run") or {}
     entry = {
@@ -484,6 +700,7 @@ def _deliver(
         "ok": ok,
         "status_code": status_code,
         "error": None if ok else (last_error or (f"HTTP {status_code}" if status_code else "Request failed")),
+        "failure_kind": None if ok else failure_kind,
         "response": (response_text or "")[:200] or None,
         "duration_ms": int((time.monotonic() - started) * 1000),
         "signed": bool(signature),
@@ -597,31 +814,45 @@ def observe_progress(
         with _progress_lock:
             state = _progress.get(run_id)
             if state is None:
+                if len(_progress) >= MAX_TRACKED_RUNS:
+                    stale = min(_progress, key = lambda key: _progress[key]["touched"])
+                    _progress.pop(stale, None)
                 state = {
                     "points": [],
+                    "base": 0,
+                    "total": 0,
                     "checked": 0,
                     "seen": set(),
                     "metrics": {},
                     "tracker": _LossAnomalyTracker(),
+                    "touched": 0.0,
                 }
                 _progress[run_id] = state
+            state["touched"] = time.monotonic()
             points = state["points"]
             if points and step_number <= points[-1][0]:
                 return None
             points.append((step_number, value))
+            state["total"] += 1
+            if len(points) > MAX_RETAINED_POINTS:
+                dropped = len(points) - MAX_RETAINED_POINTS
+                del points[:dropped]
+                state["base"] += dropped
             if parent_guard is not None:
                 parent_guard.observe(step_number, value)
             if metrics:
                 state["metrics"] = metrics
-            should_check = len(points) >= 8 and (
-                len(points) >= state["checked"] + CHECK_EVERY or state["checked"] < 8
+            should_check = state["total"] >= 8 and (
+                state["total"] >= state["checked"] + CHECK_EVERY
+                or state["checked"] < 8
             )
             anomaly = None
             if should_check:
-                state["checked"] = len(points)
+                state["checked"] = state["total"]
                 tracker = state["tracker"]
-                tracker.advance(points)
-                anomaly = tracker.detect(points)
+                retained = _RetainedSeries(points, state["base"], state["total"])
+                tracker.advance(retained)
+                anomaly = tracker.detect(retained)
 
         if anomaly is None:
             return None

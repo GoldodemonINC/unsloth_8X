@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import datetime
+import ipaddress
 import json
 import math
+import socket
 import sqlite3
+import ssl
 import threading
 from pathlib import Path
 import time
@@ -13,6 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,7 +31,13 @@ from utils import webhook_settings
 
 class _Sink:
 
-    def __init__(self, statuses: tuple[int, ...] = (200,), delay: float = 0.0):
+    def __init__(
+        self,
+        statuses: tuple[int, ...] = (200,),
+        delay: float = 0.0,
+        certfile: Path | None = None,
+        keyfile: Path | None = None,
+    ):
         self.statuses = list(statuses)
         self.delay = delay
         self.requests: list[dict] = []
@@ -51,16 +65,76 @@ class _Sink:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        if certfile is not None and keyfile is not None:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile, keyfile)
+            self.server.socket = context.wrap_socket(self.server.socket, server_side = True)
         self.thread = threading.Thread(target = self.server.serve_forever, daemon = True)
         self.thread.start()
 
     @property
+    def port(self) -> int:
+        return int(self.server.server_address[1])
+
+    @property
     def url(self) -> str:
-        return f"http://127.0.0.1:{self.server.server_address[1]}/hook"
+        return f"http://127.0.0.1:{self.port}/hook"
 
     def close(self):
         self.server.shutdown()
         self.server.server_close()
+
+
+def _restore_stdlib_ssl(monkeypatch) -> None:
+    stdlib = next(c for c in ssl._SSLContext.__subclasses__() if c.__module__ == "ssl")
+    monkeypatch.setattr(ssl, "SSLContext", stdlib)
+
+
+def _mint_certificate(
+    directory: Path, sans: list, common_name: str
+) -> tuple[Path, Path, Path]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent = 65537, key_size = 2048)
+    ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Webhook Test CA")])
+    ca = (
+        x509.CertificateBuilder()
+        .subject_name(ca_name)
+        .issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes = 5))
+        .not_valid_after(now + datetime.timedelta(days = 2))
+        .add_extension(x509.BasicConstraints(ca = True, path_length = None), critical = True)
+        .sign(ca_key, hashes.SHA256())
+    )
+    leaf_key = rsa.generate_private_key(public_exponent = 65537, key_size = 2048)
+    leaf = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+        .issuer_name(ca_name)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes = 5))
+        .not_valid_after(now + datetime.timedelta(days = 2))
+        .add_extension(x509.SubjectAlternativeName(sans), critical = False)
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical = False
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+    ca_path = directory / "ca.pem"
+    cert_path = directory / "leaf.pem"
+    key_path = directory / "leaf.key"
+    ca_path.write_bytes(ca.public_bytes(serialization.Encoding.PEM))
+    cert_path.write_bytes(leaf.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        leaf_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    return ca_path, cert_path, key_path
 
 
 @pytest.fixture
@@ -114,6 +188,13 @@ def fast_delivery(monkeypatch):
     monkeypatch.setattr(webhooks, "REQUEST_TIMEOUT_S", 0.5)
 
 
+@pytest.fixture(autouse = True)
+def isolated_proxy_environment(monkeypatch):
+    monkeypatch.setattr(webhooks.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(webhooks.urlrequest, "getproxies_environment", lambda: {})
+    monkeypatch.setattr(webhooks.urlrequest, "proxy_bypass", lambda _host: False)
+
+
 @pytest.mark.parametrize(
     "url",
     [
@@ -140,12 +221,65 @@ def test_accepts_http_and_https_endpoints(url):
         ("https://user:secret@example.com/hook", "credentials"),
         ("http://example.com:notaport/hook", "port"),
         ("http://example.com/hook with space", "spaces"),
+        ("http://169.254.169.254/latest/meta-data/", "link-local"),
+        ("http://[::ffff:169.254.169.254]/hook", "link-local"),
+        ("http://224.0.0.1/hook", "multicast"),
+        ("http://0.0.0.0/hook", "unspecified"),
+        ("http://240.0.0.1/hook", "reserved"),
     ],
 )
 def test_refuses_non_http_or_malformed_endpoints(url, reason):
     with pytest.raises(ValueError) as error:
         webhook_settings.validate_webhook_url(url)
     assert reason in str(error.value).lower()
+
+
+@pytest.mark.parametrize(
+    "host, address, category",
+    [
+        ("127.0.0.1", "127.0.0.1", webhook_settings.LOOPBACK),
+        ("[::1]", "::1", webhook_settings.LOOPBACK),
+        ("localhost", "127.0.0.1", webhook_settings.LOOPBACK),
+        ("169.254.169.254", "169.254.169.254", "link-local"),
+        ("224.0.0.1", "224.0.0.1", "multicast"),
+        ("0.0.0.0", "0.0.0.0", "unspecified"),
+        ("240.0.0.1", "240.0.0.1", "reserved"),
+        ("[::ffff:169.254.169.254]", "::ffff:169.254.169.254", "link-local"),
+        ("[::ffff:127.0.0.1]", "::ffff:127.0.0.1", webhook_settings.LOOPBACK),
+        ("8.8.8.8", "8.8.8.8", webhook_settings.ALLOWED),
+    ],
+)
+def test_literal_and_resolved_paths_share_one_address_policy(
+    host, address, category, monkeypatch
+):
+    assert webhook_settings.classify_webhook_host(host) == category
+
+    url = f"http://{host}/hook"
+    permitted = category in {webhook_settings.LOOPBACK, webhook_settings.ALLOWED}
+    if permitted:
+        assert webhook_settings.validate_webhook_url(url) == url
+    else:
+        with pytest.raises(ValueError, match = category):
+            webhook_settings.validate_webhook_url(url)
+
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (family, socket.SOCK_STREAM, 6, "", (address, 80))
+        ],
+    )
+
+    endpoints, refusal = webhooks._resolve_endpoint(url)
+
+    assert (refusal is None) is permitted
+    if permitted:
+        assert endpoints
+    else:
+        assert endpoints == []
+        assert refusal.kind == webhooks.FAILURE_BLOCKED
+        assert category in refusal.message
 
 
 def test_webhooks_start_disabled_with_no_endpoint(settings_store):
@@ -162,6 +296,418 @@ def test_disabled_alerts_can_be_saved_without_an_endpoint(settings_store):
     assert saved["url"] == ""
     with pytest.raises(ValueError):
         webhook_settings.set_webhook_settings(enabled = True, url = "")
+
+
+def test_a_redirect_is_not_followed_to_its_target(sink):
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.send_response(302)
+            self.send_header("Location", sink.url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Redirector)
+    thread = threading.Thread(target = server.serve_forever, daemon = True)
+    thread.start()
+    try:
+        result = webhooks.send_test_event(
+            url = f"http://127.0.0.1:{server.server_address[1]}/hook",
+            secret = "topsecret",
+            max_attempts = 1,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result["ok"] is False
+    assert result["status_code"] == 302
+    assert sink.requests == []
+
+
+def test_a_second_resolution_cannot_redirect_delivery_to_an_internal_address(
+    sink, monkeypatch
+):
+    safe = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", sink.port))]
+    unsafe = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))]
+    calls: list[tuple] = []
+
+    def resolver(*args, **_kwargs):
+        calls.append(args)
+        return safe if len(calls) == 1 else unsafe
+
+    monkeypatch.setattr(webhooks.socket, "getaddrinfo", resolver)
+
+    result = webhooks.send_test_event(
+        url = "http://rebind.example/hook", secret = "topsecret", max_attempts = 1
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+    assert len(sink.requests) == 1
+    assert sink.requests[0]["headers"]["host"] == "rebind.example"
+
+
+def test_a_host_that_resolves_to_link_local_fails_once_without_backoff(sink, monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))
+        ],
+    )
+
+    result = webhooks.send_test_event(url = "http://metadata.example/hook", secret = "topsecret")
+
+    assert result["ok"] is False
+    assert result["attempts"] == 1
+    assert result["status_code"] is None
+    assert "link-local" in result["error"]
+    assert sleeps == []
+    assert sink.requests == []
+
+
+def test_https_delivery_verifies_the_host_name_while_connecting_to_the_pinned_address(
+    tmp_path, monkeypatch
+):
+    _restore_stdlib_ssl(monkeypatch)
+    ca, cert, key = _mint_certificate(tmp_path, [x509.DNSName("localhost")], "localhost")
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    receiver = _Sink(certfile = cert, keyfile = key)
+    try:
+        monkeypatch.setattr(
+            webhooks.socket,
+            "getaddrinfo",
+            lambda *_args, **_kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
+            ],
+        )
+        result = webhooks.send_test_event(
+            url = f"https://localhost:{receiver.port}/hook",
+            secret = "topsecret",
+            max_attempts = 1,
+        )
+    finally:
+        receiver.close()
+
+    assert result["ok"] is True
+    assert result["signature_verified"] is True
+    assert len(receiver.requests) == 1
+    sent = receiver.requests[0]
+    assert sent["headers"]["host"] == f"localhost:{receiver.port}"
+    assert webhooks.verify_signature(
+        "topsecret",
+        int(sent["headers"]["x-unsloth-timestamp"]),
+        sent["body"],
+        sent["headers"]["x-unsloth-signature-256"],
+    )
+
+
+def test_https_delivery_rejects_a_certificate_that_only_matches_the_pinned_address(
+    tmp_path, monkeypatch
+):
+    _restore_stdlib_ssl(monkeypatch)
+    ca, cert, key = _mint_certificate(
+        tmp_path, [x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))], "127.0.0.1"
+    )
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    receiver = _Sink(certfile = cert, keyfile = key)
+    try:
+        monkeypatch.setattr(
+            webhooks.socket,
+            "getaddrinfo",
+            lambda *_args, **_kwargs: [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
+            ],
+        )
+        result = webhooks.send_test_event(
+            url = f"https://webhook.example:{receiver.port}/hook",
+            secret = "topsecret",
+            max_attempts = 1,
+        )
+    finally:
+        receiver.close()
+
+    assert result["ok"] is False
+    assert "certificate verify failed" in (result["error"] or "").lower()
+    assert receiver.requests == []
+
+
+def test_a_blocked_resolution_on_https_fails_once_without_retrying(monkeypatch):
+    sleeps: list[float] = []
+    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))
+        ],
+    )
+
+    result = webhooks.send_test_event(url = "https://metadata.example/hook", secret = "topsecret")
+
+    assert result["ok"] is False
+    assert result["attempts"] == 1
+    assert result["status_code"] is None
+    assert "link-local" in result["error"]
+    assert sleeps == []
+
+
+def test_a_configured_proxy_fails_delivery_with_an_attributable_error(sink, monkeypatch):
+    monkeypatch.setattr(
+        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+    )
+    monkeypatch.setattr(
+        webhooks.urlrequest,
+        "getproxies_environment",
+        lambda: {"http": "http://proxy.internal:3128"},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", sink.port))
+        ],
+    )
+
+    result = webhooks.send_test_event(url = "http://webhook.example/hook", secret = "topsecret")
+
+    assert result["ok"] is False
+    assert result["attempts"] == 1
+    assert "direct-only" in result["error"]
+    assert "HTTP_PROXY" in result["error"]
+    assert "proxy.internal:3128" in result["error"]
+    assert "NO_PROXY" in result["error"]
+    assert sleeps == []
+    assert sink.requests == []
+
+
+def test_a_loopback_receiver_is_delivered_while_a_proxy_is_configured(sink, monkeypatch):
+    monkeypatch.setattr(
+        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+    )
+
+    result = webhooks.send_test_event(url = sink.url, secret = "topsecret", max_attempts = 1)
+
+    assert result["ok"] is True
+    assert len(sink.requests) == 1
+
+
+def test_a_registry_proxy_reports_the_system_source_and_no_no_proxy_advice(
+    sink, settings_store, monkeypatch
+):
+    monkeypatch.setattr(
+        webhooks.urlrequest,
+        "getproxies",
+        lambda: {"http": "http://system-proxy.internal:3128"},
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", sink.port))
+        ],
+    )
+    webhook_settings.set_webhook_settings(
+        enabled = True, url = "http://webhook.example/hook"
+    )
+    client = _client(monkeypatch)
+
+    response = client.post("/api/settings/webhooks/test", json = {})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is False
+    assert body["attempts"] == 1
+    assert "system proxy" in body["error"]
+    assert "system-proxy.internal:3128" in body["error"]
+    assert "HTTP_PROXY" not in body["error"]
+    assert "NO_PROXY is not read" in body["error"]
+    assert sleeps == []
+    assert sink.requests == []
+    assert webhooks.get_deliveries()[0]["failure_kind"] == webhooks.FAILURE_PROXY
+
+    history = client.get("/api/settings/webhooks").json()["deliveries"]
+    recorded = next(
+        item for item in history if item["delivery_id"] == body["delivery_id"]
+    )
+    assert recorded["failure_kind"] == webhooks.FAILURE_PROXY
+
+
+def test_a_blocked_target_is_refused_before_the_proxy_path(monkeypatch):
+    monkeypatch.setattr(
+        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+    )
+
+    with pytest.raises(ValueError, match = "link-local"):
+        webhooks.send_test_event(url = "http://169.254.169.254/hook")
+
+
+def test_a_certificate_failure_is_reported_once_without_backoff_through_the_route(
+    tmp_path, sink, settings_store, monkeypatch
+):
+    _restore_stdlib_ssl(monkeypatch)
+    ca, cert, key = _mint_certificate(
+        tmp_path, [x509.IPAddress(ipaddress.IPv4Address("127.0.0.1"))], "127.0.0.1"
+    )
+    monkeypatch.setenv("SSL_CERT_FILE", str(ca))
+    receiver = _Sink(certfile = cert, keyfile = key)
+    sleeps: list[float] = []
+    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(
+        webhooks.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
+        ],
+    )
+    webhook_settings.set_webhook_settings(
+        enabled = True,
+        url = f"https://webhook.example:{receiver.port}/hook",
+        secret = "topsecret",
+    )
+    client = _client(monkeypatch)
+    try:
+        response = client.post("/api/settings/webhooks/test", json = {})
+    finally:
+        receiver.close()
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["ok"] is False
+    assert body["attempts"] == 1
+    assert "certificate verify failed" in body["error"].lower()
+    assert sleeps == []
+    assert receiver.requests == []
+    assert webhooks.get_deliveries()[0]["failure_kind"] == webhooks.FAILURE_CERTIFICATE
+
+    history = client.get("/api/settings/webhooks").json()["deliveries"]
+    recorded = next(
+        item for item in history if item["delivery_id"] == body["delivery_id"]
+    )
+    assert recorded["failure_kind"] == webhooks.FAILURE_CERTIFICATE
+
+
+def test_a_spike_is_detected_deep_into_a_stream_after_old_points_are_dropped():
+    run_id = "run-deep-spike"
+    values = [2.0] * 20008 + [9.0] + [2.0] * 9
+    anomaly = None
+    for step, loss in enumerate(values):
+        found = webhooks.observe_progress(run_id = run_id, step = step, loss = loss)
+        if found is not None:
+            anomaly = found
+
+    assert anomaly is not None
+    assert anomaly["kind"] == "spike"
+    assert anomaly["step"] == 20008
+    assert len(webhooks._progress[run_id]["points"]) == webhooks.MAX_RETAINED_POINTS
+
+
+def test_divergence_is_detected_deep_into_a_stream_after_old_points_are_dropped():
+    run_id = "run-deep-divergence"
+    values = [2.0] * 24000 + [2.0 + 2.0 * offset / 6000 for offset in range(6000)]
+    divergence = None
+    for step, loss in enumerate(values):
+        found = webhooks.observe_progress(run_id = run_id, step = step, loss = loss)
+        if found is not None and found["kind"] == "divergence":
+            divergence = found
+
+    assert divergence is not None
+    assert divergence["step"] > webhooks.MAX_RETAINED_POINTS + webhooks.BASELINE_WINDOW
+
+
+def test_a_long_run_retains_a_flat_amount_of_state():
+    run_id = "run-flat-retention"
+    for step in range(30000):
+        webhooks.observe_progress(run_id = run_id, step = step, loss = 2.0)
+
+    state = webhooks._progress[run_id]
+    tracker = state["tracker"]
+    assert state["total"] == 30000
+    assert len(state["points"]) == webhooks.MAX_RETAINED_POINTS
+    assert len(tracker.prefix.low) + len(tracker.prefix.high) <= webhooks.BASELINE_WINDOW
+    assert len(tracker.last.side) <= webhooks.RECENT_WINDOW
+    assert len(tracker.plateau.side) <= webhooks.PLATEAU_WINDOW
+
+
+def test_the_retention_bound_stays_above_every_detector_window():
+    assert webhooks.MAX_RETAINED_POINTS >= webhooks.retained_points_floor()
+    for window in (
+        "BASELINE_WINDOW",
+        "RECENT_WINDOW",
+        "PLATEAU_WINDOW",
+        "SPIKE_BASELINE",
+    ):
+        original = getattr(webhooks, window)
+        setattr(webhooks, window, webhooks.MAX_RETAINED_POINTS)
+        try:
+            assert webhooks.retained_points_floor() > webhooks.MAX_RETAINED_POINTS, window
+        finally:
+            setattr(webhooks, window, original)
+
+
+def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
+    monkeypatch,
+):
+    errors = []
+    advance = webhooks._LossAnomalyTracker.advance
+    detect = webhooks._LossAnomalyTracker.detect
+
+    def recording_advance(self, points):
+        try:
+            return advance(self, points)
+        except Exception as exc:
+            errors.append(exc)
+            raise
+
+    def recording_detect(self, points):
+        try:
+            return detect(self, points)
+        except Exception as exc:
+            errors.append(exc)
+            raise
+
+    monkeypatch.setattr(webhooks._LossAnomalyTracker, "advance", recording_advance)
+    monkeypatch.setattr(webhooks._LossAnomalyTracker, "detect", recording_detect)
+
+    run_id = "run-very-long"
+    total = 200000
+    spike_step = 199500
+    spikes = []
+    for step in range(total):
+        found = webhooks.observe_progress(
+            run_id = run_id,
+            step = step,
+            loss = 9.0 if step == spike_step else 2.0,
+        )
+        if found is not None and found["kind"] == "spike":
+            spikes.append(found)
+
+    state = webhooks._progress[run_id]
+    assert errors == []
+    assert len(spikes) == 1
+    assert spikes[0]["step"] == spike_step
+    assert spikes[0]["value"] == 9.0
+    assert state["total"] == total
+    assert state["base"] == total - webhooks.MAX_RETAINED_POINTS
+    assert len(state["points"]) == webhooks.MAX_RETAINED_POINTS
+
+
+def test_abandoned_runs_do_not_retain_unbounded_progress_history():
+    for index in range(webhooks.MAX_TRACKED_RUNS * 3):
+        webhooks.observe_progress(run_id = f"run-abandoned-{index}", step = 1, loss = 2.0)
+
+    assert len(webhooks._progress) <= webhooks.MAX_TRACKED_RUNS
 
 
 def test_signature_is_hmac_over_timestamp_and_raw_body():

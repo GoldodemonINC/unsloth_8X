@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -12,6 +13,35 @@ SECRET_SCOPE = "default"
 MAX_URL_LENGTH = 2048
 MAX_SECRET_LENGTH = 512
 _UNSET = object()
+
+
+LOOPBACK = "loopback"
+ALLOWED = "allowed"
+
+_BLOCKED_CATEGORIES = (
+    ("is_link_local", "link-local"),
+    ("is_multicast", "multicast"),
+    ("is_unspecified", "unspecified"),
+    ("is_reserved", "reserved"),
+)
+
+
+def classify_webhook_host(value: Any) -> str:
+    candidate = str(value).strip().strip("[]").split("%", 1)[0]
+    if candidate.lower() in {"localhost", "localhost.localdomain"}:
+        return LOOPBACK
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return ALLOWED
+    if address.version == 6 and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    if address.is_loopback:
+        return LOOPBACK
+    for attribute, category in _BLOCKED_CATEGORIES:
+        if getattr(address, attribute):
+            return category
+    return ALLOWED
 
 
 def validate_webhook_url(value: Any) -> str:
@@ -33,6 +63,9 @@ def validate_webhook_url(value: Any) -> str:
         raise ValueError("Webhook URL must start with http:// or https://.")
     if not parts.hostname:
         raise ValueError("Webhook URL must include a host.")
+    category = classify_webhook_host(parts.hostname)
+    if category not in {LOOPBACK, ALLOWED}:
+        raise ValueError(f"Webhook URL must not point at a {category} address.")
     if parts.username is not None or parts.password is not None:
         raise ValueError("Webhook URL must not include credentials.")
     if port is not None and not 1 <= port <= 65535:
