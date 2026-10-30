@@ -5,8 +5,11 @@ training-progress work done in this session.
 
 Files this work owns:
 
-- `studio/backend/core/training/webhooks.py` — the events side: payload building,
-  the per-run progress state, and the policy for when a notification fires.
+- `studio/backend/core/training/webhooks.py` — the events side: the per-run progress
+  state, the terminal-claim policy, the enabled/url config gate, and the event entry
+  points.
+- `studio/backend/core/training/webhook_payload.py` — the wire contract: the four
+  header names and `build_payload`, imported by both sides below.
 - `studio/backend/core/training/loss_anomaly.py` — the detector alone: the window
   constants, the retention bound and its floor, the series view, the tracker.
 - `studio/backend/core/training/webhook_delivery.py` — sending alone: signing, the
@@ -71,22 +74,29 @@ JSON. No UI consumes it yet and no text is special-cased in the frontend.
 
 ## How the module operates now
 
-Three modules, one direction of flow: `webhooks` imports the other two and neither
-imports back, so there is no cycle and each piece of state has exactly one owner.
+Four modules, one direction of flow: `webhooks` imports `webhook_delivery`,
+`webhook_payload` and `loss_anomaly`; `webhook_delivery` imports `webhook_payload`;
+nothing imports back, so there is no cycle and each piece of state has exactly one
+owner.
 
 - `loss_anomaly.py` holds `MAX_RETAINED_POINTS = 8192`, the windows
   (`BASELINE_WINDOW = 3600`, `RECENT_WINDOW = 3600`, `PLATEAU_WINDOW = 2600`,
   `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `retained_points_floor()` and the
   import-time refusal. It keeps no global state — a `LossAnomalyTracker` and a
   `RetainedSeries` are made per run by its caller.
+- `webhook_payload.py` holds the four wire-header names beside `build_payload`, so
+  the events side and the transport side both depend on the contract instead of on
+  each other.
 - `webhook_delivery.py` holds the retry constants (`MAX_ATTEMPTS = 3`,
-  `RETRY_DELAYS = (0.5, 1.5)`, `REQUEST_TIMEOUT_S`, `MAX_DELIVERIES = 25`,
-  `MAX_TERMINAL_KEYS = 100`), the failure kinds and the wire headers, plus all
-  delivery state — records ring buffer, live threads, terminal claim — under one
-  `_delivery_lock`.
-- `webhooks.py` holds `MAX_TRACKED_RUNS = 8`, the `_progress` map and its lock, the
-  payload builder and the three event entry points, and re-exports `get_deliveries`
-  and `wait_for_deliveries` for `routes/settings.py` and `main.py`.
+  `RETRY_DELAYS = (0.5, 1.5)`, `REQUEST_TIMEOUT_S`, `MAX_DELIVERIES = 25`) and the
+  failure kinds, plus the delivery state it actually reads — records ring buffer and
+  live threads — under `_delivery_lock`. It imports the header names from
+  `webhook_payload`, never defines its own.
+- `webhooks.py` holds `MAX_TRACKED_RUNS = 8` and `MAX_TERMINAL_KEYS = 100`, the
+  `_progress` map and its lock, the terminal-claim set with its own
+  `_terminal_lock`, the `_enabled_config` gate both event paths share, and the
+  three event entry points. It re-exports `build_payload`, `get_deliveries` and
+  `wait_for_deliveries` for callers that already import it.
 
 A name is patched on the module that reads it: retry constants on `webhook_delivery`,
 window constants and the floor on `loss_anomaly`. Patching them through `webhooks`

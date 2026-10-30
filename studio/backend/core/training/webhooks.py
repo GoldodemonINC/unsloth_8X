@@ -7,7 +7,7 @@ import math
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from collections import deque
 from typing import Any, Optional
 
 from core.training.loss_anomaly import (
@@ -17,68 +17,41 @@ from core.training.loss_anomaly import (
     RetainedSeries,
 )
 from core.training.webhook_delivery import (
-    SIGNATURE_HEADER,
-    claim_terminal,
     deliver,
     get_deliveries,
     spawn_delivery,
     wait_for_deliveries,
 )
+from core.training.webhook_payload import build_payload
 from utils.webhook_settings import get_webhook_config, validate_webhook_url
 
 MAX_TRACKED_RUNS = 8
+MAX_TERMINAL_KEYS = 100
 
 _progress: dict[str, dict] = {}
 _progress_lock = threading.Lock()
+_terminal_keys: set[str] = set()
+_terminal_order: deque[str] = deque(maxlen = MAX_TERMINAL_KEYS)
+_terminal_lock = threading.Lock()
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def _enabled_config(config: Optional[dict]) -> Optional[dict]:
+    config = config or get_webhook_config()
+    if config.get("enabled") and config.get("url"):
+        return config
+    return None
 
 
-def _locator(run_id: str) -> dict:
-    return {
-        "kind": "studio_run",
-        "run_id": run_id,
-        "path": f"/studio?run={run_id}",
-    }
-
-
-def build_payload(
-    *,
-    event: str,
-    delivery_id: str,
-    timestamp: int,
-    run_id: Optional[str],
-    status: Optional[str],
-    metrics: Optional[dict],
-    output_dir: Optional[str] = None,
-    error_message: Optional[str] = None,
-    anomaly: Optional[dict] = None,
-    test: bool = False,
-) -> dict:
-    run_id = (run_id or "").strip() or None
-    return {
-        "event": event,
-        "delivery_id": delivery_id,
-        "sent_at": _now_iso(),
-        "test": test,
-        "run": {
-            "id": run_id,
-            "status": status,
-            "error": error_message,
-            "output_dir": output_dir,
-        },
-        "metrics": metrics or {},
-        "anomaly": anomaly,
-        "locator": _locator(run_id) if run_id else None,
-        "signature": {
-            "algorithm": "hmac-sha256",
-            "header": SIGNATURE_HEADER,
-            "timestamp": timestamp,
-            "signed_content": "{timestamp}.{raw request body}",
-        },
-    }
+def claim_terminal(run_id: str) -> bool:
+    with _terminal_lock:
+        if run_id in _terminal_keys:
+            return False
+        if len(_terminal_order) == _terminal_order.maxlen:
+            oldest = _terminal_order[0]
+            _terminal_keys.discard(oldest)
+        _terminal_keys.add(run_id)
+        _terminal_order.append(run_id)
+    return True
 
 
 def notify_terminal(
@@ -96,8 +69,8 @@ def notify_terminal(
             return False
         with _progress_lock:
             _progress.pop(run_id, None)
-        config = config or get_webhook_config()
-        if not config.get("enabled") or not config.get("url"):
+        config = _enabled_config(config)
+        if config is None:
             return False
         if not claim_terminal(run_id):
             return False
@@ -201,8 +174,8 @@ def observe_progress(
             current["seen"].add(anomaly["kind"])
             latest_metrics = dict(current["metrics"])
 
-        config = config or get_webhook_config()
-        if not config.get("enabled") or not config.get("url"):
+        config = _enabled_config(config)
+        if config is None:
             return anomaly
 
         timestamp = int(time.time())

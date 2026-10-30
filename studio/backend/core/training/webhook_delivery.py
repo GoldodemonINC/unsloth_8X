@@ -16,6 +16,12 @@ from typing import NamedTuple, Optional
 from urllib import request as urlrequest
 from urllib.parse import urlsplit
 
+from core.training.webhook_payload import (
+    DELIVERY_HEADER,
+    EVENT_HEADER,
+    SIGNATURE_HEADER,
+    TIMESTAMP_HEADER,
+)
 from utils.webhook_settings import (
     ALLOWED,
     LOOPBACK,
@@ -26,7 +32,6 @@ MAX_ATTEMPTS = 3
 REQUEST_TIMEOUT_S = 5.0
 RETRY_DELAYS = (0.5, 1.5)
 MAX_DELIVERIES = 25
-MAX_TERMINAL_KEYS = 100
 
 FAILURE_INVALID = "invalid"
 FAILURE_UNRESOLVABLE = "unresolvable"
@@ -35,11 +40,6 @@ FAILURE_PROXY = "proxy"
 FAILURE_CERTIFICATE = "certificate"
 FAILURE_HTTP = "http"
 FAILURE_TRANSPORT = "transport"
-
-SIGNATURE_HEADER = "X-Unsloth-Signature-256"
-EVENT_HEADER = "X-Unsloth-Event"
-DELIVERY_HEADER = "X-Unsloth-Delivery"
-TIMESTAMP_HEADER = "X-Unsloth-Timestamp"
 
 
 class _Refusal(NamedTuple):
@@ -57,8 +57,6 @@ class _Attempt(NamedTuple):
 _deliveries: deque[dict] = deque(maxlen = MAX_DELIVERIES)
 _delivery_lock = threading.Lock()
 _threads: set[threading.Thread] = set()
-_terminal_keys: set[str] = set()
-_terminal_order: deque[str] = deque(maxlen = MAX_TERMINAL_KEYS)
 
 
 def _canonical_body(payload: dict) -> bytes:
@@ -331,18 +329,6 @@ def spawn_delivery(event: str, payload: dict, url: str, secret: str) -> None:
     with _delivery_lock:
         _threads.add(thread)
     thread.start()
-
-
-def claim_terminal(run_id: str) -> bool:
-    with _delivery_lock:
-        if run_id in _terminal_keys:
-            return False
-        if len(_terminal_order) == _terminal_order.maxlen:
-            oldest = _terminal_order[0]
-            _terminal_keys.discard(oldest)
-        _terminal_keys.add(run_id)
-        _terminal_order.append(run_id)
-    return True
 
 
 def wait_for_deliveries(timeout: float = 10.0) -> None:
