@@ -25,6 +25,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from core.training import webhooks
+from core.training import loss_anomaly
+from core.training import webhook_delivery
 from routes import settings as settings_routes
 from utils import webhook_settings
 
@@ -184,15 +186,15 @@ def encrypted_store(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse = True)
 def fast_delivery(monkeypatch):
-    monkeypatch.setattr(webhooks, "RETRY_DELAYS", (0.0, 0.0))
-    monkeypatch.setattr(webhooks, "REQUEST_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(webhook_delivery, "RETRY_DELAYS", (0.0, 0.0))
+    monkeypatch.setattr(webhook_delivery, "REQUEST_TIMEOUT_S", 0.5)
 
 
 @pytest.fixture(autouse = True)
 def isolated_proxy_environment(monkeypatch):
-    monkeypatch.setattr(webhooks.urlrequest, "getproxies", lambda: {})
-    monkeypatch.setattr(webhooks.urlrequest, "getproxies_environment", lambda: {})
-    monkeypatch.setattr(webhooks.urlrequest, "proxy_bypass", lambda _host: False)
+    monkeypatch.setattr(webhook_delivery.urlrequest, "getproxies", lambda: {})
+    monkeypatch.setattr(webhook_delivery.urlrequest, "getproxies_environment", lambda: {})
+    monkeypatch.setattr(webhook_delivery.urlrequest, "proxy_bypass", lambda _host: False)
 
 
 @pytest.mark.parametrize(
@@ -264,21 +266,21 @@ def test_literal_and_resolved_paths_share_one_address_policy(
 
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (family, socket.SOCK_STREAM, 6, "", (address, 80))
         ],
     )
 
-    endpoints, refusal = webhooks._resolve_endpoint(url)
+    endpoints, refusal = webhook_delivery._resolve_endpoint(url)
 
     assert (refusal is None) is permitted
     if permitted:
         assert endpoints
     else:
         assert endpoints == []
-        assert refusal.kind == webhooks.FAILURE_BLOCKED
+        assert refusal.kind == webhook_delivery.FAILURE_BLOCKED
         assert category in refusal.message
 
 
@@ -340,7 +342,7 @@ def test_a_second_resolution_cannot_redirect_delivery_to_an_internal_address(
         calls.append(args)
         return safe if len(calls) == 1 else unsafe
 
-    monkeypatch.setattr(webhooks.socket, "getaddrinfo", resolver)
+    monkeypatch.setattr(webhook_delivery.socket, "getaddrinfo", resolver)
 
     result = webhooks.send_test_event(
         url = "http://rebind.example/hook", secret = "topsecret", max_attempts = 1
@@ -354,9 +356,9 @@ def test_a_second_resolution_cannot_redirect_delivery_to_an_internal_address(
 
 def test_a_host_that_resolves_to_link_local_fails_once_without_backoff(sink, monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 80))
@@ -382,7 +384,7 @@ def test_https_delivery_verifies_the_host_name_while_connecting_to_the_pinned_ad
     receiver = _Sink(certfile = cert, keyfile = key)
     try:
         monkeypatch.setattr(
-            webhooks.socket,
+            webhook_delivery.socket,
             "getaddrinfo",
             lambda *_args, **_kwargs: [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
@@ -401,7 +403,7 @@ def test_https_delivery_verifies_the_host_name_while_connecting_to_the_pinned_ad
     assert len(receiver.requests) == 1
     sent = receiver.requests[0]
     assert sent["headers"]["host"] == f"localhost:{receiver.port}"
-    assert webhooks.verify_signature(
+    assert webhook_delivery.verify_signature(
         "topsecret",
         int(sent["headers"]["x-unsloth-timestamp"]),
         sent["body"],
@@ -420,7 +422,7 @@ def test_https_delivery_rejects_a_certificate_that_only_matches_the_pinned_addre
     receiver = _Sink(certfile = cert, keyfile = key)
     try:
         monkeypatch.setattr(
-            webhooks.socket,
+            webhook_delivery.socket,
             "getaddrinfo",
             lambda *_args, **_kwargs: [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
@@ -441,9 +443,9 @@ def test_https_delivery_rejects_a_certificate_that_only_matches_the_pinned_addre
 
 def test_a_blocked_resolution_on_https_fails_once_without_retrying(monkeypatch):
     sleeps: list[float] = []
-    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))
@@ -461,17 +463,17 @@ def test_a_blocked_resolution_on_https_fails_once_without_retrying(monkeypatch):
 
 def test_a_configured_proxy_fails_delivery_with_an_attributable_error(sink, monkeypatch):
     monkeypatch.setattr(
-        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+        webhook_delivery.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
     )
     monkeypatch.setattr(
-        webhooks.urlrequest,
+        webhook_delivery.urlrequest,
         "getproxies_environment",
         lambda: {"http": "http://proxy.internal:3128"},
     )
     sleeps: list[float] = []
-    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", sink.port))
@@ -492,7 +494,7 @@ def test_a_configured_proxy_fails_delivery_with_an_attributable_error(sink, monk
 
 def test_a_loopback_receiver_is_delivered_while_a_proxy_is_configured(sink, monkeypatch):
     monkeypatch.setattr(
-        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+        webhook_delivery.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
     )
 
     result = webhooks.send_test_event(url = sink.url, secret = "topsecret", max_attempts = 1)
@@ -505,14 +507,14 @@ def test_a_registry_proxy_reports_the_system_source_and_no_no_proxy_advice(
     sink, settings_store, monkeypatch
 ):
     monkeypatch.setattr(
-        webhooks.urlrequest,
+        webhook_delivery.urlrequest,
         "getproxies",
         lambda: {"http": "http://system-proxy.internal:3128"},
     )
     sleeps: list[float] = []
-    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", sink.port))
@@ -535,18 +537,18 @@ def test_a_registry_proxy_reports_the_system_source_and_no_no_proxy_advice(
     assert "NO_PROXY is not read" in body["error"]
     assert sleeps == []
     assert sink.requests == []
-    assert webhooks.get_deliveries()[0]["failure_kind"] == webhooks.FAILURE_PROXY
+    assert webhooks.get_deliveries()[0]["failure_kind"] == webhook_delivery.FAILURE_PROXY
 
     history = client.get("/api/settings/webhooks").json()["deliveries"]
     recorded = next(
         item for item in history if item["delivery_id"] == body["delivery_id"]
     )
-    assert recorded["failure_kind"] == webhooks.FAILURE_PROXY
+    assert recorded["failure_kind"] == webhook_delivery.FAILURE_PROXY
 
 
 def test_a_blocked_target_is_refused_before_the_proxy_path(monkeypatch):
     monkeypatch.setattr(
-        webhooks.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
+        webhook_delivery.urlrequest, "getproxies", lambda: {"http": "http://proxy.internal:3128"}
     )
 
     with pytest.raises(ValueError, match = "link-local"):
@@ -563,9 +565,9 @@ def test_a_certificate_failure_is_reported_once_without_backoff_through_the_rout
     monkeypatch.setenv("SSL_CERT_FILE", str(ca))
     receiver = _Sink(certfile = cert, keyfile = key)
     sleeps: list[float] = []
-    monkeypatch.setattr(webhooks.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(webhook_delivery.time, "sleep", lambda seconds: sleeps.append(seconds))
     monkeypatch.setattr(
-        webhooks.socket,
+        webhook_delivery.socket,
         "getaddrinfo",
         lambda *_args, **_kwargs: [
             (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", receiver.port))
@@ -589,13 +591,13 @@ def test_a_certificate_failure_is_reported_once_without_backoff_through_the_rout
     assert "certificate verify failed" in body["error"].lower()
     assert sleeps == []
     assert receiver.requests == []
-    assert webhooks.get_deliveries()[0]["failure_kind"] == webhooks.FAILURE_CERTIFICATE
+    assert webhooks.get_deliveries()[0]["failure_kind"] == webhook_delivery.FAILURE_CERTIFICATE
 
     history = client.get("/api/settings/webhooks").json()["deliveries"]
     recorded = next(
         item for item in history if item["delivery_id"] == body["delivery_id"]
     )
-    assert recorded["failure_kind"] == webhooks.FAILURE_CERTIFICATE
+    assert recorded["failure_kind"] == webhook_delivery.FAILURE_CERTIFICATE
 
 
 def test_a_spike_is_detected_deep_into_a_stream_after_old_points_are_dropped():
@@ -610,7 +612,7 @@ def test_a_spike_is_detected_deep_into_a_stream_after_old_points_are_dropped():
     assert anomaly is not None
     assert anomaly["kind"] == "spike"
     assert anomaly["step"] == 20008
-    assert len(webhooks._progress[run_id]["points"]) == webhooks.MAX_RETAINED_POINTS
+    assert len(webhooks._progress[run_id]["points"]) == loss_anomaly.MAX_RETAINED_POINTS
 
 
 def test_divergence_is_detected_deep_into_a_stream_after_old_points_are_dropped():
@@ -623,7 +625,7 @@ def test_divergence_is_detected_deep_into_a_stream_after_old_points_are_dropped(
             divergence = found
 
     assert divergence is not None
-    assert divergence["step"] > webhooks.MAX_RETAINED_POINTS + webhooks.BASELINE_WINDOW
+    assert divergence["step"] > loss_anomaly.MAX_RETAINED_POINTS + loss_anomaly.BASELINE_WINDOW
 
 
 def test_a_long_run_retains_a_flat_amount_of_state():
@@ -634,34 +636,34 @@ def test_a_long_run_retains_a_flat_amount_of_state():
     state = webhooks._progress[run_id]
     tracker = state["tracker"]
     assert state["total"] == 30000
-    assert len(state["points"]) == webhooks.MAX_RETAINED_POINTS
-    assert len(tracker.prefix.low) + len(tracker.prefix.high) <= webhooks.BASELINE_WINDOW
-    assert len(tracker.last.side) <= webhooks.RECENT_WINDOW
-    assert len(tracker.plateau.side) <= webhooks.PLATEAU_WINDOW
+    assert len(state["points"]) == loss_anomaly.MAX_RETAINED_POINTS
+    assert len(tracker.prefix.low) + len(tracker.prefix.high) <= loss_anomaly.BASELINE_WINDOW
+    assert len(tracker.last.side) <= loss_anomaly.RECENT_WINDOW
+    assert len(tracker.plateau.side) <= loss_anomaly.PLATEAU_WINDOW
 
 
 def test_the_retention_bound_stays_above_every_detector_window():
-    assert webhooks.MAX_RETAINED_POINTS >= webhooks.retained_points_floor()
+    assert loss_anomaly.MAX_RETAINED_POINTS >= loss_anomaly.retained_points_floor()
     for window in (
         "BASELINE_WINDOW",
         "RECENT_WINDOW",
         "PLATEAU_WINDOW",
         "SPIKE_BASELINE",
     ):
-        original = getattr(webhooks, window)
-        setattr(webhooks, window, webhooks.MAX_RETAINED_POINTS)
+        original = getattr(loss_anomaly, window)
+        setattr(loss_anomaly, window, loss_anomaly.MAX_RETAINED_POINTS)
         try:
-            assert webhooks.retained_points_floor() > webhooks.MAX_RETAINED_POINTS, window
+            assert loss_anomaly.retained_points_floor() > loss_anomaly.MAX_RETAINED_POINTS, window
         finally:
-            setattr(webhooks, window, original)
+            setattr(loss_anomaly, window, original)
 
 
 def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
     monkeypatch,
 ):
     errors = []
-    advance = webhooks._LossAnomalyTracker.advance
-    detect = webhooks._LossAnomalyTracker.detect
+    advance = loss_anomaly.LossAnomalyTracker.advance
+    detect = loss_anomaly.LossAnomalyTracker.detect
 
     def recording_advance(self, points):
         try:
@@ -677,8 +679,8 @@ def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_
             errors.append(exc)
             raise
 
-    monkeypatch.setattr(webhooks._LossAnomalyTracker, "advance", recording_advance)
-    monkeypatch.setattr(webhooks._LossAnomalyTracker, "detect", recording_detect)
+    monkeypatch.setattr(loss_anomaly.LossAnomalyTracker, "advance", recording_advance)
+    monkeypatch.setattr(loss_anomaly.LossAnomalyTracker, "detect", recording_detect)
 
     run_id = "run-very-long"
     total = 200000
@@ -699,8 +701,8 @@ def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_
     assert spikes[0]["step"] == spike_step
     assert spikes[0]["value"] == 9.0
     assert state["total"] == total
-    assert state["base"] == total - webhooks.MAX_RETAINED_POINTS
-    assert len(state["points"]) == webhooks.MAX_RETAINED_POINTS
+    assert state["base"] == total - loss_anomaly.MAX_RETAINED_POINTS
+    assert len(state["points"]) == loss_anomaly.MAX_RETAINED_POINTS
 
 
 def test_abandoned_runs_do_not_retain_unbounded_progress_history():
@@ -712,17 +714,17 @@ def test_abandoned_runs_do_not_retain_unbounded_progress_history():
 
 def test_signature_is_hmac_over_timestamp_and_raw_body():
     body = b'{"event":"training.completed"}'
-    signature = webhooks.sign_body("topsecret", 1_700_000_000, body)
+    signature = webhook_delivery.sign_body("topsecret", 1_700_000_000, body)
     assert signature.startswith("sha256=")
-    assert webhooks.verify_signature("topsecret", 1_700_000_000, body, signature)
-    assert not webhooks.verify_signature("wrong", 1_700_000_000, body, signature)
-    assert not webhooks.verify_signature(
+    assert webhook_delivery.verify_signature("topsecret", 1_700_000_000, body, signature)
+    assert not webhook_delivery.verify_signature("wrong", 1_700_000_000, body, signature)
+    assert not webhook_delivery.verify_signature(
         "topsecret", 1_700_000_001, body, signature
     )
-    assert not webhooks.verify_signature(
+    assert not webhook_delivery.verify_signature(
         "topsecret", 1_700_000_000, body + b" ", signature
     )
-    assert webhooks.verify_signature("", 1, body, "") is False
+    assert webhook_delivery.verify_signature("", 1, body, "") is False
 
 
 def _configure(settings_store, sink: _Sink, *, enabled: bool = True, secret: str = "topsecret"):
@@ -767,7 +769,7 @@ def test_terminal_alert_has_run_metrics_and_a_verifiable_signature(settings_stor
 
     timestamp = int(request["headers"]["x-unsloth-timestamp"])
     signature = request["headers"]["x-unsloth-signature-256"]
-    assert webhooks.verify_signature("topsecret", timestamp, request["body"], signature)
+    assert webhook_delivery.verify_signature("topsecret", timestamp, request["body"], signature)
     assert request["headers"]["x-unsloth-event"] == "training.completed"
     assert request["headers"]["x-unsloth-delivery"] == payload["delivery_id"]
 
@@ -899,7 +901,7 @@ def test_progress_entry_point_matches_the_chart_window_table(case, settings_stor
         assert anomaly[field] == expected[field]
         assert alerts[0]["anomaly"][field] == expected[field]
 
-    chart = webhooks.detect_loss_anomaly(list(enumerate(values, start = 1)))
+    chart = loss_anomaly.detect_loss_anomaly(list(enumerate(values, start = 1)))
     if case["chart"] is None:
         assert chart is None
     else:
@@ -1053,7 +1055,7 @@ def _full_verdict(anomaly: dict | None) -> tuple | None:
 
 @pytest.mark.parametrize("name,stream", _oracle_streams(), ids = lambda case: case[0])
 def test_incremental_tracker_matches_independent_full_history_oracle(name, stream):
-    tracker = webhooks._LossAnomalyTracker()
+    tracker = loss_anomaly.LossAnomalyTracker()
     points = []
     for step, value in stream:
         points.append((step, value))
@@ -1078,7 +1080,7 @@ def test_incremental_tracker_matches_independent_full_history_oracle(name, strea
 def test_incremental_tracker_mismatches_full_history_on_out_of_order_input():
     case = next(case for case in _ORACLE_PARITY_CASES if case["name"] == "out-of-order spike")
     points = [(float(step), float(value)) for step, value in case["points"]]
-    tracker = webhooks._LossAnomalyTracker()
+    tracker = loss_anomaly.LossAnomalyTracker()
 
     for index, point in enumerate(points):
         prefix = points[: index + 1]
@@ -1138,7 +1140,7 @@ def test_progress_entry_point_handles_nonfinite_and_short_runs(
     alerts = [request for request in sink.requests if b'"event":"training.anomaly"' in request["body"]]
     assert len(alerts) == expected_alerts
     chart_series = [(step, loss) for step, loss in enumerate(values, 1) if math.isfinite(loss)]
-    assert webhooks.detect_loss_anomaly(chart_series) == expected_chart
+    assert loss_anomaly.detect_loss_anomaly(chart_series) == expected_chart
     if alerts:
         anomaly = json.loads(alerts[0]["body"])["anomaly"]
         assert (anomaly["kind"], anomaly["severity"], anomaly["step"], anomaly["value"]) == (
@@ -1435,7 +1437,7 @@ def test_concurrent_runs_are_not_cross_wired_or_left_running(settings_store, sin
     for payload in payloads:
         index = int(payload["run"]["id"].rsplit("-", 1)[1])
         assert payload["metrics"]["step"] == index
-    assert webhooks._threads == set()
+    assert webhook_delivery._threads == set()
 
 
 def test_an_in_flight_delivery_is_drained_within_the_shutdown_budget(settings_store):
@@ -1709,7 +1711,7 @@ def test_the_settings_route_reports_an_unreadable_secret_and_recovers(
     assert signed.json()["signed"] is True
     assert signed.json()["signature_verified"] is True
     request = sink.requests[-1]
-    assert webhooks.verify_signature(
+    assert webhook_delivery.verify_signature(
         recovered,
         int(request["headers"]["x-unsloth-timestamp"]),
         request["body"],

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from core.training.webhooks import detect_loss_anomaly
+from core.training.loss_anomaly import detect_loss_anomaly
 
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "loss_anomaly_cases.json"
 

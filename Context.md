@@ -5,8 +5,12 @@ training-progress work done in this session.
 
 Files this work owns:
 
-- `studio/backend/core/training/webhooks.py` — delivery transport, failure
-  classification, retry policy, progress tracking, anomaly detection, retention bound.
+- `studio/backend/core/training/webhooks.py` — the events side: payload building,
+  the per-run progress state, and the policy for when a notification fires.
+- `studio/backend/core/training/loss_anomaly.py` — the detector alone: the window
+  constants, the retention bound and its floor, the series view, the tracker.
+- `studio/backend/core/training/webhook_delivery.py` — sending alone: signing, the
+  pinned transport, proxy refusal, the retry loop, delivery records and threads.
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
 - `studio/backend/tests/test_webhooks.py` — 107 tests covering all of the above.
@@ -67,11 +71,26 @@ JSON. No UI consumes it yet and no text is special-cased in the frontend.
 
 ## How the module operates now
 
-Constants at the top of `webhooks.py`: `MAX_RETAINED_POINTS = 8192`, windows
-`BASELINE_WINDOW = 3600`, `RECENT_WINDOW = 3600`, `PLATEAU_WINDOW = 2600`,
-`SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`; `MAX_TRACKED_RUNS = 8`,
-`MAX_DELIVERIES = 25`, `MAX_ATTEMPTS = 3`, `RETRY_DELAYS = (0.5, 1.5)`; then
-`retained_points_floor()` and the import-time refusal.
+Three modules, one direction of flow: `webhooks` imports the other two and neither
+imports back, so there is no cycle and each piece of state has exactly one owner.
+
+- `loss_anomaly.py` holds `MAX_RETAINED_POINTS = 8192`, the windows
+  (`BASELINE_WINDOW = 3600`, `RECENT_WINDOW = 3600`, `PLATEAU_WINDOW = 2600`,
+  `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `retained_points_floor()` and the
+  import-time refusal. It keeps no global state — a `LossAnomalyTracker` and a
+  `RetainedSeries` are made per run by its caller.
+- `webhook_delivery.py` holds the retry constants (`MAX_ATTEMPTS = 3`,
+  `RETRY_DELAYS = (0.5, 1.5)`, `REQUEST_TIMEOUT_S`, `MAX_DELIVERIES = 25`,
+  `MAX_TERMINAL_KEYS = 100`), the failure kinds and the wire headers, plus all
+  delivery state — records ring buffer, live threads, terminal claim — under one
+  `_delivery_lock`.
+- `webhooks.py` holds `MAX_TRACKED_RUNS = 8`, the `_progress` map and its lock, the
+  payload builder and the three event entry points, and re-exports `get_deliveries`
+  and `wait_for_deliveries` for `routes/settings.py` and `main.py`.
+
+A name is patched on the module that reads it: retry constants on `webhook_delivery`,
+window constants and the floor on `loss_anomaly`. Patching them through `webhooks`
+would silently miss.
 
 Delivery path: resolve the endpoint once and refuse any blocked address, connect
 through a pinned connection to the verified socket address, wrap TLS with the
@@ -107,8 +126,6 @@ files in the working tree.
 
 1. Make the import refusal name the offending window and its value (today's message
    always blames `MAX_RETAINED_POINTS`, even when a window constant is what moved).
-2. Split `webhooks.py` (929 lines carrying signing, pinned transport, proxy policy,
-   retry, delivery records, the progress entry and the detector) so transport and
-   detection stop sharing one file.
-3. Drive a post-eviction anomaly through the full delivery path to a local sink, the
-   one end-to-end case the suites still do not cover.
+2. Drive a post-eviction anomaly through the full delivery path to a local sink as a
+   permanent test — exercised by hand after the split (8,414 points, spike at 8,400,
+   signed delivery to a loopback sink), but the suites still do not cover it.
