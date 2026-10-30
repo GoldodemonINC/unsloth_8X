@@ -90,16 +90,16 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 `134 passed`: 107 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
-case, proxied-send refusal, and route-level assertions for surfaced errors.
+case, proxied-send refusal, and route-level assertions for surfaced errors.## Not part of this work
 
-## Not part of this work
-
-The working tree also carries pre-existing modifications that this session did not
-make and deliberately left alone: the NRC-2 → NRC-3 licence rename
-(`LICENSE-NRC-3.md`, `core/advanced/nrc_license.py`, `README.md`,
-`scripts/release_x8_local.py`), the labs and advanced-module edits, the
-`core/training/fit.py` change, release notes under `docs/releases/`, and the frontend
-labs files. None of those changes are part of this commit.
+The NRC-2 → NRC-3 licence rename is not part of the webhook work described here,
+but it is no longer sitting uncommitted: this session committed it as `ee59feed3`
+on `x8-main` (the Studio tree — `LICENSE-NRC-3.md`, `core/advanced/nrc_license.py`,
+`README.md`, `scripts/release_x8_local.py`, and the header-only edits across the
+labs and advanced modules, `core/training/fit.py` and the frontend labs files,
+51 files) and as `e835b40cb` on `XE-Main` (the features tree, 13 files), both
+pushed. Still uncommitted: `docs/releases/2026.5.0.md` and the other untracked
+files in the working tree.
 
 ## Next task
 
