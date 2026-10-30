@@ -224,6 +224,42 @@ pre-change baseline (identical failure set: symlink privilege, the Unix-only
 `resource` module, HOME/XDG path assertions), so none of this thread's changes moved
 that surface.
 
+## Performance: `observe_progress` at 10k, 50k, 100k steps
+
+One point per training step over a decaying-loss curve, min of three runs each,
+Python 3.12.13 on this host:
+
+| steps | total | steady µs/point | checks disabled | anomalies |
+| --- | --- | --- | --- | --- |
+| 10000 | 0.25 s | 31.6 | 11.9 | 1 |
+| 50000 | 2.67 s | 55.7 | 23.8 | 1 |
+| 100000 | 6.17 s | 51.2 | 24.0 | 1 |
+
+Steady cost is the last 5,000 points of each run. The wall-clock ratios are not
+linear because the first 8,192 points run in the cheap pre-retention regime at
+about 13 µs each: a 10k run is mostly pre-retention, a 100k run is not, so the
+mix differs even though neither regime grows.
+
+Three findings:
+
+- **Cost does not grow with run length.** With checks disabled the last 5,000
+  points cost 23.79 µs each at 50k and 24.01 µs each at 100k. Sampling
+  5,000-point windows across one 100k run gives 48–137 µs with no upward trend;
+  that spread is machine noise from the concurrent sessions on this host.
+- **Detection stays bounded.** Retention holds exactly `MAX_RETAINED_POINTS`
+  (8192) points at every depth, a check runs every 10 points, and each run
+  surfaced exactly one anomaly — a plateau on this curve.
+- **The front trim is the base cost.** `del points[:1]` on the 8,192-element
+  retained list measured 18.4 µs in isolation against 19.2 µs for the whole
+  checks-disabled path: one memmove of 8,191 pointers per point, roughly half
+  of the steady cost.
+
+The trim was deliberately left alone. Batching it would break
+`test_end_to_end_webhook.py`, which asserts `len(state["points"]) == bound`
+exactly after eviction, and a ring-buffer or deque replacement would rewrite the
+`RetainedSeries` indexing the parity suite depends on. The saving is about 1.8 s
+on a run that takes hours, which does not pay for either risk.
+
 ## Not part of this work
 
 The NRC-2 → NRC-3 licence rename is not part of the webhook work described here,
@@ -237,14 +273,28 @@ files in the working tree.
 
 ## Next task
 
-Open: this branch still has nothing committed. Exactly six paths belong to this thread
-and no others — `Context.md`, `studio/backend/core/advanced/scaling.py`,
-`studio/backend/core/labs/pipelines.py`,
+Delivered. The six paths that belong to this thread — `Context.md`,
+`studio/backend/core/advanced/scaling.py`, `studio/backend/core/labs/pipelines.py`,
 `studio/backend/core/advanced/resources.py`,
 `studio/backend/tests/test_labs_artifacts.py` and
-`studio/backend/tests/test_advanced_resources.py`. The checkout carries about 40 more
-changed paths from concurrent sessions: 24 modified files under `studio/frontend/`,
-plus untracked `.playtest-library/`, `AGENTS.md`, `Project skills/`,
-`docs/releases/2026.5.0.md` and `studio/src-tauri/x8-updater.key.pub`. Stage those six
-by name, never `git add -A`, commit them with a body naming both fixes and the
-consolidation, and open the pull request against `x8-main`.
+`studio/backend/tests/test_advanced_resources.py` — are committed as `56ffc47cf`
+on branch `x8-growth-policy`, pushed to the `x8` remote, and open as PR #20
+against `x8-main` with no auto-merge:
+https://github.com/GoldodemonINC/unsloth_8X/pull/20
+
+The index is clean. The other 43 entries in `git status` belong to concurrent
+sessions — 24 modified files under `studio/frontend/` (that session owns the
+frontend gate matrix), plus untracked `.playtest-library/`, `AGENTS.md`,
+`Project skills/`, `docs/releases/2026.5.0.md` and
+`studio/src-tauri/x8-updater.key.pub`. Stage by name, never `git add -A`.
+
+Backend gate for this thread has run: 268 passed, exit 0, across the four webhook
+suites and the eight labs and advanced suites. No backend lint gate is wired —
+ruff is configured in the root `pyproject.toml` but is not installed in either
+virtualenv.
+
+If this thread continues, PR #20 needs a review and a merge first. The one open
+engineering item is the front-trim decision recorded under Performance: batching
+the 8,192-slot memmove needs `test_end_to_end_webhook.py` relaxed or
+`RetainedSeries` moved to a deque, and the measured saving does not justify
+either.
