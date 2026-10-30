@@ -48,7 +48,7 @@ _COST_MODEL: dict[str, dict[str, Any]] = {
     "split": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False, "cpu": True},
     # Expansion holds the grown model and, while it verifies the save, a
     # reloaded copy of it: peak is about two expanded checkpoints.
-    "scale": {"vram": 4.0, "ram": 1.0, "disk": 1.5, "gpu": True, "cpu": True},
+    "scale": {"vram": 4.0, "ram": 2.0, "disk": 1.5, "gpu": True, "cpu": True},
     # Structural merge-eval on CPU: both parents are memory-mapped, tiny working set.
     "merge_eval": {"vram": 0.0, "ram_stream": 3.0, "disk": 0.02, "gpu": False, "cpu": True},
     # Benchmark harness loads one full model on the GPU.
@@ -170,6 +170,7 @@ def estimate(
     sources: Any = None,
     output_dir: str | Path | None = None,
     memory: Mapping[str, Any] | None = None,
+    growth_ratio: float | None = None,
 ) -> dict[str, Any]:
     """Estimate what one job of *kind* needs, in bytes, with its reasoning.
 
@@ -187,6 +188,7 @@ def estimate(
     profile = dict(memory or probe_memory())
     gpus = profile.get("gpus") or []
     cpu_capable = bool(model.get("cpu"))
+    grown = 1.0 if growth_ratio is None else max(1.0, float(growth_ratio))
 
     notes: list[str] = []
     vram = (
@@ -205,7 +207,7 @@ def estimate(
             ram = int(total * 0.25)
             notes.append("Tensor sizes were not readable; RAM is estimated from the model size.")
     else:
-        ram = int(total * float(model.get("ram", 0.0)))
+        ram = int(total * grown * float(model.get("ram", 0.0)))
     disk = int(total * float(model.get("disk", 0.0)))
     if output_dir is not None and total == 0:
         disk = 0
@@ -423,9 +425,12 @@ def acquire_for_job(
     sources: Any = None,
     output_dir: str | Path | None = None,
     wait_seconds: float = 0.0,
+    growth_ratio: float | None = None,
 ) -> dict[str, Any]:
     """Estimate then acquire, the way ``_start_job`` does it."""
-    payload = estimate(kind, sources = sources, output_dir = output_dir)
+    payload = estimate(
+        kind, sources = sources, output_dir = output_dir, growth_ratio = growth_ratio
+    )
     result = BROKER.acquire(
         job_id, kind, Need(**payload["need"]), wait_seconds = wait_seconds
     )

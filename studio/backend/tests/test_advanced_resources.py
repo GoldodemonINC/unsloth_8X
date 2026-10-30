@@ -183,3 +183,35 @@ def test_a_gpu_only_stage_is_still_refused_on_a_host_with_no_gpu(tmp_path: Path,
     assert result["status"] == "denied"
     assert "GPU memory" in result["reason"]
     assert "this machine offers at most" in result["reason"]
+
+
+def test_a_scale_stage_reserves_the_peak_of_the_checkpoint_it_writes(tmp_path: Path):
+    source = _checkpoint(tmp_path / "model")
+    total = resources.checkpoint_bytes(source)
+    payload = resources.estimate("scale", sources = [source], memory = _profile(vram = 0))
+    assert payload["need"]["ram_bytes"] == 2 * total
+
+
+def test_a_grown_target_reserves_ram_for_the_checkpoint_it_will_produce(tmp_path: Path):
+    source = _checkpoint(tmp_path / "model")
+    plain = resources.estimate("scale", sources = [source], memory = _profile(vram = 0))
+    grown = resources.estimate(
+        "scale",
+        sources = [source],
+        memory = _profile(vram = 0),
+        growth_ratio = 3.0,
+    )
+    assert grown["need"]["ram_bytes"] == 3 * plain["need"]["ram_bytes"]
+    assert grown["need"]["ram_bytes"] > plain["need"]["ram_bytes"]
+
+
+def test_a_growth_ratio_below_one_does_not_shrink_the_reservation(tmp_path: Path):
+    source = _checkpoint(tmp_path / "model")
+    plain = resources.estimate("scale", sources = [source], memory = _profile(vram = 0))
+    smaller = resources.estimate(
+        "scale",
+        sources = [source],
+        memory = _profile(vram = 0),
+        growth_ratio = 0.5,
+    )
+    assert smaller["need"]["ram_bytes"] == plain["need"]["ram_bytes"]

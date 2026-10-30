@@ -35,7 +35,13 @@ def started_jobs(monkeypatch) -> list[dict]:
     jobs: list[dict] = []
 
     def fake_start_job(
-        kind, work, *, output_dir = None, sources = None, with_progress = False
+        kind,
+        work,
+        *,
+        output_dir = None,
+        sources = None,
+        with_progress = False,
+        growth_ratio = None,
     ):
         jobs.append(
             {
@@ -43,6 +49,7 @@ def started_jobs(monkeypatch) -> list[dict]:
                 "output_dir": output_dir,
                 "sources": sources,
                 "with_progress": with_progress,
+                "growth_ratio": growth_ratio,
                 "work": work,
             }
         )
@@ -791,6 +798,39 @@ def test_a_finished_reshape_carries_its_structural_report(
     # so the loadability gate has to say discard on its own.
     assert result["structural_eval"]["verdict"] == "unloadable"
     assert result["structural_eval"]["gate"]["decision"] == "discard"
+
+
+def test_a_scale_run_hands_the_planned_growth_to_the_lease(
+    client: TestClient, tmp_path: Path, started_jobs, monkeypatch
+):
+    from core.advanced import scaling as scaling_module
+
+    source = _tokenized_checkpoint(tmp_path / "base")
+    planned = client.post("/api/advanced/scale/plan", json = {"source": source}).json()
+    output = tmp_path / "scaled"
+    output.mkdir()
+    monkeypatch.setattr(
+        scaling_module,
+        "run",
+        lambda *args, **kwargs: {
+            "final_params": planned["default_target_params"],
+            "verified": True,
+            "step0_max_logit_diff": 0.0,
+        },
+    )
+    client.post(
+        "/api/advanced/scale/run",
+        json = {
+            "source": source,
+            "target_params": planned["default_target_params"],
+            "output_dir": str(output),
+        },
+    )
+
+    assert started_jobs[-1]["kind"] == "scale"
+    assert started_jobs[-1]["growth_ratio"] == pytest.approx(
+        planned["default_target_params"] / planned["base_params"]
+    )
 
 
 def test_the_completion_check_warns_on_a_merge_that_only_loads(tmp_path: Path):

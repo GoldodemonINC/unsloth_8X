@@ -517,6 +517,13 @@ def run_auto_scale(request: AutoScaleRequest) -> dict[str, Any]:
             progress = progress,
         )
 
+    expansion = report.get("expansion") or {}
+    planned_base = float(expansion.get("base_params") or 0)
+    planned_target = float(expansion.get("target_params") or 0)
+    growth_ratio = (
+        planned_target / planned_base if planned_base > 0 and planned_target > 0 else None
+    )
+
     from routes.advanced import _start_job
 
     return _start_job(
@@ -525,6 +532,7 @@ def run_auto_scale(request: AutoScaleRequest) -> dict[str, Any]:
         output_dir = str(output),
         sources = [report["model"]],
         with_progress = True,
+        growth_ratio = growth_ratio,
     )
 
 

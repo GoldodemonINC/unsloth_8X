@@ -193,12 +193,36 @@ you to split the run. `growth_policy` reports `over_cap` and `requested_params`;
 owner and only the verdict differs.
 
 **CPU capability is explicit on every cost-model row.**
-`core/advanced/resources.py::_COST_MODEL` carried a `cpu` key on two of nine rows, so
+`core/advanced/resources.py::_COST_MODEL` had no `cpu` key on any row, so
 `cpu_capable = bool(model.get("cpu"))` read "absent" as "cannot". Every row now states
 it: `True` for merge, moe, split, scale, merge_eval and autoscale; `False` for eval,
-qat and cmt. No granted/denied outcome changed — on a GPU-less host, `scale` and
-`autoscale` still lease (their `vram` is zeroed and the note says the stage runs on
-CPU), while `eval`, `qat` and `cmt` still 409 with the GPU message.
+qat and cmt.
+
+That does move two outcomes on a GPU-less host, and those two are the point of the
+change. Sized against a real source checkpoint, the base file asked `scale` for 4.0
+times the checkpoint in video memory and `autoscale` for 3.0 times, against a machine
+reporting none, so both were refused with 409; their `vram` is now zeroed when there is
+no GPU and the note says the stage runs on CPU, so both lease. `eval`, `qat` and `cmt`
+are genuinely GPU-bound: denied before this branch, denied after, same GPU message.
+With no source to size, every kind already leased both before and after, because the
+video-memory ask is a multiple of zero.
+
+**Review response: the lease sizes RAM from the checkpoint the job will write.**
+The Major on this branch pointed out that on a GPU-less host `vram` is zeroed, so RAM
+is the only admission gate for `scale`, and the row reserved 1.0 times the *source*
+checkpoint while `scaling.run` really peaks at two *expanded* copies — it saves, then
+reloads to verify. A grown job could therefore be granted a lease the host cannot
+hold and die of memory exhaustion.
+
+`estimate` now takes `growth_ratio`, the planned checkpoint size as a multiple of the
+source, and multiplies the `ram` term by it. `scale`'s own multiplier went from 1.0 to
+2.0 so it matches the peak its own comment documents. `/scale/run` derives the ratio
+from `plan()`'s `base_params` and `target_params`, and `/labs/auto-scale/run` from
+`autoscale.plan()`'s `expansion`; both hand it to `_start_job`, which passes it to
+`acquire_for_job`, which passes it to `estimate`. A ratio below 1 clamps to 1, so a
+shrink cannot shrink the reservation. `vram` and `disk` multipliers are untouched:
+`vram` governs the GPU path, where moving it would change grant outcomes this branch
+is meant to hold still.
 
 ## Verification
 
