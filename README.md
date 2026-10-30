@@ -1,4 +1,4 @@
-# X8 — experimental features
+# X8 — Xperimental features
 
 This branch carries the experimental features and nothing else. No desktop shell,
 no HTTP server, no CLI, no training or inference stack. Each feature is a folder
