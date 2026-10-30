@@ -16,7 +16,7 @@ Files this work owns:
   pinned transport, proxy refusal, the retry loop, delivery records and threads.
 - `studio/backend/utils/webhook_settings.py` — webhook settings I/O and the address policy.
 - `studio/backend/routes/settings.py` — settings and test-event routes, delivery response models.
-- `studio/backend/tests/test_webhooks.py` — 103 tests covering all of the above.
+- `studio/backend/tests/test_webhooks.py` — 98 tests covering all of the above.
 
 ## What changed, and why
 
@@ -82,10 +82,17 @@ Assertions name bounds (`prefix_count`, `entries()`) instead of reaching into he
 internals. The flat-retention, floor-invariant and 200k-attribution tests are
 unchanged.
 
-**The unused delivery flag is gone.** `webhook_delivery.deliver` had a `record: bool`
-parameter that no caller ever passed; the entry is now always appended, and the
-single-use `_record` helper was inlined into the one place that wrote to the ring
-buffer.
+**The unused delivery parameters are gone.** `webhook_delivery.deliver` had a
+`record: bool` flag that no caller ever passed and a `timeout` override that no
+caller ever set, so the entry is now always appended, the timeout is always
+`REQUEST_TIMEOUT_S`, and the single-use `_record` helper was inlined into the one
+place that writes to the ring buffer. `send_test_event` no longer forwards a
+timeout either; `max_attempts` stays because the tests pass it. The malformed-URL
+table and the address-policy table no longer share rows: every address refusal
+(`link-local`, `multicast`, `unspecified`, `reserved`) is asserted by the
+address-policy test, which also checks `classify_webhook_host` and the resolver
+for the same host, so the URL-shape table keeps only scheme, credential, port and
+whitespace cases.
 
 ## How the module operates now
 
@@ -131,7 +138,7 @@ run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 
 ## Verification
 
-`130 passed`: 103 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
+`125 passed`: 98 in `studio/backend/tests/test_webhooks.py` plus 27 adjacent
 (`test_loss_anomaly_parity.py`, `test_parent_guard.py`). The webhook suites include a
 real TLS sink with an in-test CA, a wrong-name certificate rejection, a DNS-rebinding
 case, proxied-send refusal, and route-level assertions for surfaced errors.

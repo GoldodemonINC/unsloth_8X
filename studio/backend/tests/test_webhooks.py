@@ -223,11 +223,6 @@ def test_accepts_http_and_https_endpoints(url):
         ("https://user:secret@example.com/hook", "credentials"),
         ("http://example.com:notaport/hook", "port"),
         ("http://example.com/hook with space", "spaces"),
-        ("http://169.254.169.254/latest/meta-data/", "link-local"),
-        ("http://[::ffff:169.254.169.254]/hook", "link-local"),
-        ("http://224.0.0.1/hook", "multicast"),
-        ("http://0.0.0.0/hook", "unspecified"),
-        ("http://240.0.0.1/hook", "reserved"),
     ],
 )
 def test_refuses_non_http_or_malformed_endpoints(url, reason):

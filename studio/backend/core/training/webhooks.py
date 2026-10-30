@@ -198,7 +198,6 @@ def send_test_event(
     *,
     url: str,
     secret: str = "",
-    timeout: Optional[float] = None,
     max_attempts: Optional[int] = None,
 ) -> dict:
     normalized_url = validate_webhook_url(url)
@@ -218,7 +217,6 @@ def send_test_event(
         payload = payload,
         url = normalized_url,
         secret = secret,
-        timeout = timeout,
         max_attempts = max_attempts,
     )
     result["url"] = normalized_url

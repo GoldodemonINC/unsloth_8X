@@ -230,10 +230,9 @@ def deliver(
     payload: dict,
     url: str,
     secret: str,
-    timeout: Optional[float] = None,
     max_attempts: Optional[int] = None,
 ) -> dict:
-    timeout = REQUEST_TIMEOUT_S if timeout is None else timeout
+    timeout = REQUEST_TIMEOUT_S
     max_attempts = MAX_ATTEMPTS if max_attempts is None else max_attempts
     delivery_id = payload["delivery_id"]
     timestamp = payload["signature"]["timestamp"]
