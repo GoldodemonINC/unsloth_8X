@@ -6,7 +6,7 @@ from __future__ import annotations
 import heapq
 import math
 from collections import deque
-from typing import Iterable, Optional
+from typing import Iterable, NamedTuple, Optional
 
 MAX_RETAINED_POINTS = 8192
 BASELINE_WINDOW = 3600
@@ -16,30 +16,40 @@ SPIKE_BASELINE = 20
 CHECK_EVERY = 10
 
 
-def _floor_terms() -> list[tuple[str, int, int]]:
+class _FloorTerm(NamedTuple):
+    window: str
+    value: int
+    required: int
+
+
+def _floor_terms() -> list[_FloorTerm]:
     return [
-        ("RECENT_WINDOW", RECENT_WINDOW, RECENT_WINDOW + CHECK_EVERY),
-        ("BASELINE_WINDOW", BASELINE_WINDOW, 2 * BASELINE_WINDOW + CHECK_EVERY + 1),
-        ("PLATEAU_WINDOW", PLATEAU_WINDOW, PLATEAU_WINDOW + CHECK_EVERY),
-        ("SPIKE_BASELINE", SPIKE_BASELINE, SPIKE_BASELINE + CHECK_EVERY + 1),
+        _FloorTerm("RECENT_WINDOW", RECENT_WINDOW, RECENT_WINDOW + CHECK_EVERY),
+        _FloorTerm("BASELINE_WINDOW", BASELINE_WINDOW, 2 * BASELINE_WINDOW + CHECK_EVERY + 1),
+        _FloorTerm("PLATEAU_WINDOW", PLATEAU_WINDOW, PLATEAU_WINDOW + CHECK_EVERY),
+        _FloorTerm("SPIKE_BASELINE", SPIKE_BASELINE, SPIKE_BASELINE + CHECK_EVERY + 1),
     ]
 
 
+def _worst_term() -> _FloorTerm:
+    return max(_floor_terms(), key = lambda term: term.required)
+
+
 def retained_points_floor() -> int:
-    return max(required for _, _, required in _floor_terms())
+    return _worst_term().required
 
 
-def retention_refusal() -> Optional[str]:
-    window, value, required = max(_floor_terms(), key = lambda term: term[2])
-    if required <= MAX_RETAINED_POINTS:
+def _retention_refusal() -> Optional[str]:
+    worst = _worst_term()
+    if worst.required <= MAX_RETAINED_POINTS:
         return None
     return (
-        f"{window} = {value} requires {required} retained points, "
-        f"which exceeds MAX_RETAINED_POINTS = {MAX_RETAINED_POINTS}"
+        f"MAX_RETAINED_POINTS = {MAX_RETAINED_POINTS} is below the floor "
+        f"{worst.required} required by {worst.window} = {worst.value}"
     )
 
 
-if (refusal := retention_refusal()) is not None:
+if (refusal := _retention_refusal()) is not None:
     raise AssertionError(refusal)
 
 

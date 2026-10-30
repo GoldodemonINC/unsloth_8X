@@ -615,7 +615,7 @@ def test_the_retention_bound_stays_above_every_detector_window():
 
 
 def test_the_import_refusal_names_the_offending_window_and_its_value():
-    assert loss_anomaly.retention_refusal() is None
+    assert loss_anomaly._retention_refusal() is None
     for window in (
         "BASELINE_WINDOW",
         "RECENT_WINDOW",
@@ -626,13 +626,24 @@ def test_the_import_refusal_names_the_offending_window_and_its_value():
         original = getattr(loss_anomaly, window)
         setattr(loss_anomaly, window, moved)
         try:
-            refusal = loss_anomaly.retention_refusal()
+            refusal = loss_anomaly._retention_refusal()
             required = loss_anomaly.retained_points_floor()
         finally:
             setattr(loss_anomaly, window, original)
         assert refusal is not None, window
-        assert f"{window} = {moved} requires {required} retained points" in refusal, refusal
+        assert f"floor {required} required by {window} = {moved}" in refusal, refusal
         assert f"MAX_RETAINED_POINTS = {loss_anomaly.MAX_RETAINED_POINTS}" in refusal, refusal
+
+    floor = loss_anomaly.retained_points_floor()
+    original = loss_anomaly.MAX_RETAINED_POINTS
+    loss_anomaly.MAX_RETAINED_POINTS = floor - 1
+    try:
+        refusal = loss_anomaly._retention_refusal()
+    finally:
+        loss_anomaly.MAX_RETAINED_POINTS = original
+    assert refusal is not None
+    assert refusal.startswith(f"MAX_RETAINED_POINTS = {floor - 1}"), refusal
+    assert f"required by BASELINE_WINDOW = {loss_anomaly.BASELINE_WINDOW}" in refusal, refusal
 
 def test_a_late_anomaly_in_a_very_long_run_is_attributed_without_indexing_below_the_window(
     monkeypatch,

@@ -33,22 +33,25 @@ and NaN all still fire and attribute correctly deep into a long stream (proven a
 200,000 steps, and measured flat at 1.85 MB of retained state from 10k to 1M steps).
 
 **The bound is now tied to the windows, not to a lucky literal.**
-`_floor_terms()` holds the four window-to-bound relations and `retained_points_floor()`
-takes the largest of them; today that is 7,211 against the shipped 8,192. Three
+`_floor_terms()` holds the four window-to-bound relations as named `_FloorTerm`
+rows and `_worst_term()` is the single argmax over them: `retained_points_floor()`
+reads the worst term's requirement and `_retention_refusal()` builds the message
+from that same term, so which relation dominates is decided in one place. Today the
+floor is 7,211 against the shipped 8,192. Three
 relations make that floor necessary: the recent-window eviction loop reads one
 position behind the window start, the divergence baseline must finish filling before
 `base` overtakes it, and the spike baseline needs its full look-back below the first
 scanned index. Lowering the bound below the floor — or raising any window constant
-past the bound — fails at import with an `AssertionError` that names the offending
-window and its value, for example `BASELINE_WINDOW = 6000 requires 12011 retained
-points, which exceeds MAX_RETAINED_POINTS = 8192`, instead of always blaming the
-bound; `retention_refusal()` builds that message and returns `None` while the bound
-is safe. The check is an `if`/`raise`, not an `assert`, so it holds under `python -O`
+past the bound — fails at import with an `AssertionError` that states the broken
+relation with both sides named and neither blamed, for example `MAX_RETAINED_POINTS
+= 8192 is below the floor 12011 required by BASELINE_WINDOW = 6000`.
+The check is an `if`/`raise`, not an `assert`, so it holds under `python -O`
 exactly as under a normal interpreter. `test_the_retention_bound_stays_above_every_detector_window`
 fails on a broken bound and, independently, fails if any single term is dropped from
 the floor while the runtime check would still pass, and
 `test_the_import_refusal_names_the_offending_window_and_its_value` walks each window
-in turn and checks that the message names it.
+in turn and checks that the message names it, then lowers the bound and checks that
+the message leads with the bound.
 
 **Failure classification by kind, not by message matching.** Every delivery outcome
 carries a `failure_kind` drawn from a fixed set (`invalid`, `unresolvable`, `blocked`,
@@ -111,8 +114,8 @@ owner.
 
 - `loss_anomaly.py` holds `MAX_RETAINED_POINTS = 8192`, the windows
   (`BASELINE_WINDOW = 3600`, `RECENT_WINDOW = 3600`, `PLATEAU_WINDOW = 2600`,
-  `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `_floor_terms()`,
-  `retained_points_floor()`, `retention_refusal()` and the import-time refusal. It
+  `SPIKE_BASELINE = 20`, `CHECK_EVERY = 10`), `_floor_terms()`, `_worst_term()`,
+  `retained_points_floor()`, `_retention_refusal()` and the import-time refusal. It
   keeps no global state — a `LossAnomalyTracker` and a `RetainedSeries` are made per
   run by its caller.
 - `webhook_payload.py` holds the four wire-header names beside `build_payload`, so
