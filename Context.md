@@ -1,7 +1,8 @@
 # Context
 
 Working notes for picking the repository up cold. Scope: the webhook delivery and
-training-progress work done in this session.
+training-progress work, plus the Labs growth-policy and CPU-capability pass that
+followed it.
 
 Files this work owns:
 
@@ -164,7 +165,52 @@ run's curve to the retention bound, and checks for anomalies every 10 points onc
 run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 `plateau`, each alerted at most once per run.
 
+## Growth policy: one owner (this pass)
+
+The first fix pass repaired two bugs but reproduced the duplication that had caused
+the first one: `core/labs/pipelines.py::_plan_scale` re-derived the growth rules that
+`core/advanced/scaling.py` already owned. That is exactly how the old 2x floor went
+stale in the first place — `scaling` changed, `pipelines` silently did not.
+
+`scaling.growth_policy(base_params, *, target_params, added_params)` is now the single
+owner of the growth arithmetic. It returns the requested target, the clamped target,
+the default (base + 10%, clamped at the ceiling), the ceiling itself, the no-growth
+refusal sentence, and the measured-range note. Both callers ask it:
+
+- `scaling.plan()` assembles its report from that one result: `floor_params`,
+  `max_params`, `default_target_params`, `target_params`, `target_below_floor` and the
+  `no_growth` refusal all come from it, so the Scaler no longer computes them twice.
+- `pipelines._plan_scale` passes the chain's *running* parameter count as the base. It
+  cannot delegate to `scaling.plan()`, because `plan()` derives its base from the
+  stage's own `config.json`, while a scale stage in the middle of a chain grows from
+  whatever the previous stage produced.
+
+Two product decisions deliberately stay in `pipelines`, because the two surfaces
+really do differ: the Scaler *clamps* a target past `CAP_ADDED_PARAMS` down to the
+ceiling (the slider cannot ask for more), while a pipeline stage *refuses* it and asks
+you to split the run. `growth_policy` reports `over_cap` and `requested_params`;
+`pipelines` renders its own refusal from them, so the ceiling arithmetic still has one
+owner and only the verdict differs.
+
+**CPU capability is explicit on every cost-model row.**
+`core/advanced/resources.py::_COST_MODEL` carried a `cpu` key on two of nine rows, so
+`cpu_capable = bool(model.get("cpu"))` read "absent" as "cannot". Every row now states
+it: `True` for merge, moe, split, scale, merge_eval and autoscale; `False` for eval,
+qat and cmt. No granted/denied outcome changed — on a GPU-less host, `scale` and
+`autoscale` still lease (their `vram` is zeroed and the note says the stage runs on
+CPU), while `eval`, `qat` and `cmt` still 409 with the GPU message.
+
 ## Verification
+
+This pass: `126 passed` across `test_labs_artifacts.py`, `test_advanced_scaling.py`,
+`test_advanced_resources.py`, `test_advanced_routes.py`,
+`test_advanced_scaling_routes.py`, `test_labs.py`, `test_labs_autoscale.py` and
+`test_labs_cmt.py`; `67 passed` across the whole `tests/test_labs_*` set. Three tests
+pin the new structure: `test_the_scale_refusal_is_the_scaler_own_policy` and
+`test_the_default_growth_target_is_the_scaler_default` fail if `pipelines` stops
+delegating, and `test_every_cost_model_row_states_its_cpu_capability` fails if a row
+loses its `cpu` key. A live `_start_job` probe against this host's real memory probe
+(gpus = [], vram_free = 0) reproduced the grant/deny table exactly.
 
 `133 passed`: 104 in `studio/backend/tests/test_webhooks.py`, 2 in
 `studio/backend/tests/test_end_to_end_webhook.py`, plus 27 adjacent
@@ -191,5 +237,14 @@ files in the working tree.
 
 ## Next task
 
-None open: the refusal now names the offending window and its value, as described in
-the bound section above.
+Open: this branch still has nothing committed. Exactly six paths belong to this thread
+and no others — `Context.md`, `studio/backend/core/advanced/scaling.py`,
+`studio/backend/core/labs/pipelines.py`,
+`studio/backend/core/advanced/resources.py`,
+`studio/backend/tests/test_labs_artifacts.py` and
+`studio/backend/tests/test_advanced_resources.py`. The checkout carries about 40 more
+changed paths from concurrent sessions: 24 modified files under `studio/frontend/`,
+plus untracked `.playtest-library/`, `AGENTS.md`, `Project skills/`,
+`docs/releases/2026.5.0.md` and `studio/src-tauri/x8-updater.key.pub`. Stage those six
+by name, never `git add -A`, commit them with a body naming both fixes and the
+consolidation, and open the pull request against `x8-main`.

@@ -28,10 +28,10 @@ from typing import Any, Mapping, Optional
 from core.advanced import eval_harness, nrc_license, repair
 from core.advanced.scaling import (
     CAP_ADDED_PARAMS,
-    GROWTH_FLOOR,
     METHODS,
     _base_params,
     _project,
+    growth_policy,
 )
 
 STAGE_KINDS = ("merge", "scale", "train", "quantize", "benchmark")
@@ -244,30 +244,22 @@ def _plan_scale(stage: dict[str, Any], spec: Mapping[str, Any], current: Optiona
     if factor is not None:
         if factor <= 1:
             return _blocked(stage, "factor must be greater than 1.", current)
-        goal = float(current) * factor
-    elif target is not None:
-        goal = target
-    elif added is not None:
-        goal = float(current) + added
-    else:
-        goal = float(current) * GROWTH_FLOOR
+        target, added = float(current) * factor, None
 
-    floor = float(current) * GROWTH_FLOOR
-    if goal < floor:
+    policy = growth_policy(current, target_params = target, added_params = added)
+    if policy["refusal"] is not None:
+        return _blocked(stage, policy["refusal"], current)
+    if policy["over_cap"]:
         return _blocked(
             stage,
-            f"{_format_params(goal)} is {goal / current:.2f}x this checkpoint. Growth below "
-            f"{GROWTH_FLOOR:g}x is refused: no growth study reports a gain below it, and the run "
-            f"costs the same as a real one. Target {_format_params(floor)} or more.",
+            f"Adding {_format_params(policy['requested_params'] - current)} is past the "
+            f"{_format_params(CAP_ADDED_PARAMS)} ceiling the Scaler enforces. Split the "
+            "growth into two runs, or target less.",
             current,
         )
-    if goal - current > CAP_ADDED_PARAMS:
-        return _blocked(
-            stage,
-            f"Adding {_format_params(goal - current)} is past the {_format_params(CAP_ADDED_PARAMS)} "
-            "ceiling the Scaler enforces. Split the growth into two runs, or target less.",
-            current,
-        )
+    goal = policy["target_params"]
+    if policy["measured_note"] is not None:
+        stage["warnings"].append(policy["measured_note"])
 
     config = _config_of(spec.get("source")) or _config_of(spec.get("path"))
     projection = None

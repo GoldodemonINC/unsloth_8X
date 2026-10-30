@@ -42,25 +42,25 @@ DISK_HEADROOM = 0.90
 # the output needs.
 _COST_MODEL: dict[str, dict[str, Any]] = {
     # Streaming merge: one tensor pair resident, one output copy on disk.
-    "merge": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False},
-    "moe": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.10, "gpu": False},
+    "merge": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False, "cpu": True},
+    "moe": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.10, "gpu": False, "cpu": True},
     # Splitting reads one tensor and writes one bucket at a time.
-    "split": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False},
+    "split": {"vram": 0.0, "ram_stream": 2.2, "disk": 1.05, "gpu": False, "cpu": True},
     # Expansion holds the grown model and, while it verifies the save, a
     # reloaded copy of it: peak is about two expanded checkpoints.
-    "scale": {"vram": 4.0, "ram": 1.0, "disk": 1.5, "gpu": True},
+    "scale": {"vram": 4.0, "ram": 1.0, "disk": 1.5, "gpu": True, "cpu": True},
     # Structural merge-eval on CPU: both parents are memory-mapped, tiny working set.
-    "merge_eval": {"vram": 0.0, "ram_stream": 3.0, "disk": 0.02, "gpu": False},
+    "merge_eval": {"vram": 0.0, "ram_stream": 3.0, "disk": 0.02, "gpu": False, "cpu": True},
     # Benchmark harness loads one full model on the GPU.
-    "eval": {"vram": 1.25, "ram": 0.35, "disk": 0.05, "gpu": True},
-    "qat": {"vram": 1.30, "ram": 0.30, "disk": 0.10, "gpu": True},
+    "eval": {"vram": 1.25, "ram": 0.35, "disk": 0.05, "gpu": True, "cpu": False},
+    "qat": {"vram": 1.30, "ram": 0.30, "disk": 0.10, "gpu": True, "cpu": False},
     # CMT holds the expanded model, freezes the inherited weights, and trains
     # only the inserted blocks. The optimizer state is small, but the model,
     # activations and the saved expanded copy are not.
-    "cmt": {"vram": 3.00, "ram": 1.50, "disk": 2.50, "gpu": True},
+    "cmt": {"vram": 3.00, "ram": 1.50, "disk": 2.50, "gpu": True, "cpu": False},
     # Auto-scale expands a checkpoint and saves it, with no training after it:
     # the same growth as CMT without the optimizer or the activations.
-    "autoscale": {"vram": 3.00, "ram": 1.00, "disk": 1.50, "gpu": True},
+    "autoscale": {"vram": 3.00, "ram": 1.00, "disk": 1.50, "gpu": True, "cpu": True},
 }
 
 
@@ -186,9 +186,14 @@ def estimate(
     largest = max((largest_tensor_bytes(path) for path in paths), default = 0)
     profile = dict(memory or probe_memory())
     gpus = profile.get("gpus") or []
+    cpu_capable = bool(model.get("cpu"))
 
     notes: list[str] = []
-    vram = int(total * float(model.get("vram", 0.0)))
+    vram = (
+        0
+        if cpu_capable and not gpus
+        else int(total * float(model.get("vram", 0.0)))
+    )
     if model.get("ram_stream"):
         if largest:
             ram = int(largest * float(model["ram_stream"]))
@@ -207,6 +212,8 @@ def estimate(
     if model.get("gpu") and not gpus:
         notes.append(
             "This stage needs a GPU; the host reported none. It can be planned but not run here."
+            if not cpu_capable
+            else "No GPU here, so this stage runs on the CPU. It works, just slower than on a GPU."
         )
     return {
         "kind": kind,

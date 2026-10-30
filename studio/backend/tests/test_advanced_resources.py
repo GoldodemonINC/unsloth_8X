@@ -19,6 +19,10 @@ from core.advanced import resources
 
 GB = 1024**3
 
+CPU_HOST_GRANTS = ("autoscale", "merge", "merge_eval", "moe", "scale", "split")
+GPU_ONLY = ("cmt", "eval", "qat")
+CPU_HOST_NOTED = ("autoscale", "scale")
+
 
 def _profile(*, vram: float = 24, ram: float = 64, disk: float = 500) -> dict:
     return {
@@ -54,6 +58,18 @@ def _checkpoint(directory: Path, *, tensors: int = 4, size: int = 8 * 1024 * 102
         encoding = "utf-8",
     )
     return directory
+
+
+def test_every_cost_model_row_states_its_cpu_capability():
+    for kind, model in resources._COST_MODEL.items():
+        assert isinstance(model.get("cpu"), bool), kind
+
+
+def test_the_cpu_contract_covers_every_row_exactly_once():
+    assert set(CPU_HOST_GRANTS) | set(GPU_ONLY) == set(resources._COST_MODEL)
+    assert set(CPU_HOST_GRANTS).isdisjoint(GPU_ONLY)
+    for kind in resources._COST_MODEL:
+        assert resources._COST_MODEL[kind]["cpu"] == (kind in CPU_HOST_GRANTS), kind
 
 
 def test_merge_estimate_is_streaming_not_whole_model(tmp_path: Path):
@@ -134,3 +150,36 @@ def test_wait_returns_a_clear_reason_instead_of_blocking_forever():
     )
     assert result["status"] == "queued"
     assert "queued" in result["reason"]
+
+
+@pytest.mark.parametrize("kind", CPU_HOST_GRANTS)
+def test_a_cpu_capable_stage_is_leased_on_a_host_with_no_gpu(tmp_path: Path, kind: str):
+    source = _checkpoint(tmp_path / "model")
+    memory = _profile(vram = 0)
+    payload = resources.estimate(kind, sources = [source], memory = memory)
+    assert payload["need"]["vram_bytes"] == 0
+    assert not any("needs a GPU" in note for note in payload["notes"])
+    broker = resources.ResourceBroker(probe = lambda: memory)
+    result = broker.acquire("job-1", kind, resources.Need(**payload["need"]))
+    assert result["status"] == "granted"
+
+
+@pytest.mark.parametrize("kind", CPU_HOST_NOTED)
+def test_a_stage_that_will_run_on_cpu_says_so(tmp_path: Path, kind: str):
+    source = _checkpoint(tmp_path / "model")
+    payload = resources.estimate(kind, sources = [source], memory = _profile(vram = 0))
+    assert any("runs on the CPU" in note for note in payload["notes"])
+
+
+@pytest.mark.parametrize("kind", GPU_ONLY)
+def test_a_gpu_only_stage_is_still_refused_on_a_host_with_no_gpu(tmp_path: Path, kind: str):
+    source = _checkpoint(tmp_path / "model")
+    memory = _profile(vram = 0)
+    payload = resources.estimate(kind, sources = [source], memory = memory)
+    assert payload["need"]["vram_bytes"] > 0
+    assert any("can be planned but not run here" in note for note in payload["notes"])
+    broker = resources.ResourceBroker(probe = lambda: memory)
+    result = broker.acquire("job-1", kind, resources.Need(**payload["need"]))
+    assert result["status"] == "denied"
+    assert "GPU memory" in result["reason"]
+    assert "this machine offers at most" in result["reason"]
