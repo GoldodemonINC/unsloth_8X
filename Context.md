@@ -1,7 +1,8 @@
 # Context
 
 Working notes for picking the repository up cold. Scope: the webhook delivery and
-training-progress work done in this session.
+training-progress work, plus the Labs growth-policy and CPU-capability pass that
+followed it.
 
 Files this work owns:
 
@@ -164,7 +165,76 @@ run's curve to the retention bound, and checks for anomalies every 10 points onc
 run has at least 8 points. The detector reports `nan`, `divergence`, `spike` and
 `plateau`, each alerted at most once per run.
 
+## Growth policy: one owner (this pass)
+
+The first fix pass repaired two bugs but reproduced the duplication that had caused
+the first one: `core/labs/pipelines.py::_plan_scale` re-derived the growth rules that
+`core/advanced/scaling.py` already owned. That is exactly how the old 2x floor went
+stale in the first place — `scaling` changed, `pipelines` silently did not.
+
+`scaling.growth_policy(base_params, *, target_params, added_params)` is now the single
+owner of the growth arithmetic. It returns the requested target, the clamped target,
+the default (base + 10%, clamped at the ceiling), the ceiling itself, the no-growth
+refusal sentence, and the measured-range note. Both callers ask it:
+
+- `scaling.plan()` assembles its report from that one result: `floor_params`,
+  `max_params`, `default_target_params`, `target_params`, `target_below_floor` and the
+  `no_growth` refusal all come from it, so the Scaler no longer computes them twice.
+- `pipelines._plan_scale` passes the chain's *running* parameter count as the base. It
+  cannot delegate to `scaling.plan()`, because `plan()` derives its base from the
+  stage's own `config.json`, while a scale stage in the middle of a chain grows from
+  whatever the previous stage produced.
+
+Two product decisions deliberately stay in `pipelines`, because the two surfaces
+really do differ: the Scaler *clamps* a target past `CAP_ADDED_PARAMS` down to the
+ceiling (the slider cannot ask for more), while a pipeline stage *refuses* it and asks
+you to split the run. `growth_policy` reports `over_cap` and `requested_params`;
+`pipelines` renders its own refusal from them, so the ceiling arithmetic still has one
+owner and only the verdict differs.
+
+**CPU capability is explicit on every cost-model row.**
+`core/advanced/resources.py::_COST_MODEL` had no `cpu` key on any row, so
+`cpu_capable = bool(model.get("cpu"))` read "absent" as "cannot". Every row now states
+it: `True` for merge, moe, split, scale, merge_eval and autoscale; `False` for eval,
+qat and cmt.
+
+That does move two outcomes on a GPU-less host, and those two are the point of the
+change. Sized against a real source checkpoint, the base file asked `scale` for 4.0
+times the checkpoint in video memory and `autoscale` for 3.0 times, against a machine
+reporting none, so both were refused with 409; their `vram` is now zeroed when there is
+no GPU and the note says the stage runs on CPU, so both lease. `eval`, `qat` and `cmt`
+are genuinely GPU-bound: denied before this branch, denied after, same GPU message.
+With no source to size, every kind already leased both before and after, because the
+video-memory ask is a multiple of zero.
+
+**Review response: the lease sizes RAM from the checkpoint the job will write.**
+The Major on this branch pointed out that on a GPU-less host `vram` is zeroed, so RAM
+is the only admission gate for `scale`, and the row reserved 1.0 times the *source*
+checkpoint while `scaling.run` really peaks at two *expanded* copies — it saves, then
+reloads to verify. A grown job could therefore be granted a lease the host cannot
+hold and die of memory exhaustion.
+
+`estimate` now takes `growth_ratio`, the planned checkpoint size as a multiple of the
+source, and multiplies the `ram` term by it. `scale`'s own multiplier went from 1.0 to
+2.0 so it matches the peak its own comment documents. `/scale/run` derives the ratio
+from `plan()`'s `base_params` and `target_params`, and `/labs/auto-scale/run` from
+`autoscale.plan()`'s `expansion`; both hand it to `_start_job`, which passes it to
+`acquire_for_job`, which passes it to `estimate`. A ratio below 1 clamps to 1, so a
+shrink cannot shrink the reservation. `vram` and `disk` multipliers are untouched:
+`vram` governs the GPU path, where moving it would change grant outcomes this branch
+is meant to hold still.
+
 ## Verification
+
+This pass: `126 passed` across `test_labs_artifacts.py`, `test_advanced_scaling.py`,
+`test_advanced_resources.py`, `test_advanced_routes.py`,
+`test_advanced_scaling_routes.py`, `test_labs.py`, `test_labs_autoscale.py` and
+`test_labs_cmt.py`; `67 passed` across the whole `tests/test_labs_*` set. Three tests
+pin the new structure: `test_the_scale_refusal_is_the_scaler_own_policy` and
+`test_the_default_growth_target_is_the_scaler_default` fail if `pipelines` stops
+delegating, and `test_every_cost_model_row_states_its_cpu_capability` fails if a row
+loses its `cpu` key. A live `_start_job` probe against this host's real memory probe
+(gpus = [], vram_free = 0) reproduced the grant/deny table exactly.
 
 `133 passed`: 104 in `studio/backend/tests/test_webhooks.py`, 2 in
 `studio/backend/tests/test_end_to_end_webhook.py`, plus 27 adjacent
@@ -177,6 +247,50 @@ A bounded backend run over the webhook surface and every `routes/settings` impor
 pre-change baseline (identical failure set: symlink privilege, the Unix-only
 `resource` module, HOME/XDG path assertions), so none of this thread's changes moved
 that surface.
+
+Review round on PR #20: `134 passed` across `test_advanced_resources.py`,
+`test_advanced_routes.py`, `test_advanced_scaling_routes.py`, `test_labs_autoscale.py`,
+`test_labs.py`, `test_labs_artifacts.py` and `test_advanced_scaling.py`, then
+`17 passed` in `test_labs_cmt.py` and `test_labs_repair.py` — the suites that reach
+`_start_job`, whose signature grew. No comments were added and line endings stayed
+uniform; `git add` reports 126 insertions and 9 deletions across the six files, so
+nothing was rewritten wholesale.
+
+## Performance: `observe_progress` at 10k, 50k, 100k steps
+
+One point per training step over a decaying-loss curve, min of three runs each,
+Python 3.12.13 on this host:
+
+| steps | total | steady µs/point | checks disabled | anomalies |
+| --- | --- | --- | --- | --- |
+| 10000 | 0.25 s | 31.6 | 11.9 | 1 |
+| 50000 | 2.67 s | 55.7 | 23.8 | 1 |
+| 100000 | 6.17 s | 51.2 | 24.0 | 1 |
+
+Steady cost is the last 5,000 points of each run. The wall-clock ratios are not
+linear because the first 8,192 points run in the cheap pre-retention regime at
+about 13 µs each: a 10k run is mostly pre-retention, a 100k run is not, so the
+mix differs even though neither regime grows.
+
+Three findings:
+
+- **Cost does not grow with run length.** With checks disabled the last 5,000
+  points cost 23.79 µs each at 50k and 24.01 µs each at 100k. Sampling
+  5,000-point windows across one 100k run gives 48–137 µs with no upward trend;
+  that spread is machine noise from the concurrent sessions on this host.
+- **Detection stays bounded.** Retention holds exactly `MAX_RETAINED_POINTS`
+  (8192) points at every depth, a check runs every 10 points, and each run
+  surfaced exactly one anomaly — a plateau on this curve.
+- **The front trim is the base cost.** `del points[:1]` on the 8,192-element
+  retained list measured 18.4 µs in isolation against 19.2 µs for the whole
+  checks-disabled path: one memmove of 8,191 pointers per point, roughly half
+  of the steady cost.
+
+The trim was deliberately left alone. Batching it would break
+`test_end_to_end_webhook.py`, which asserts `len(state["points"]) == bound`
+exactly after eviction, and a ring-buffer or deque replacement would rewrite the
+`RetainedSeries` indexing the parity suite depends on. The saving is about 1.8 s
+on a run that takes hours, which does not pay for either risk.
 
 ## Not part of this work
 
@@ -191,5 +305,36 @@ files in the working tree.
 
 ## Next task
 
-None open: the refusal now names the offending window and its value, as described in
-the bound section above.
+Delivered. The six paths that belong to this thread — `Context.md`,
+`studio/backend/core/advanced/scaling.py`, `studio/backend/core/labs/pipelines.py`,
+`studio/backend/core/advanced/resources.py`,
+`studio/backend/tests/test_labs_artifacts.py` and
+`studio/backend/tests/test_advanced_resources.py` — are committed as `56ffc47cf`
+on branch `x8-growth-policy`, pushed to the `x8` remote, and open as PR #20
+against `x8-main` with no auto-merge:
+https://github.com/GoldodemonINC/unsloth_8X/pull/20
+
+Two further commits ride the same branch: `eaa37fbeb` records the `observe_progress`
+benchmark below, and `297bedb42` answers the review.
+
+The index is clean. The other 43 entries in `git status` belong to concurrent
+sessions — 24 modified files under `studio/frontend/` (that session owns the
+frontend gate matrix), plus untracked `.playtest-library/`, `AGENTS.md`,
+`Project skills/`, `docs/releases/2026.5.0.md` and
+`studio/src-tauri/x8-updater.key.pub`. Stage by name, never `git add -A`.
+
+Backend gate for this thread has run: 268 passed, exit 0, across the four webhook
+suites and the eight labs and advanced suites. No backend lint gate is wired —
+ruff is configured in the root `pyproject.toml` but is not installed in either
+virtualenv.
+
+PR #20 has had one review: three findings, all three answered — two corrections to
+this file (one of them already fixed in `eaa37fbeb` before the review ran) and the
+RAM sizing Major in `297bedb42`. It is waiting on re-review and a merge.
+
+Two engineering items are open and deliberately deferred. The `disk` multiplier on the
+`scale` row has the same under-reservation the `ram` fix just closed: the review asked
+for RAM, and disk would size from `growth_ratio` the same way, but that is a separate
+decision. The front-trim decision recorded under Performance needs
+`test_end_to_end_webhook.py` relaxed or `RetainedSeries` moved to a deque, and the
+measured saving does not justify either.

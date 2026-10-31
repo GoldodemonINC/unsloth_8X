@@ -45,6 +45,7 @@ CAP_ADDED_PARAMS = 3_000_000_000
 # Growth must add something, and that is the whole floor: below 2x the literature
 # has not measured a gain, which the plan reports as a note rather than a refusal.
 GROWTH_FLOOR = 1.0
+MEASURED_GROWTH_FLOOR = 2.0
 
 # ``unsloth.models.scaling`` aligns widened MLP channels to this multiple.
 WIDTH_ALIGNMENT = 64
@@ -768,6 +769,50 @@ def _shrink_plan(
     }
 
 
+def growth_policy(
+    base_params: Optional[int],
+    *,
+    target_params: Optional[float] = None,
+    added_params: Optional[float] = None,
+) -> dict[str, Any]:
+    base = int(base_params or 0)
+    cap = base + CAP_ADDED_PARAMS
+    floor_params = int(math.ceil(base * GROWTH_FLOOR))
+    default = min(max(base + max(1, int(0.1 * base)), floor_params), cap) if base else base
+    if added_params is not None and base:
+        requested = float(base) + float(added_params)
+    elif target_params is not None:
+        requested = float(target_params)
+    else:
+        requested = float(default)
+    target = float(min(max(requested, base), cap)) if base else requested
+    below_floor = bool(base) and target <= base
+    return {
+        "min_params": base,
+        "max_params": cap,
+        "floor_params": floor_params,
+        "default_target_params": default,
+        "target_params": target,
+        "requested_params": requested,
+        "over_cap": requested > cap,
+        "below_floor": below_floor,
+        "refusal": (
+            f"{_format_params(target)} is not larger than this checkpoint's "
+            f"{_format_params(base)}. Add at least one parameter, or plan a shrink with a "
+            "target below the base."
+            if below_floor
+            else None
+        ),
+        "measured_note": (
+            f"{_format_params(target)} is {target / base:.2f}x this checkpoint, below the "
+            f"{MEASURED_GROWTH_FLOOR:g}x where growth gains have been measured: no study "
+            "reports a gain this small, so the step is an experiment rather than a safe bet."
+            if base and target < base * MEASURED_GROWTH_FLOOR
+            else None
+        ),
+    }
+
+
 def plan(
     source: str,
     *,
@@ -817,26 +862,15 @@ def plan(
             token = token,
         )
 
-    cap = (base_params or 0) + CAP_ADDED_PARAMS
-    floor_params = int(math.ceil((base_params or 0) * GROWTH_FLOOR))
-    min_params = int(base_params or 0)
-
     refusals = _refusals(source, config, base_params)
     blocking = [item for item in refusals if item["blocks"]]
 
-    # With the floor at 1x, defaulting to it would plan a no-op: ask for 10% instead.
-    default_target = (
-        min(max(min_params + max(1, int(0.1 * min_params)), floor_params), cap)
-        if base_params
-        else min_params
-    )
-    if added_params is not None and base_params:
-        target = float(base_params) + float(added_params)
-    elif target_params:
-        target = float(target_params)
-    else:
-        target = float(default_target)
-    target = float(min(max(target, min_params), cap)) if base_params else target
+    policy = growth_policy(base_params, target_params = target_params, added_params = added_params)
+    target = policy["target_params"]
+    min_params = policy["min_params"]
+    cap = policy["max_params"]
+    floor_params = policy["floor_params"]
+    default_target = policy["default_target_params"]
 
     projection = (
         _project(config, base_params = int(base_params), target_params = target, method = method)
@@ -844,17 +878,8 @@ def plan(
         else None
     )
 
-    # The floor is 1x, so the only impossible growth is none at all.
-    below_floor = bool(base_params) and target <= min_params
-    if below_floor:
-        refusals = refusals + [
-            _refusal(
-                "no_growth",
-                f"{_format_params(target)} is not larger than this checkpoint's "
-                f"{_format_params(min_params)}. Add at least one parameter, or plan a shrink "
-                "with a target below the base.",
-            )
-        ]
+    if policy["refusal"] is not None:
+        refusals = refusals + [_refusal("no_growth", policy["refusal"])]
 
     available, engine_error = engine_available()
     if not available:
@@ -866,16 +891,16 @@ def plan(
         ]
 
     blocked_reason = blocking[0]["message"] if blocking else None
-    if blocked_reason is None and below_floor:
-        blocked_reason = next(item["message"] for item in refusals if item["code"] == "no_growth")
+    if blocked_reason is None and policy["below_floor"]:
+        blocked_reason = policy["refusal"]
 
     notes = [
         "Parameter counts are read from config.json and are analytic; the run reports the "
         "measured count after expansion.",
         "Depth growth is bit-exact at step 0. Width growth is not: widening down_proj makes "
         "float32 re-associate the sum, so the logits move by ~1e-5 of their own scale.",
-        "Any growth above the base is allowed. Below 2x no study reports a measured gain, so "
-        "a small step is a real experiment rather than a safe bet.",
+        f"Any growth above the base is allowed. Below {MEASURED_GROWTH_FLOOR:g}x no study "
+        "reports a measured gain, so a small step is a real experiment rather than a safe bet.",
     ]
 
     return {
@@ -906,11 +931,11 @@ def plan(
         "method_label": METHOD_LABELS[method],
         "methods": [{"id": key, "label": METHOD_LABELS[key]} for key in METHODS],
         "projection": projection,
-        "target_below_floor": below_floor,
+        "target_below_floor": policy["below_floor"],
         "refusals": refusals,
         "blocked": bool(blocking),
         "blocked_reason": blocked_reason,
-        "runnable": not blocking and not below_floor,
+        "runnable": not blocking and not policy["below_floor"],
         "engine": {"available": available, "error": engine_error},
         "notes": notes,
     }
@@ -1140,7 +1165,7 @@ def run(
     if report["target_below_floor"] and force_small_growth:
         report.setdefault("notes", []).append(
             f"Growth is {float(report['target_params']) / max(1, report['base_params']):.2f}x, "
-            "below the evidenced 2x floor; this run opted in deliberately."
+            f"below the evidenced {MEASURED_GROWTH_FLOOR:g}x floor; this run opted in deliberately."
         )
 
     stage("resolving", "Resolving the checkpoint...")

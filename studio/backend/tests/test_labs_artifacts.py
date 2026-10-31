@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from core.advanced import scaling
 from core.labs import artifacts, pipelines
 
 LLAMA = {
@@ -153,11 +154,47 @@ def test_a_growth_chain_is_priced_and_warned_about(tmp_path):
     assert any("recovery" in warning for warning in report["warnings"])
 
 
-def test_growth_below_the_floor_is_blocked_with_the_number(tmp_path):
+def test_growth_below_the_measured_range_is_priced_and_marked(tmp_path):
     source = _checkpoint(tmp_path / "base")
     report = pipelines.preflight(_spec(source, {"kind": "scale", "factor": 1.5}))
+    assert report["blocked"] is False, report["blocked_reason"]
+    assert report["stages"][0]["details"]["target_params"] > 0
+    assert any("1.50x" in warning and "measured" in warning for warning in report["warnings"])
+
+
+def test_growth_that_adds_nothing_is_blocked_with_the_number(tmp_path):
+    source = _checkpoint(tmp_path / "base")
+    report = pipelines.preflight(_spec(source, {"kind": "scale", "added_params": -1000}))
     assert report["blocked"] is True
-    assert "2x" in report["blocked_reason"].lower() or "1.50x" in report["blocked_reason"]
+    assert "not larger than" in report["blocked_reason"]
+    assert "shrink" in report["blocked_reason"]
+
+
+def test_a_scale_stage_with_no_target_plans_growth_not_a_no_op(tmp_path):
+    source = _checkpoint(tmp_path / "base")
+    report = pipelines.preflight(_spec(source, {"kind": "scale"}))
+    stage = report["stages"][0]
+    assert report["blocked"] is False, report["blocked_reason"]
+    assert stage["details"]["target_params"] > stage["params_before"]
+
+
+def test_the_scale_refusal_is_the_scaler_own_policy(tmp_path):
+    source = _checkpoint(tmp_path / "base")
+    report = pipelines.preflight(_spec(source, {"kind": "scale", "added_params": -1000}))
+    stage = report["stages"][0]
+    policy = scaling.growth_policy(stage["params_before"], added_params = -1000)
+
+    assert policy["refusal"] is not None
+    assert stage["reason"] == policy["refusal"]
+
+
+def test_the_default_growth_target_is_the_scaler_default(tmp_path):
+    source = _checkpoint(tmp_path / "base")
+    report = pipelines.preflight(_spec(source, {"kind": "scale"}))
+    stage = report["stages"][0]
+    policy = scaling.growth_policy(stage["params_before"])
+
+    assert stage["details"]["target_params"] == policy["default_target_params"]
 
 
 def test_growth_past_the_cap_is_blocked(tmp_path):
